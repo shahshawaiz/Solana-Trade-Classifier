@@ -1,6 +1,6 @@
 {
-  "name": "Solana Quant Alpha",
-  "description": "Multi-modal trading strategy backtester for Solana, integrating sentiment analysis, technical indicators, and liquidity simulations.",
+  "name": "Cortex Alpha: Multimodal Quant",
+  "description": "Multi-modal quantum trading framework integrating semantic catalyst intelligence with technical market vectors.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
