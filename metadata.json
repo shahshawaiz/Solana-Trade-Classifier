@@ -1,0 +1,6 @@
+{
+  "name": "Solana Quant Alpha",
+  "description": "Multi-modal trading strategy backtester for Solana, integrating sentiment analysis, technical indicators, and liquidity simulations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
