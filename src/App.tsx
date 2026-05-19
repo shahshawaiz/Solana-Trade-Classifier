@@ -85,11 +85,13 @@ export default function App() {
   const [lookback, setLookback] = useState(7); // Days
   const [interval, setInterval] = useState("1h");
   const [query, setQuery] = useState("Solana");
+  const [token, setToken] = useState("SOL");
+  const [predictionHeadlines, setPredictionHeadlines] = useState<any[]>([]);
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const histRes = await fetch(`/api/historical?lookback=${lookback}&interval=${interval}`);
+      const histRes = await fetch(`/api/historical?token=${token}&lookback=${lookback}&interval=${interval}`);
       const newsRes = await fetch(`/api/news?q=${encodeURIComponent(query)}`);
 
       const hist = await histRes.json();
@@ -111,7 +113,7 @@ export default function App() {
           rsi: rsis[i],
           emaFast: emaFast[i],
           emaSlow: emaSlow[i],
-          sentiment: Math.random() * 0.4 - 0.2, // Simulation
+          sentiment: Math.random() * 0.4 - 0.2, // Simulation for historical
           liquidity: Math.random() > 0.8 ? (Math.random() > 0.5 ? 1 : -1) : 0
         }));
 
@@ -122,11 +124,12 @@ export default function App() {
       const predRes = await fetch("/api/predict", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, weights })
+        body: JSON.stringify({ token, query, weights })
       });
       const predData = await predRes.json();
       if (predData.sentiment !== undefined) {
         setSentiment({ score: predData.sentiment, rationale: predData.rationale });
+        if (predData.headlines) setPredictionHeadlines(predData.headlines);
       }
 
     } catch (error) {
@@ -141,7 +144,7 @@ export default function App() {
       fetchData();
     }, 500); // Debounce
     return () => clearTimeout(timer);
-  }, [lookback, interval, query]);
+  }, [lookback, interval, query, token]);
 
   const results = useMemo(() => {
     if (data.length === 0) return null;
@@ -180,7 +183,7 @@ export default function App() {
           <div className="hidden md:flex gap-6 text-[11px] uppercase tracking-[0.1em] text-text-dim font-mono bg-bg-input px-4 py-1.5 rounded-full border border-border-dim">
             <div className="flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-sol-green"></span> 
-              SOL/USD ${results?.data && results.data.length > 0 ? results.data[results.data.length - 1]?.close.toFixed(2) : "---"}
+              {token.toUpperCase()}/USD ${results?.data && results.data.length > 0 ? results.data[results.data.length - 1]?.close.toFixed(2) : "---"}
             </div>
           </div>
         </div>
@@ -191,14 +194,25 @@ export default function App() {
         <aside className="w-80 border-r border-border-dim bg-bg-card p-6 flex flex-col gap-8 shrink-0 overflow-y-auto custom-scrollbar">
           <section>
             <label className="text-[10px] uppercase tracking-widest text-text-dim block mb-4 px-1 font-bold">Search Parameters</label>
-            <div className="px-1 mb-6">
-              <input 
-                type="text" 
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search Keyword..."
-                className="w-full bg-bg-input border border-border-dim rounded-lg px-4 py-2 text-xs focus:ring-1 focus:ring-sol-purple outline-none"
-              />
+            <div className="px-1 space-y-4 mb-6">
+              <div>
+                <span className="text-[10px] text-text-dim mb-1 block">Ticker (e.g. sol, btc)</span>
+                <input 
+                  type="text" 
+                  value={token}
+                  onChange={(e) => setToken(e.target.value)}
+                  className="w-full bg-bg-input border border-border-dim rounded-lg px-4 py-2 text-xs focus:ring-1 focus:ring-sol-purple outline-none"
+                />
+              </div>
+              <div>
+                <span className="text-[10px] text-text-dim mb-1 block">Sentiment Topic</span>
+                <input 
+                  type="text" 
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  className="w-full bg-bg-input border border-border-dim rounded-lg px-4 py-2 text-xs focus:ring-1 focus:ring-sol-purple outline-none"
+                />
+              </div>
             </div>
 
             <label className="text-[10px] uppercase tracking-widest text-text-dim block mb-6 px-1 font-bold">Strategy tuning</label>
@@ -353,8 +367,8 @@ export default function App() {
                   <AreaChart data={results?.data}>
                     <defs>
                       <linearGradient id="colorCum" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.15}/>
-                        <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0}/>
+                        <stop offset="5%" stopColor="#00FFA3" stopOpacity={0.15}/>
+                        <stop offset="95%" stopColor="#00FFA3" stopOpacity={0}/>
                       </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="0" stroke="#f1f5f9" vertical={false} />
@@ -381,19 +395,20 @@ export default function App() {
                     <Area 
                       type="monotone" 
                       dataKey="strategyCum" 
-                      name="Alpha Strategy" 
-                      stroke="#8b5cf6" 
+                      name="AI Classifier Strategy" 
+                      stroke="#00FFA3" 
                       fillOpacity={1} 
                       fill="url(#colorCum)" 
-                      strokeWidth={2}
+                      strokeWidth={3}
                     />
                     <Area 
                       type="monotone" 
                       dataKey="marketCum" 
-                      name="benchmark" 
-                      stroke="#cbd5e1" 
+                      name={`${token.toUpperCase()} Benchmark`} 
+                      stroke="#94a3b8" 
                       fill="transparent" 
                       strokeDasharray="4 4"
+                      strokeWidth={1.5}
                     />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -421,29 +436,44 @@ export default function App() {
                 </div>
               </Card>
 
-              <Card title="Execution Audit" icon={Activity}>
-                <div className="space-y-2 font-mono text-[9px] text-text-dim overflow-y-auto custom-scrollbar flex-1 uppercase tracking-tighter">
-                  <p><span className="opacity-40">[{format(new Date(), "HH:mm:ss")}]</span> <span className="text-sol-purple font-bold">SYSTEM</span>: Quant node active</p>
-                  <p><span className="opacity-40">[{format(new Date(), "HH:mm:ss")}]</span> <span className="text-sol-green font-bold">FEEDS</span>: Historical charts synced</p>
-                  {results?.data?.filter(d => d.signal !== 0).slice(-4).map((d, i) => {
-                    let label = "HOLD";
-                    let color = "text-text-dim";
-                    switch(d.signal) {
-                      case 1: label = "LONG_BUY"; color = "text-sol-green"; break;
-                      case -1: label = "SHORT_SELL"; color = "text-red-500"; break;
-                      case -2: label = "LONG_SELL"; color = "text-orange-400"; break;
-                      case 2: label = "SHORT_BUY"; color = "text-blue-400"; break;
-                    }
-                    return (
-                      <p key={i}>
-                        <span className="opacity-40">[{d.time.split(', ')[1]}]</span> 
-                        <span className={color}> 
-                          {label}
-                        </span>: Price ${d.close.toFixed(2)}
-                      </p>
-                    );
-                  })}
-                  <p><span className="opacity-40">[{format(new Date(), "HH:mm:ss")}]</span> <span className="text-text-heading font-medium">READY</span>: Monitoring satellite data streams...</p>
+              <Card title="Execution Audit & Catalysts" icon={Activity}>
+                <div className="space-y-4 overflow-y-auto custom-scrollbar flex-1">
+                  <div className="space-y-2 font-mono text-[9px] text-text-dim uppercase tracking-tighter border-b border-border-dim pb-4">
+                    <p><span className="opacity-40">[{format(new Date(), "HH:mm:ss")}]</span> <span className="text-sol-purple font-bold">SYSTEM</span>: Prediction Engine initialized for {token.toUpperCase()}</p>
+                    <p><span className="opacity-40">[{format(new Date(), "HH:mm:ss")}]</span> <span className="text-sol-green font-bold">FEEDS</span>: Historical sync complete</p>
+                    {results?.data?.filter(d => d.signal !== 0).slice(-4).map((d, i) => {
+                      let label = "HOLD";
+                      let color = "text-text-dim";
+                      switch(d.signal) {
+                        case 1: label = "LONG_BUY"; color = "text-sol-green"; break;
+                        case -1: label = "SHORT_SELL"; color = "text-red-500"; break;
+                        case -2: label = "LONG_SELL"; color = "text-orange-400"; break;
+                        case 2: label = "SHORT_BUY"; color = "text-blue-400"; break;
+                      }
+                      return (
+                        <p key={i}>
+                          <span className="opacity-40">[{d.time.split(', ')[1]}]</span> 
+                          <span className={color}> 
+                            {label}
+                          </span>: Price ${d.close.toFixed(2)}
+                        </p>
+                      );
+                    })}
+                  </div>
+                  
+                  {predictionHeadlines.length > 0 && (
+                    <div className="pt-2">
+                      <p className="text-[10px] uppercase tracking-widest text-text-heading mb-3 font-bold">Interval-Specific News Catalyst</p>
+                      <div className="space-y-3">
+                        {predictionHeadlines.map((h, i) => (
+                          <div key={i} className="bg-bg-input p-2 rounded border border-border-dim/50">
+                            <p className="text-[10px] text-text-heading italic leading-snug">"{h.title}"</p>
+                            <span className="text-[8px] text-text-dim font-mono block mt-1">{format(new Date(h.publishedAt), "HH:mm")} • MATCHED_INTERVAL</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </Card>
             </div>

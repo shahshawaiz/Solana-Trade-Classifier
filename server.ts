@@ -8,24 +8,17 @@ import { subDays } from "date-fns";
 
 dotenv.config();
 
-// Standard initialization for yahoo-finance2.
-// In v3, if the default export (proxy) fails, we must explicitly instantiate YahooFinance.
+// Standard initialization for yahoo-finance2 v3.
+// We explicitly instantiate to avoid "Call new YahooFinance() first" errors.
 let yf: any;
 try {
-  // Try getting the class from named export or default export (CJS/ESM interop)
-  const YahooFinanceClass = (yahooFinanceModule as any).YahooFinance || 
-                           (yahooFinanceModule as any).default?.YahooFinance ||
-                           (yahooFinanceModule as any).default;
-  
-  if (typeof YahooFinanceClass === 'function') {
-    yf = new YahooFinanceClass();
+  const YFClass = (yahooFinanceModule as any).YahooFinance || (yahooFinanceModule as any).default?.YahooFinance;
+  if (YFClass) {
+    yf = new YFClass();
   } else {
-    // If it's already an instance (proxy), it might work if we call its methods,
-    // but the error "Call new YahooFinance() first" indicates we need the class.
     yf = (yahooFinanceModule as any).default || yahooFinanceModule;
   }
 } catch (e) {
-  console.error("YahooFinance initialization failed:", e);
   yf = (yahooFinanceModule as any).default || yahooFinanceModule;
 }
 
@@ -41,12 +34,13 @@ const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 // API Routes
 app.get("/api/historical", async (req, res) => {
   try {
-    const { interval = "1h", lookback = "7" } = req.query;
+    const { token = "SOL", interval = "1h", lookback = "7" } = req.query;
+    const symbol = `${(token as string).toUpperCase()}-USD`;
     const period1 = subDays(new Date(), Number(lookback)).toISOString();
     
-    console.log(`Fetching SOL-USD: interval=${interval}, lookback=${lookback} days`);
+    console.log(`Fetching ${symbol}: interval=${interval}, lookback=${lookback} days`);
     
-    const result = await yf.chart("SOL-USD", {
+    const result = await yf.chart(symbol, {
       period1,
       interval: interval as any,
     });
@@ -97,19 +91,22 @@ app.get("/api/news", async (req, res) => {
 
 app.post("/api/predict", async (req, res) => {
   try {
-    const { query = "Solana", weights } = req.body;
+    const { token = "SOL", query = "Solana", weights } = req.body;
+    const symbol = `${token.toUpperCase()}-USD`;
     
     // 1. Get latest price & technicals
-    const chart = await yf.chart("SOL-USD", { period1: subDays(new Date(), 2).toISOString(), interval: "1h" });
-    const quotes = chart.quotes.filter((q: any) => q.close !== null);
+    const chart = await yf.chart(symbol, { period1: subDays(new Date(), 2).toISOString(), interval: "1h" });
+    const quotes = chart.quotes.filter((q: any) => q && q.close !== null);
     const latest = quotes[quotes.length - 1];
     
     // 2. Get latest news & sentiment
     let articles = [];
     const apiKey = process.env.NEWS_API_KEY;
+    const searchQuery = query || token;
+    
     if (apiKey && apiKey !== "MY_NEWS_API_KEY") {
       try {
-        const newsRes = await fetch(`https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&language=en&sortBy=publishedAt&pageSize=5&apiKey=${apiKey}`);
+        const newsRes = await fetch(`https://newsapi.org/v2/everything?q=${encodeURIComponent(searchQuery)}&language=en&sortBy=publishedAt&pageSize=5&apiKey=${apiKey}`);
         if (newsRes.ok) {
           const newsData = await newsRes.json();
           articles = newsData.articles || [];
@@ -122,10 +119,10 @@ app.post("/api/predict", async (req, res) => {
     const headlines = articles.map((a: any) => a.title);
 
     let sentScore = 0;
-    let rationale = "Neutral market environment";
+    let rationale = headlines.length > 0 ? "Analyzing headlines..." : "Neutral market environment";
     
     if (headlines.length > 0) {
-      const prompt = `Analyze sentiment for ${query}: ${headlines.join(". ")}. Return JSON: { "score": number, "rationale": string }`;
+      const prompt = `Analyze sentiment for ${searchQuery}: ${headlines.join(". ")}. Return JSON: { "score": number, "rationale": string }`;
       const result = await model.generateContent(prompt);
       const response = await result.response;
       const jsonMatch = response.text().match(/\{[\s\S]*\}/);
@@ -140,7 +137,8 @@ app.post("/api/predict", async (req, res) => {
       price: latest.close,
       sentiment: sentScore,
       rationale,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      headlines: articles.map(a => ({ title: a.title, publishedAt: a.publishedAt }))
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
