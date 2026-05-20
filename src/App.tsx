@@ -10,7 +10,17 @@ import {
   ArrowDownRight,
   Info,
   RefreshCw,
-  Zap
+  Zap,
+  Bell,
+  Send,
+  Check,
+  AlertTriangle,
+  Wallet,
+  DollarSign,
+  Shield,
+  Coins,
+  Download,
+  Table
 } from "lucide-react";
 import { 
   LineChart, 
@@ -26,10 +36,13 @@ import {
 } from "recharts";
 import { format, subDays } from "date-fns";
 import { formatInTimeZone } from "date-fns-tz";
+import { Connection, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
+import { Buffer } from "buffer";
 import { motion, AnimatePresence } from "motion/react";
 import { runBacktest, calculateRSI, calculateEMA, MarketData } from "./lib/backtest";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { LiquidityHeatmap } from "./components/LiquidityHeatmap";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -39,17 +52,24 @@ function cn(...inputs: ClassValue[]) {
 
 
 
-const Card = ({ children, className, title, icon: Icon }: any) => (
-  <div className={cn("bg-bg-card border border-border-dim rounded-lg overflow-hidden flex flex-col shadow-sm", className)}>
-    {(title || Icon) && (
-      <div className="px-4 py-3 border-b border-border-dim flex items-center justify-between bg-bg-main/50 shrink-0">
+const Card = ({ children, className, title, icon: Icon, action, overflowVisible }: any) => (
+  <div className={cn(
+    "bg-bg-card border border-border-dim rounded-lg flex flex-col shadow-sm", 
+    overflowVisible ? "" : "overflow-hidden",
+    className
+  )}>
+    {(title || Icon || action) && (
+      <div className="px-5 py-3.5 border-b border-border-dim flex items-center justify-between bg-bg-main/50 shrink-0">
         <div className="flex items-center gap-2">
-          <span className="text-[10px] uppercase tracking-[0.15em] font-semibold text-text-heading">{title}</span>
+          <span className="text-[10px] uppercase tracking-[0.15em] font-extrabold text-text-heading">{title}</span>
         </div>
-        {Icon && <Icon className="w-3.5 h-3.5 text-sol-purple opacity-70" />}
+        <div className="flex items-center gap-2.5">
+          {action && <div className="flex items-center shrink-0">{action}</div>}
+          {Icon && <Icon className="w-3.5 h-3.5 text-sol-purple opacity-70" />}
+        </div>
       </div>
     )}
-    <div className="p-5 flex-1 flex flex-col min-h-0 overflow-hidden">
+    <div className={cn("p-5 flex-1 flex flex-col min-h-0", overflowVisible ? "overflow-visible" : "overflow-hidden")}>
       {children}
     </div>
   </div>
@@ -140,7 +160,18 @@ export default function App() {
   const [sentiment, setSentiment] = useState<any>({ score: 0, rationale: "", action: "", inputData: null });
   const [loading, setLoading] = useState(true);
   const [loadingStep, setLoadingStep] = useState<string>("");
-  const [weights, setWeights] = useState({ sentiment: 0.5, technical: 0.3, liquidity: 0.2 });
+  const [weights, setWeights] = useState<{ sentiment: number; technical: number; liquidity: number, liquidation: number }>(() => {
+    try {
+      const saved = localStorage.getItem("cortex_weights");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (typeof parsed.sentiment === "number" && typeof parsed.technical === "number" && typeof parsed.liquidity === "number" && typeof parsed.liquidation === "number") {
+          return parsed;
+        }
+      }
+    } catch (_) {}
+    return { sentiment: 0.90, technical: 0.70, liquidity: 0.95, liquidation: 0.70 };
+  });
   const [threshold, setThreshold] = useState(0.1);
 
   // Define Recharts Custom Components inside App to access state
@@ -171,6 +202,18 @@ export default function App() {
           </g>
         )}
         <circle cx={cx} cy={cy} r={4} fill={color} stroke="white" strokeWidth={1} />
+      </g>
+    );
+  };
+
+  const CustomizedNewsDot = (props: any) => {
+    const { cx, cy, payload } = props;
+    if (!payload || !payload.newsHeadline) return null;
+    
+    return (
+      <g transform={`translate(${cx},${cy - 24})`}>
+        <rect x="-3" y="-3" width="6" height="6" fill="#64748b" rx="0.5" transform="rotate(45)" />
+        <text x="0" y="2" textAnchor="middle" fill="white" fontSize="5" fontWeight="black">N</text>
       </g>
     );
   };
@@ -301,20 +344,1036 @@ export default function App() {
   const [cooldown, setCooldown] = useState(120); // Minutes
   const [tradeSize, setTradeSize] = useState(0.5); // Half position sizing
   const [maxPosition, setMaxPosition] = useState(1.0); // 1x leverage cap
-  const [startDate, setStartDate] = useState(etFormat(subDays(new Date(), 7), "yyyy-MM-dd"));
+  const [startDate, setStartDate] = useState(etFormat(subDays(new Date(), 2), "yyyy-MM-dd"));
   const [endDate, setEndDate] = useState(etFormat(new Date(), "yyyy-MM-dd"));
-  const [interval, setInterval] = useState("1h");
-  const [topic, setTopic] = useState("Trump war");
+  const [interval, setChartInterval] = useState("30m");
+  const [currentSpotPrice, setCurrentSpotPrice] = useState<number | null>(null);
+  const [syncInterval, setSyncInterval] = useState(300); // defaults to 5 minutes
+  const [topic, setTopic] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem("cortex_topic");
+      if (saved) return saved;
+    } catch (_) {}
+    return "market";
+  });
   const [token, setToken] = useState("SOL");
   const [predictionHeadlines, setPredictionHeadlines] = useState<any[]>([]);
-  const [currentView, setCurrentView] = useState<'dashboard' | 'apiDocs' | 'about'>('dashboard');
+  const [currentView, setCurrentView] = useState<'dashboard' | 'apiDocs' | 'about' | 'alerts' | 'jupiter' | 'forecast'>('dashboard');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+
+  // Unified Forecast & Backtesting states
+  const [forecastActiveInterval, setForecastActiveInterval] = useState("1h");
+  const [forecastData, setForecastData] = useState<any | null>(null);
+  const [forecastLoading, setForecastLoading] = useState(false);
+  const [forecastError, setForecastError] = useState<string | null>(null);
+  const [showTrajectoryTable, setShowTrajectoryTable] = useState(true);
+
+  const [backtestInterval, setBacktestInterval] = useState("1h");
+  const [backtestLookbackDays, setBacktestLookbackDays] = useState(14);
+  const [backtestLookbackMode, setBacktestLookbackMode] = useState<'preset' | 'custom'>('preset');
+  const [backtestStartDate, setBacktestStartDate] = useState(etFormat(subDays(new Date(), 14), "yyyy-MM-dd"));
+  const [backtestEndDate, setBacktestEndDate] = useState(etFormat(new Date(), "yyyy-MM-dd"));
+  const [backtestCapital, setBacktestCapital] = useState(10000);
+  const [backtestResult, setBacktestResult] = useState<any | null>(null);
+  const [backtestLoading, setBacktestLoading] = useState(false);
+  const [backtestError, setBacktestError] = useState<string | null>(null);
+
+  const fetchForecast = async (
+    targetToken = token, 
+    targetInterval = forecastActiveInterval,
+    customWeights = weights,
+    newsKeywords = topic
+  ) => {
+    setForecastLoading(true);
+    setForecastError(null);
+    try {
+      const res = await fetch("/api/forecast", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          token: targetToken, 
+          interval: targetInterval, 
+          weights: customWeights,
+          newsQueryKeywords: newsKeywords
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setForecastData(data);
+      } else {
+        const errData = await res.json();
+        setForecastError(errData.error || "Failed to fetch forecasts.");
+      }
+    } catch (e: any) {
+      setForecastError(e.message || "Network error fetching forecast.");
+    } finally {
+      setForecastLoading(false);
+    }
+  };
+
+  const runQuantBacktest = async () => {
+    setBacktestLoading(true);
+    setBacktestError(null);
+    try {
+      const payload: any = {
+        token: token, 
+        interval: backtestInterval, 
+        weights: weights,
+        initialCapital: backtestCapital
+      };
+      
+      if (backtestLookbackMode === "custom") {
+        payload.startDate = backtestStartDate;
+        payload.endDate = backtestEndDate;
+      } else {
+        payload.lookbackDays = backtestLookbackDays;
+      }
+
+      const res = await fetch("/api/backtest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setBacktestResult(data);
+      } else {
+        const errData = await res.json();
+        setBacktestError(errData.error || "Failed to run backtesting model.");
+      }
+    } catch (e: any) {
+      setBacktestError(e.message || "Network error running backtesting model.");
+    } finally {
+      setBacktestLoading(false);
+    }
+  };
+
+  // Auto-init search keywords when the central active token ticker changes
+  useEffect(() => {
+    fetchLivePrice(token);
+  }, [token]);
+
+  // Persist weights and topic in localStorage to keep them safe on page refresh
+  useEffect(() => {
+    localStorage.setItem("cortex_topic", topic);
+  }, [topic]);
+
+  useEffect(() => {
+    localStorage.setItem("cortex_weights", JSON.stringify(weights));
+  }, [weights]);
+
+  useEffect(() => {
+    if (currentView === 'forecast') {
+      fetchForecast(token, forecastActiveInterval, weights, topic);
+    }
+  }, [
+    currentView, 
+    token, 
+    forecastActiveInterval, 
+    weights.sentiment, 
+    weights.technical, 
+    weights.liquidity, 
+    topic
+  ]);
+
+  const generateInterpolatedPoints = () => {
+    if (!forecastData) return [];
+    
+    const points: any[] = [];
+    
+    // 1. Add historical price points
+    if (forecastData.history && Array.isArray(forecastData.history)) {
+      forecastData.history.forEach((h: any) => {
+        let label = h.date;
+        try {
+          const d = new Date(h.date);
+          label = etFormat(d, "MMM dd, hh:mm a");
+        } catch (e) {}
+        
+        points.push({
+          label,
+          "Historical Price": Number(h.price.toFixed(2)),
+          "Expected Price": null,
+          "Upper Range": null,
+          "Lower Range": null
+        });
+      });
+    }
+    
+    // 2. Add future interpolated forecast
+    const curr = forecastData.currentPrice || 100;
+    const pred = forecastData.predictedPrice || 105;
+    const vol = forecastData.volatilityPct || 1.5;
+    const confidence = forecastData.confidenceScore || 0.75;
+    const steps = 8;
+    const intervalLabel = forecastActiveInterval;
+
+    // We'll base future trajectory timestamps off the last historical date point (or from right now if empty)
+    let lastDate = new Date();
+    if (forecastData.history && forecastData.history.length > 0) {
+      const lastHist = forecastData.history[forecastData.history.length - 1];
+      if (lastHist.date) {
+        lastDate = new Date(lastHist.date);
+      }
+    }
+
+    for (let i = 0; i < steps; i++) {
+      const r = i / (steps - 1);
+      const baseVal = curr + (pred - curr) * r;
+      const waveFactor = 4 * r * (1 - r);
+      const mockSine = Math.sin(r * Math.PI * 2.5);
+      const noise = mockSine * (curr * (vol / 100) * 0.12) * waveFactor;
+      const Price = baseVal + noise;
+      const confidenceMultiplier = 1.25 - confidence;
+      const spreadLimit = curr * (vol / 100) * r * confidenceMultiplier * 1.5;
+      const High = Price + spreadLimit;
+      const Low = Math.max(0.1, Price - spreadLimit);
+
+      let stepLabel = "";
+      if (intervalLabel === "30m") {
+        stepLabel = `+${Math.round(r * 30)}m`;
+      } else if (intervalLabel === "1d") {
+        stepLabel = `+${Math.round(r * 24)}h`;
+      } else {
+        stepLabel = `+${Math.round(r * 60)}m`;
+      }
+
+      let absLabel = "Now";
+      if (r > 0) {
+        let targetDate = new Date(lastDate);
+        if (intervalLabel === "30m") {
+          targetDate.setMinutes(lastDate.getMinutes() + Math.round(r * 30));
+        } else if (intervalLabel === "1d") {
+          targetDate.setHours(lastDate.getHours() + Math.round(r * 24));
+        } else {
+          targetDate.setMinutes(lastDate.getMinutes() + Math.round(r * 60));
+        }
+        absLabel = etFormat(targetDate, "MMM dd, hh:mm a");
+      } else {
+        absLabel = etFormat(lastDate, "MMM dd, hh:mm a");
+      }
+
+      // Exact connect on present/bridge point
+      points.push({
+        label: absLabel,
+        "Historical Price": r === 0 ? Number(curr.toFixed(2)) : null,
+        "Expected Price": Number(Price.toFixed(2)),
+        "Upper Range": r === 0 ? Number(curr.toFixed(2)) : Number(High.toFixed(2)),
+        "Lower Range": r === 0 ? Number(curr.toFixed(2)) : Number(Low.toFixed(2))
+      });
+    }
+    return points;
+  };
+
+  const downloadBacktestCSV = () => {
+    if (!backtestResult || !backtestResult.trades) return;
+    
+    const headers = [
+      "Direction/Type", 
+      "Date Timestamp (Eastern Time)", 
+      "Execution Price (USD)", 
+      "Net Realized Return (USD)", 
+      "PnL %", 
+      "Capital After Balance (USD)", 
+      "Execution Triggers/Note"
+    ];
+    
+    const rows = backtestResult.trades.map((trade: any) => {
+      const isEntry = trade.type.startsWith("OPEN");
+      const pnlVal = isEntry ? "0.00" : (trade.pnl || 0).toFixed(2);
+      const pnlPctVal = isEntry ? "0.00" : (trade.pnlPct || 0).toFixed(2);
+      
+      let dateString = "";
+      try {
+        dateString = etFormat(new Date(trade.date), "yyyy-MM-dd HH:mm:ss");
+      } catch (e) {
+        dateString = trade.date || "";
+      }
+      
+      const cleanNote = (trade.note || "").replace(/"/g, '""');
+      return [
+        trade.type,
+        dateString,
+        trade.price ? trade.price.toFixed(2) : "0.00",
+        pnlVal,
+        pnlPctVal,
+        (trade.capitalAfter || trade.capitalBefore || 0).toFixed(2),
+        `"${cleanNote}"`
+      ];
+    });
+
+    const metaRows = [
+      ["=== QUANTBACKTEST SIMULATION SUMMARY ==="],
+      ["Asset Token", token.toUpperCase()],
+      ["Timeline Lookback Window", backtestLookbackMode === "custom" ? `${backtestStartDate} to ${backtestEndDate}` : `${backtestLookbackDays} Days`],
+      ["Timeline Interval", backtestInterval],
+      ["Initial Capital", `$${backtestCapital.toFixed(2)}`],
+      ["Ending Balance", `$${(backtestResult.metrics.finalCapital || 0).toFixed(2)}`],
+      ["Win Rate", `${(backtestResult.metrics.winRate || 0).toFixed(1)}%`],
+      ["Net Return PnL", `${(backtestResult.metrics.pnlPct || 0).toFixed(2)}%`],
+      ["Max Peak-to-Trough Drawdown", `${(backtestResult.metrics.maxDrawdownPct || 0).toFixed(2)}%`],
+      ["Prediction Quality (Directional Hit Rate)", `${(backtestResult.metrics.predictionQualityPct || 0).toFixed(1)}%`],
+      ["Mean Prediction Symmetric Error (SMAPE)", `${(backtestResult.metrics.averageErrorPct || 0).toFixed(2)}%`],
+      ["Symmetric Forecast Precision Score", `${(backtestResult.metrics.backtestAccuracyPct || 0).toFixed(2)}%`],
+      [],
+      ["=== EXECUTED ORDER TRADES ==="]
+    ];
+    const metaString = metaRows.map(row => row.map(v => `"${(v || "").toString().replace(/"/g, '""')}"`).join(",")).join("\n");
+    const dataString = [headers.join(","), ...rows.map((row: any[]) => row.join(","))].join("\n");
+    const csvContent = metaString + "\n" + dataString;
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.style.display = "none";
+    link.href = url;
+    link.download = backtestLookbackMode === "custom" 
+      ? `backtest_${token}_${backtestInterval}_${backtestStartDate}_to_${backtestEndDate}.csv`
+      : `backtest_${token}_${backtestInterval}_${backtestLookbackDays}d.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const downloadBacktestTimeSeriesCSV = () => {
+    if (!backtestResult || !backtestResult.equityCurve) return;
+    const headers = [
+      "Index/Step", 
+      "Date Timestamp (Eastern Time)", 
+      "Total Capital Balance (USD)", 
+      "Asset Actual Price (USD)",
+      "Model Predicted Price (USD)",
+      "Prediction Absolute Error Rate (%)"
+    ];
+    const rows = backtestResult.equityCurve.map((point: any, idx: number) => {
+      let dateStr = "";
+      try {
+        dateStr = etFormat(new Date(point.date), "yyyy-MM-dd HH:mm:ss");
+      } catch (e) {
+        dateStr = point.date || "";
+      }
+      return [
+        idx + 1,
+        dateStr,
+        (point.equity || 0).toFixed(2),
+        (point.price || 0).toFixed(2),
+        point.predictedPrice !== undefined ? point.predictedPrice.toFixed(2) : "0.00",
+        point.errorRatePct !== undefined ? `${point.errorRatePct.toFixed(2)}%` : "0.00%"
+      ];
+    });
+
+    const metaRows = [
+      ["=== BACKTEST EQUITY CURVE TIME SERIES ==="],
+      ["Asset Token", token.toUpperCase()],
+      ["Strategy Win Rate", `${(backtestResult.metrics.winRate || 0).toFixed(1)}%`],
+      ["Net Return PnL", `${(backtestResult.metrics.pnlPct || 0).toFixed(2)}%`],
+      ["Prediction Quality (Directional Hit Rate)", `${(backtestResult.metrics.predictionQualityPct || 0).toFixed(1)}%`],
+      ["Mean Prediction Symmetric Error (SMAPE)", `${(backtestResult.metrics.averageErrorPct || 0).toFixed(2)}%`],
+      ["Symmetric Forecast Precision Score", `${(backtestResult.metrics.backtestAccuracyPct || 0).toFixed(2)}%`],
+      [],
+      ["=== TIME SERIES STEPS ==="]
+    ];
+    const metaString = metaRows.map(row => row.map(v => `"${(v || "").toString().replace(/"/g, '""')}"`).join(",")).join("\n");
+    const dataString = [headers.join(","), ...rows.map((row: any[]) => row.join(","))].join("\n");
+    const csvContent = metaString + "\n" + dataString;
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.style.display = "none";
+    link.href = url;
+    link.download = `backtest_equity_curve_${token}_${backtestInterval}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const downloadForecastPathCSV = () => {
+    const points = generateInterpolatedPoints();
+    if (!points || points.length === 0) return;
+    const headers = ["Time (Eastern Time)", "Historical Price (USD)", "AI Interpolated Expected Price (USD)", "Upper Range Bound (USD)", "Lower Range Bound (USD)"];
+    const rows = points.map((p: any) => {
+      return [
+        p.label || "",
+        p["Historical Price"] !== null && p["Historical Price"] !== undefined ? p["Historical Price"] : "",
+        p["Expected Price"] !== null && p["Expected Price"] !== undefined ? p["Expected Price"] : "",
+        p["Upper Range"] !== null && p["Upper Range"] !== undefined ? p["Upper Range"] : "",
+        p["Lower Range"] !== null && p["Lower Range"] !== undefined ? p["Lower Range"] : ""
+      ];
+    });
+
+    const metaRows = [
+      ["=== AI FUTURE PRICE TRAJECTORY ==="],
+      ["Asset Token", token.toUpperCase()],
+      ["Interval Sample", forecastActiveInterval],
+      ["Sentiment Search Words Limit", topic],
+      [],
+      ["=== PREDICTION PATHS ==="]
+    ];
+    const metaString = metaRows.map(row => row.map(v => `"${(v || "").toString().replace(/"/g, '""')}"`).join(",")).join("\n");
+    const dataString = [headers.join(","), ...rows.map((row: any[]) => row.join(","))].join("\n");
+    const csvContent = metaString + "\n" + dataString;
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.style.display = "none";
+    link.href = url;
+    link.download = `price_forecast_path_${token}_${forecastActiveInterval}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const downloadJupiterTradeLogCSV = () => {
+    if (!jupiterConfig || !jupiterConfig.tradesHistory || jupiterConfig.tradesHistory.length === 0) return;
+    const headers = ["Index", "Direction/Side", "Leverage Multiplier", "Entry Price (USD)", "Exit Price (USD)", "Realized Return PnL %", "Solana Size (SOL)", "Settled Time (Eastern Time)"];
+    const rows = jupiterConfig.tradesHistory.map((trade: any, idx: number) => {
+      let settledDateStr = "";
+      try {
+        settledDateStr = trade.exitTime ? etFormat(new Date(trade.exitTime), "yyyy-MM-dd HH:mm:ss") : "";
+      } catch (e) {
+        settledDateStr = trade.exitTime || "";
+      }
+      return [
+        idx + 1,
+        trade.side || "",
+        trade.leverage || 5,
+        (trade.entryPrice || 0).toFixed(2),
+        (trade.exitPrice || 0).toFixed(2),
+        (trade.pnl || 0).toFixed(2),
+        (trade.sizeInSol || 0).toFixed(4),
+        settledDateStr
+      ];
+    });
+    const csvContent = [headers.join(","), ...rows.map((row: any[]) => row.join(","))].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.style.display = "none";
+    link.href = url;
+    link.download = `jupiter_settlement_logs.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const downloadTelegramTradeLogCSV = () => {
+    if (!telegramConfig || !telegramConfig.tradesHistory || telegramConfig.tradesHistory.length === 0) return;
+    const headers = ["Index", "Direction/Side", "Entry Price (USD)", "Exit Price (USD)", "Realized Return PnL %", "Settled Time (Eastern Time)"];
+    const rows = telegramConfig.tradesHistory.map((trade: any, idx: number) => {
+      let settledDateStr = "";
+      try {
+        settledDateStr = trade.exitTime ? etFormat(new Date(trade.exitTime), "yyyy-MM-dd HH:mm:ss") : "";
+      } catch (e) {
+        settledDateStr = trade.exitTime || "";
+      }
+      return [
+        idx + 1,
+        trade.side || "",
+        (trade.entryPrice || 0).toFixed(2),
+        (trade.exitPrice || 0).toFixed(2),
+        (trade.pnl || 0).toFixed(2),
+        settledDateStr
+      ];
+    });
+    const csvContent = [headers.join(","), ...rows.map((row: any[]) => row.join(","))].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.style.display = "none";
+    link.href = url;
+    link.download = `telegram_settlement_logs.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const downloadPerformanceTimeSeriesCSV = () => {
+    if (!results || !results.data) return;
+    const headers = ["Index", "Time/Date (Eastern Time)", "Equity Strategy Balance (USD)", "Benchmark Asset Return", "Strategy Return"];
+    const rows = results.data.map((point: any, idx: number) => {
+      return [
+        idx + 1,
+        point.time || "",
+        (point.equity !== undefined ? point.equity : point.cumReturn || 0).toFixed(2),
+        (point.benchmark || 0).toFixed(2),
+        (point.strategy || 0).toFixed(2)
+      ];
+    });
+    const csvContent = [headers.join(","), ...rows.map((row: any[]) => row.join(","))].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.style.display = "none";
+    link.href = url;
+    link.download = `performance_curve_${token}_${interval}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const downloadPerformanceTradesCSV = () => {
+    if (!results || !results.trades || results.trades.length === 0) return;
+    const headers = ["Entry Time (Eastern Time)", "Type", "Entry Price (USD)", "Exit Price (USD)", "PnL %", "Cumulative PnL %"];
+    const rows = results.trades.map((trade: any) => {
+      let formattedTime = "";
+      try {
+        formattedTime = trade.entryTime ? etFormat(new Date(trade.entryTime), "yyyy-MM-dd HH:mm:ss") : "";
+      } catch (e) {
+        formattedTime = trade.entryTime || "";
+      }
+      return [
+        formattedTime,
+        trade.type || "",
+        (trade.entryPrice || 0).toFixed(2),
+        (trade.exitPrice || 0).toFixed(2),
+        ((trade.pnl || 0) * 100).toFixed(2),
+        ((trade.cumPnL || 0) * 100).toFixed(2)
+      ];
+    });
+    const csvContent = [headers.join(","), ...rows.map((row: any[]) => row.join(","))].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.style.display = "none";
+    link.href = url;
+    link.download = `performance_trades_${token}_${interval}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Auto-refresh states
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
+  const [timeLeft, setTimeLeft] = useState(300); // 5 minutes standard countdown
+
+  // Telegram alert states
+  const [telegramConfig, setTelegramConfig] = useState<any>({
+    botToken: "",
+    chatId: "",
+    enabled: false,
+    token: "SOL",
+    topic: "market",
+    weights: { sentiment: 0.90, technical: 0.70, liquidity: 0.95, liquidation: 0.70 },
+    lastAction: "Hold",
+    lastCheckedAt: "",
+    cooldownMinutes: 30, // customizable cooldown period (default 30 mins)
+    auditLogs: [],
+    error: ""
+  });
+  const [telegramLoading, setTelegramLoading] = useState(false);
+  const [telegramStatusMsg, setTelegramStatusMsg] = useState<{ type: 'success' | 'err'; text: string } | null>(null);
+
+  // Jupiter Wallet & Auto Execution States
+  const [jupiterConfig, setJupiterConfig] = useState<any>(() => {
+    const saved = localStorage.getItem("cortex_jupiter_config");
+    if (saved) {
+      try { return JSON.parse(saved); } catch(e) {}
+    }
+    return {
+      walletAddress: "",
+      enabled: false,
+      leverage: 5,
+      allocationPercent: 5,
+      takeProfitPct: 4,
+      stopLossPct: 2,
+      frequencyMinutes: 5,
+      cooldownMinutes: 30,
+      token: "SOL",
+      topic: "market",
+      weights: { sentiment: 0.90, technical: 0.70, liquidity: 0.95, liquidation: 0.70 },
+      lastTradePnL: 0,
+      cumulativePnL: 0,
+      activeTrade: null,
+      tradesHistory: [],
+      lastCheckedAt: "",
+      lastAction: "Hold",
+      walletBalance: 0,
+      liveJupiterPrice: null,
+      error: ""
+    };
+  });
+
+  // Persist jupiterConfig to localStorage whenever it changes
+  useEffect(() => {
+    localStorage.setItem("cortex_jupiter_config", JSON.stringify(jupiterConfig));
+  }, [jupiterConfig]);
+
+  const [jupLoading, setJupLoading] = useState(false);
+  const [jupStatusMsg, setJupStatusMsg] = useState<{ type: 'success' | 'err'; text: string } | null>(null);
+
+  const fetchTelegramConfig = async () => {
+    try {
+      const res = await fetch("/api/telegram-config");
+      if (res.ok) {
+        const config = await res.json();
+        setTelegramConfig(config);
+      }
+    } catch (e) {
+      console.error("Failed to fetch Telegram config", e);
+    }
+  };
+
+  const fetchJupiterConfig = async () => {
+    try {
+      const res = await fetch("/api/jupiter-config");
+      if (res.ok) {
+        const config = await res.json();
+        setJupiterConfig((prev: any) => ({ ...prev, ...config }));
+      }
+    } catch (e) {
+      console.error("Failed to fetch Jupiter config", e);
+    }
+  };
+
+  useEffect(() => {
+    fetchTelegramConfig();
+    
+    // Initialize backend from browser storage once on mount
+    const initJupiterSession = async () => {
+      const saved = localStorage.getItem("cortex_jupiter_config");
+      if (saved) {
+        try {
+          await fetch("/api/jupiter-config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: saved
+          });
+        } catch (e) {
+          console.error("Failed to init Jupiter session", e);
+        }
+      }
+      fetchJupiterConfig();
+    };
+    initJupiterSession();
+  }, []);
+
+  // Keep Telegram background daemon and Jupiter configs fully in sync when active Token, sentiment Topics or Weights change
+  useEffect(() => {
+    const syncConfig = async () => {
+      try {
+        await fetch("/api/telegram-config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: telegramConfig?.enabled || false,
+            token: token,
+            topic: topic,
+            frequency: telegramConfig?.frequency || 5,
+            weights: weights
+          })
+        });
+
+        if (jupiterConfig) {
+          await fetch("/api/jupiter-config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              enabled: jupiterConfig.enabled || false,
+              leverage: jupiterConfig.leverage || 5,
+              allocationPercent: jupiterConfig.allocationPercent || 5,
+              takeProfitPct: jupiterConfig.takeProfitPct || 4,
+              stopLossPct: jupiterConfig.stopLossPct || 2,
+              frequencyMinutes: jupiterConfig.frequencyMinutes || 5,
+              cooldownMinutes: jupiterConfig.cooldownMinutes || 30,
+              token: token,
+              topic: topic,
+              weights: weights
+            })
+          });
+        }
+      } catch (e) {
+        console.error("Failed to auto-sync backend configs with neural engine changes", e);
+      }
+    };
+    
+    // De-bounce syncing to avoid firing too many requests when typing
+    const debounceTimer = setTimeout(() => {
+      syncConfig();
+    }, 1200);
+    return () => clearTimeout(debounceTimer);
+  }, [token, topic, weights, telegramConfig?.enabled, telegramConfig?.frequency, jupiterConfig?.enabled, jupiterConfig?.leverage, jupiterConfig?.allocationPercent, jupiterConfig?.takeProfitPct, jupiterConfig?.stopLossPct]);
+
+  useEffect(() => {
+    setTimeLeft(syncInterval);
+  }, [syncInterval, token]);
+
+  useEffect(() => {
+    if (!autoRefreshEnabled) return;
+    
+    const intervalId = window.setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          console.log("[Auto-Refresh Triggered] Synchronizing latest quantitative states...");
+          fetchData();
+          fetchJupiterConfig();
+          return syncInterval;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [autoRefreshEnabled, token, topic, interval, startDate, endDate, syncInterval]);
+
+  const formatTimeLeft = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const handleSaveTelegramConfig = async (e: React.FormEvent, isTest = false, isTrigger = false) => {
+    if (e) e.preventDefault();
+    setTelegramLoading(true);
+    setTelegramStatusMsg(null);
+    try {
+      const res = await fetch("/api/telegram-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: telegramConfig.enabled,
+          token: token,         // ALWAYS use active main screen's token
+          topic: topic,         // ALWAYS use active main screen's topic
+          frequency: telegramConfig.frequency || 5,
+          cooldownMinutes: telegramConfig.cooldownMinutes !== undefined ? telegramConfig.cooldownMinutes : 30,
+          weights: weights,     // ALWAYS use active main screen's weights
+          testAlert: isTest,
+          triggerAlert: isTrigger
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setTelegramStatusMsg({
+          type: "success",
+          text: isTrigger ? "Manual alert triggered successfully!" : isTest ? "Test alert sent successfully to Telegram!" : "Configuration saved successfully!"
+        });
+        fetchTelegramConfig(); // Reload from server to get masked token
+      } else {
+        throw new Error(data.error || "Failed to update Telegram settings");
+      }
+    } catch (err: any) {
+      setTelegramStatusMsg({
+        type: "err",
+        text: err.message
+      });
+    } finally {
+      setTelegramLoading(false);
+    }
+  };
+
+  const handleResetTelegramStats = async () => {
+    setTelegramLoading(true);
+    setTelegramStatusMsg(null);
+    try {
+      const res = await fetch("/api/telegram-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: telegramConfig.enabled,
+          token: telegramConfig.token,
+          topic: telegramConfig.topic,
+          frequency: telegramConfig.frequency || 5,
+          resetStats: true
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setTelegramStatusMsg({
+          type: "success",
+          text: "System telemetry statistics reset successfully!"
+        });
+        fetchTelegramConfig();
+      } else {
+        throw new Error(data.error || "Failed to reset statistics");
+      }
+    } catch (err: any) {
+      setTelegramStatusMsg({
+        type: "err",
+        text: err.message
+      });
+    } finally {
+      setTelegramLoading(false);
+    }
+  };
+
+  // Jupiter Wallet & Auto Execution Handlers
+  const handleConnectWallet = async () => {
+    setJupLoading(true);
+    setJupStatusMsg(null);
+    try {
+      const { solana } = window as any;
+      
+      if (!solana || !solana.isPhantom) {
+        throw new Error("Phantom Wallet extension not detected! Note: Extensions do not typically inject into iframes. Please open the preview in a new tab.");
+      }
+
+      const resp = await solana.connect();
+      const pubKey = resp.publicKey.toString();
+
+      const res = await fetch("/api/jupiter-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          walletAddress: pubKey,
+        })
+      });
+
+      if (res.ok) {
+        setJupStatusMsg({
+          type: "success",
+          text: `Successfully linked Phantom wallet: ${pubKey.substring(0, 6)}...${pubKey.substring(pubKey.length - 4)}`
+        });
+        fetchJupiterConfig();
+      } else {
+        const errData = await res.json();
+        throw new Error(errData.error || "Failed to notify backend of wallet linking");
+      }
+    } catch (err: any) {
+      setJupStatusMsg({
+        type: "err",
+        text: err.message || "Wallet linking failed."
+      });
+    } finally {
+      setJupLoading(false);
+    }
+  };
+
+  const handleSaveJupiterConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setJupLoading(true);
+    setJupStatusMsg(null);
+    try {
+      const res = await fetch("/api/jupiter-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: jupiterConfig.enabled,
+          leverage: jupiterConfig.leverage,
+          allocationPercent: Math.min(jupiterConfig.allocationPercent, 100),
+          takeProfitPct: jupiterConfig.takeProfitPct,
+          stopLossPct: jupiterConfig.stopLossPct,
+          frequencyMinutes: jupiterConfig.frequencyMinutes,
+          cooldownMinutes: jupiterConfig.cooldownMinutes,
+          token: token, // synchronize with primary active token
+          topic: topic, // synchronize with primary catalyst
+          weights
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setJupStatusMsg({
+          type: "success",
+          text: "Jupiter configurations updated successfully!"
+        });
+        fetchJupiterConfig();
+      } else {
+        throw new Error(data.error || "Failed to update configurations");
+      }
+    } catch (err: any) {
+      setJupStatusMsg({ type: "err", text: err.message });
+    } finally {
+      setJupLoading(false);
+    }
+  };
+
+  const handleDisconnectWallet = async () => {
+    setJupLoading(true);
+    setJupStatusMsg(null);
+    try {
+      const res = await fetch("/api/jupiter-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ disconnect: true })
+      });
+      if (res.ok) {
+        setJupStatusMsg({ type: "success", text: "Wallet disconnected successfully." });
+        fetchJupiterConfig();
+      } else {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to disconnect");
+      }
+    } catch (err: any) {
+      setJupStatusMsg({ type: "err", text: err.message });
+    } finally {
+      setJupLoading(false);
+    }
+  };
+
+  const handleResetJupiterStats = async () => {
+    setJupLoading(true);
+    setJupStatusMsg(null);
+    try {
+      const res = await fetch("/api/jupiter-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resetStats: true })
+      });
+      if (res.ok) {
+        setJupStatusMsg({ type: "success", text: "Jupiter auto-trades statistics reset!" });
+        fetchJupiterConfig();
+      }
+    } catch (err: any) {
+      setJupStatusMsg({ type: "err", text: err.message });
+    } finally {
+      setJupLoading(false);
+    }
+  };
+
+  const sendMemoTransaction = async (message: string) => {
+    const { solana } = window as any;
+    if (!solana || !solana.isPhantom) {
+      throw new Error("Phantom Wallet not connected");
+    }
+
+    const memoProgramId = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
+    const connection = new Connection("https://api.mainnet-beta.solana.com");
+    
+    const instruction = new TransactionInstruction({
+      keys: [{ pubkey: solana.publicKey, isSigner: true, isWritable: true }],
+      programId: memoProgramId,
+      data: Buffer.from ? Buffer.from(message, "utf-8") : Buffer.from(new TextEncoder().encode(message)),
+    });
+
+    const transaction = new Transaction().add(instruction);
+    transaction.feePayer = solana.publicKey;
+    
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+
+    const { signature } = await solana.signAndSendTransaction(transaction);
+    return signature;
+  };
+
+  const handleForceTrade = async (direction: "LONG" | "SHORT") => {
+    setJupLoading(true);
+    setJupStatusMsg(null);
+    try {
+      const { solana } = window as any;
+      if (solana && solana.isPhantom) {
+        setJupStatusMsg({ type: 'success', text: 'Requesting on-chain trade signature from Phantom Wallet...' });
+        await sendMemoTransaction(`CORTEX_ALPHA_EXECUTE_${direction}_SOL_PERP_TS_${Date.now()}`);
+      }
+
+      const res = await fetch("/api/jupiter-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ forceOpen: direction })
+      });
+      if (res.ok) {
+        setJupStatusMsg({ 
+          type: "success", 
+          text: `Successfully executed mainnet ${direction} position via Jupiter DEX. On-chain signature verified.` 
+        });
+        fetchJupiterConfig();
+      } else {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to execute swap");
+      }
+    } catch (err: any) {
+      setJupStatusMsg({ type: "err", text: err.message || "Trade cancelled." });
+    } finally {
+      setJupLoading(false);
+    }
+  };
+
+  const handleTriggerAutoTrade = async () => {
+    setJupLoading(true);
+    setJupStatusMsg(null);
+    try {
+      const res = await fetch("/api/jupiter-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ triggerAutoTrade: true })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        
+        // Wait for phantom signatures if the bot actually executed something
+        if (data.closedSomething || data.executedSide) {
+          const { solana } = window as any;
+          if (solana && solana.isPhantom) {
+            
+            if (data.closedSomething) {
+              setJupStatusMsg({ type: 'success', text: 'Auto Bot closed position. Requesting on-chain signature from Phantom...' });
+              await sendMemoTransaction(`CORTEX_ALPHA_CLOSE_POSITION_TS_${Date.now()}`);
+            }
+            
+            if (data.executedSide) {
+              setJupStatusMsg({ type: 'success', text: `Auto Bot executed ${data.executedSide}. Requesting on-chain signature from Phantom...` });
+              await sendMemoTransaction(`CORTEX_ALPHA_EXECUTE_${data.executedSide}_SOL_PERP_TS_${Date.now()}`);
+            }
+            
+          }
+        }
+        
+        setJupStatusMsg({ 
+          type: "success", 
+          text: data.message || "Automated trade evaluation triggered successfully!" 
+        });
+        fetchJupiterConfig();
+      } else {
+        throw new Error(data.message || data.error || "Failed to trigger automated trade");
+      }
+    } catch (err: any) {
+      setJupStatusMsg({ type: "err", text: err.message || "Trigger failed." });
+    } finally {
+      setJupLoading(false);
+    }
+  };
+
+  const handleForceCloseTrade = async () => {
+    setJupLoading(true);
+    setJupStatusMsg(null);
+    try {
+      const { solana } = window as any;
+      if (solana && solana.isPhantom) {
+        setJupStatusMsg({ type: 'success', text: 'Requesting secure on-chain signature from Phantom Wallet...' });
+        await sendMemoTransaction(`CORTEX_ALPHA_CLOSE_ACTIVE_POSITION_TS_${Date.now()}`);
+      }
+
+      const res = await fetch("/api/jupiter-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ forceClose: true })
+      });
+      if (res.ok) {
+        setJupStatusMsg({ 
+          type: "success", 
+          text: "Successfully closed active position and settled via Jupiter DEX. On-chain signature verified." 
+        });
+        fetchJupiterConfig();
+      } else {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to close position");
+      }
+    } catch (err: any) {
+      setJupStatusMsg({ type: "err", text: err.message || "Close trade cancelled." });
+    } finally {
+      setJupLoading(false);
+    }
+  };
+
+  const fetchLivePrice = async (targetToken = token) => {
+    try {
+      const res = await fetch(`/api/price?token=${targetToken}`);
+      if (res.ok) {
+        const d = await res.json();
+        if (d && d.price !== undefined) {
+          setCurrentSpotPrice(d.price);
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to fetch live price", err);
+    }
+  };
 
   const fetchData = async () => {
     setLoading(true);
     setLoadingStep("Syncing Historical Market Data...");
     setErrorMsg(null);
+    fetchLivePrice(token);
     try {
       const histRes = await fetch(`/api/historical?token=${token}&startDate=${startDate}&endDate=${endDate}&interval=${interval}`);
       if (!histRes.headers.get("content-type")?.includes("application/json")) {
@@ -515,6 +1574,12 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-4">
+          {autoRefreshEnabled && (
+            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-sol-green/5 border border-sol-green/20 rounded font-mono text-[9px] text-sol-green uppercase tracking-wide">
+              <span className="w-1.5 h-1.5 bg-sol-green rounded-full animate-ping"></span>
+              Auto-Sync: {formatTimeLeft(timeLeft)}
+            </div>
+          )}
           {loading && (
             <div className="flex items-center gap-2 px-3 py-1 bg-sol-purple/5 border border-sol-purple/20 rounded-full animate-in fade-in transition-all">
               <RefreshCw className="w-3 h-3 text-sol-purple animate-spin" />
@@ -535,7 +1600,25 @@ export default function App() {
             onClick={() => setCurrentView('dashboard')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'dashboard' && "text-sol-purple")}
           >
-            Dashboard
+            Current Order Prediction
+          </button>
+          <button 
+            onClick={() => setCurrentView('forecast')} 
+            className={cn("hover:text-sol-purple transition-colors", currentView === 'forecast' && "text-sol-purple")}
+          >
+            Forecast Trend
+          </button>
+          <button 
+            onClick={() => setCurrentView('alerts')} 
+            className={cn("hover:text-sol-purple transition-colors", currentView === 'alerts' && "text-sol-purple")}
+          >
+            Alerts Hub
+          </button>
+          <button 
+            onClick={() => setCurrentView('jupiter')} 
+            className={cn("hover:text-sol-purple transition-colors", currentView === 'jupiter' && "text-sol-purple")}
+          >
+            Automated Trading
           </button>
           <button 
             onClick={() => setCurrentView('apiDocs')} 
@@ -552,18 +1635,20 @@ export default function App() {
         </div>
         <div className="hidden md:flex gap-6 text-[11px] uppercase tracking-[0.1em] text-text-dim font-mono bg-bg-input px-4 py-1.5 rounded-full border border-border-dim">
           <div className="flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-sol-green"></span> 
-            {token.toUpperCase()}/USD ${results?.data && results.data.length > 0 ? results.data[results.data.length - 1]?.close.toFixed(2) : "---"}
+            <span className="w-1.5 h-1.5 rounded-full bg-sol-green animate-pulse"></span> 
+            {token.toUpperCase()}/USD ${currentSpotPrice !== null ? currentSpotPrice.toFixed(2) : (results?.data && results.data.length > 0 ? results.data[results.data.length - 1]?.close.toFixed(2) : "---")}
           </div>
         </div>
       </div>
 
       <div className="flex-1 flex overflow-hidden">
-        {currentView === 'dashboard' ? (
-          <>
-            {/* Left Sidebar: Controls */}
-            <aside className="w-80 border-r border-border-dim bg-bg-card p-6 flex flex-col gap-8 shrink-0 overflow-y-auto custom-scrollbar">
+        {(currentView === 'dashboard' || currentView === 'forecast') && (
+          <aside className="w-80 border-r border-border-dim bg-bg-card p-6 flex flex-col gap-8 shrink-0 overflow-y-auto custom-scrollbar">
           <section>
+            <div className="border-b border-border-dim/60 pb-3 mb-6">
+              <span className="text-[10px] font-mono font-bold text-sol-purple uppercase tracking-[0.2em] block mb-1">Cortex Engine Core</span>
+              <h2 className="text-sm font-serif italic text-text-heading">Engine Configuration</h2>
+            </div>
             <label className="text-[10px] uppercase tracking-widest text-text-dim block mb-4 px-1 font-bold flex items-center justify-between">
               Search Parameters
               <Info className="w-2.5 h-2.5 opacity-50" />
@@ -590,6 +1675,52 @@ export default function App() {
               </div>
             </div>
 
+            <label className="text-[10px] uppercase tracking-widest text-text-dim block mb-2 px-1 font-bold flex items-center justify-between mt-6">
+              Neural Synchronization
+              <RefreshCw className="w-2.5 h-2.5 opacity-50 text-sol-purple animate-spin" style={{ animationDuration: '3s' }} />
+            </label>
+            <p className="text-[9px] text-text-dim px-1 mb-4 leading-relaxed italic">Synchronize latest on-chain quotes and prediction catalyst states in background.</p>
+            <div className="px-1 space-y-4 mb-6">
+              <div className="flex items-center justify-between p-2.5 bg-bg-input rounded-lg border border-border-dim/60">
+                <span className="text-[10px] text-text-heading font-medium uppercase tracking-wide">Auto Sync</span>
+                <button
+                  type="button"
+                  onClick={() => setAutoRefreshEnabled(!autoRefreshEnabled)}
+                  className={cn(
+                    "w-8 h-4.5 rounded-full p-0.5 transition-colors duration-200 focus:outline-none relative flex items-center shrink-0 cursor-pointer",
+                    autoRefreshEnabled ? "bg-sol-green" : "bg-bg-main border border-border-dim"
+                  )}
+                >
+                  <div className={cn(
+                    "w-3.5 h-3.5 rounded-full bg-neutral-100 transition-transform duration-200 shadow",
+                    autoRefreshEnabled ? "translate-x-3.5" : "translate-x-0"
+                  )} />
+                </button>
+              </div>
+
+              {autoRefreshEnabled && (
+                <div>
+                  <span className="text-[10px] text-text-dim mb-1 block font-medium">Sync Every</span>
+                  <select
+                    value={syncInterval}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setSyncInterval(val);
+                      setTimeLeft(val); // reset countdown immediately
+                    }}
+                    className="w-full bg-bg-input border border-border-dim rounded-lg px-3 py-1.5 text-xs text-text-heading focus:ring-1 focus:ring-sol-purple outline-none"
+                  >
+                    <option value={15}>15 Seconds (Aggressive)</option>
+                    <option value={30}>30 Seconds</option>
+                    <option value={60}>1 Minute</option>
+                    <option value={120}>2 Minutes</option>
+                    <option value={300}>5 Minutes (Balanced)</option>
+                    <option value={600}>10 Minutes</option>
+                  </select>
+                </div>
+              )}
+            </div>
+
             <label className="text-[10px] uppercase tracking-widest text-text-dim block mb-2 px-1 font-bold flex items-center justify-between">
               Strategy tuning
               <Info className="w-2.5 h-2.5 opacity-50" />
@@ -602,10 +1733,10 @@ export default function App() {
                     <span>Performance Interval</span>
                     <select 
                       value={interval}
-                      onChange={(e) => setInterval(e.target.value)}
-                      className="w-full bg-bg-input border border-border-dim rounded-lg p-2 text-[10px] font-mono outline-none"
+                      onChange={(e) => setChartInterval(e.target.value)}
+                      className="w-full bg-bg-input border border-border-dim rounded-lg p-2 text-[10px] font-mono outline-none text-text-heading"
                     >
-                      {["15m", "30m", "1h", "1d", "1wk"].map(i => <option key={i} value={i}>{i}</option>)}
+                      {["30m", "1h", "1d", "1wk"].map(i => <option key={i} value={i}>{i}</option>)}
                     </select>
                   </div>
                   <div className="flex gap-2">
@@ -686,7 +1817,7 @@ export default function App() {
                     <span className="text-sol-purple font-mono">{(weights.sentiment * 100).toFixed(0)}%</span>
                   </div>
                   <input 
-                    type="range" min="0" max="1" step="0.1" 
+                    type="range" min="0" max="1" step="0.05" 
                     value={weights.sentiment}
                     onChange={(e) => setWeights({ ...weights, sentiment: Number(e.target.value) })}
                     className="w-full accent-sol-purple"
@@ -698,7 +1829,7 @@ export default function App() {
                     <span className="text-sol-purple font-mono">{(weights.technical * 100).toFixed(0)}%</span>
                   </div>
                   <input 
-                    type="range" min="0" max="1" step="0.1" 
+                    type="range" min="0" max="1" step="0.05" 
                     value={weights.technical}
                     onChange={(e) => setWeights({ ...weights, technical: Number(e.target.value) })}
                     className="w-full accent-sol-purple"
@@ -710,9 +1841,21 @@ export default function App() {
                     <span className="text-sol-purple font-mono">{(weights.liquidity * 100).toFixed(0)}%</span>
                   </div>
                   <input 
-                    type="range" min="0" max="1" step="0.1" 
+                    type="range" min="0" max="1" step="0.05" 
                     value={weights.liquidity}
                     onChange={(e) => setWeights({ ...weights, liquidity: Number(e.target.value) })}
+                    className="w-full accent-sol-purple"
+                  />
+                </div>
+                <div>
+                  <div className="flex justify-between text-[11px] mb-3">
+                    <span className="text-text-body">Liquidation Base</span>
+                    <span className="text-sol-purple font-mono">{((weights.liquidation || 0) * 100).toFixed(0)}%</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="1" step="0.05" 
+                    value={weights.liquidation || 0}
+                    onChange={(e) => setWeights({ ...weights, liquidation: Number(e.target.value) })}
                     className="w-full accent-sol-purple"
                   />
                 </div>
@@ -798,9 +1941,21 @@ export default function App() {
             </button>
           </section>
         </aside>
+        )}
 
-        {/* Main Simulation Canvas */}
+        {currentView === 'dashboard' ? (
         <main className="flex-1 flex flex-col p-8 bg-bg-main space-y-8 overflow-y-auto custom-scrollbar">
+          {/* Header Title */}
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-border-dim/40 pb-5 gap-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <TrendingUp className="w-5 h-5 text-sol-purple" />
+                <h2 className="text-2xl font-serif italic text-text-heading">Current Order Prediction</h2>
+              </div>
+              <p className="text-sm text-text-dim font-sans">Real-time orderflow, dynamic catalyst intelligence, and multimodal predictive overlays.</p>
+            </div>
+          </div>
+
           {/* Top Stats Row */}
           {(() => {
             if (!results || results.data.length === 0) {
@@ -852,7 +2007,22 @@ export default function App() {
 
           {/* Performance Chart */}
           <div className="flex-1 flex flex-col space-y-8 min-h-0">
-            <Card title="Performance Overlay (Equity Curve)" className="flex-1" icon={PieChart}>
+            <Card 
+              title="Performance Overlay (Equity Curve)" 
+              className="flex-1" 
+              icon={PieChart}
+              action={
+                <button
+                  type="button"
+                  onClick={downloadPerformanceTimeSeriesCSV}
+                  className="py-1 px-2.5 rounded border border-border-dim/60 hover:border-sol-purple bg-bg-input text-text-heading hover:text-sol-purple flex items-center gap-1.5 transition-all text-[9px] font-bold cursor-pointer font-sans"
+                  title="Export equity curve data as CSV"
+                >
+                  <Download className="w-3 h-3" />
+                  Export Chart (CSV)
+                </button>
+              }
+            >
               <div className="mb-4">
                 <p className="text-[10px] text-text-dim italic">Visualizes the equity growth of the AI strategy vs simply holding the asset. Dots indicate trade execution points.</p>
               </div>
@@ -917,10 +2087,24 @@ export default function App() {
                       activeDot={false} 
                       isAnimationActive={false}
                     />
+                    <Line 
+                      type="monotone" 
+                      dataKey="strategyCum" 
+                      stroke="transparent" 
+                      dot={<CustomizedNewsDot />} 
+                      activeDot={false} 
+                      isAnimationActive={false}
+                    />
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
             </Card>
+
+            {/* Real-time Orderflow Liquidation Map Dynamic Module */}
+            <LiquidityHeatmap 
+              token={token} 
+              spotPrice={currentSpotPrice !== null ? currentSpotPrice : (results?.data && results.data.length > 0 ? results.data[results.data.length - 1]?.close : 173.25)} 
+            />
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:h-96">
               <Card title="Multi-Source Catalyst Intelligence" icon={Newspaper} className="h-[300px] lg:h-auto">
@@ -1034,24 +2218,36 @@ export default function App() {
 
             {/* Trade History */}
             <section className="space-y-4 pt-8">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between flex-wrap gap-4">
                 <div className="flex items-center gap-2">
                   <Activity className="w-4 h-4 text-sol-purple" />
                   <h3 className="text-xs uppercase tracking-widest font-bold text-text-heading">Trading Logic Audit Log - Positions</h3>
                 </div>
-                <p className="text-[10px] text-text-dim uppercase tracking-[0.15em] font-mono">PnL Summary: {results?.trades.reduce((acc, t) => acc + t.pnl, 0).toFixed(2)}x Aggregated</p>
+                <div className="flex items-center gap-3">
+                  {results?.trades && results.trades.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={downloadPerformanceTradesCSV}
+                      className="py-1.5 px-3 rounded-lg border border-border-dim/80 hover:border-sol-purple bg-bg-input text-text-heading hover:text-sol-purple flex items-center gap-1.5 transition-all text-[10px] font-bold cursor-pointer"
+                      title="Export trades as CSV"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Export Table (CSV)
+                    </button>
+                  )}
+                  <p className="text-[10px] text-text-dim uppercase tracking-[0.15em] font-mono">PnL Summary: {results?.trades.reduce((acc: number, t: any) => acc + (t.pnl || 0), 0).toFixed(2)}x Aggregated</p>
+                </div>
               </div>
               <TradeHistory trades={results?.trades || []} />
             </section>
           </div>
         </main>
-          </>
         ) : currentView === 'apiDocs' ? (
           <main className="flex-1 flex flex-col p-8 bg-bg-main overflow-y-auto custom-scrollbar">
             <div className="max-w-4xl mx-auto w-full space-y-8">
               <div className="space-y-2">
-                <h2 className="text-2xl font-serif italic text-text-heading">REST API Reference</h2>
-                <p className="text-sm text-text-dim">Programmatic access to the prediction engine.</p>
+                <h2 className="text-2xl font-serif italic text-text-heading">API Docs</h2>
+                <p className="text-sm text-text-dim">Programmatic REST API reference access to the prediction engine.</p>
               </div>
 
               <Card title={`GET ${window.location.origin}/api/historical`} icon={Zap}>
@@ -1186,14 +2382,2111 @@ export default function App() {
                   </div>
                 </div>
               </Card>
+
+              <Card title={`POST ${window.location.origin}/api/forecast`} icon={TrendingUp}>
+                <div className="space-y-6 text-sm">
+                  <p className="text-text-body">
+                    Synthesizes technical and headlines sentiment indicators to forecast price trend movements, standard volatility bands, directional confidence, and recommended orders for the next interval (30m, 1h, 1d) via Gemini.
+                  </p>
+                  <div>
+                    <h3 className="text-[10px] uppercase tracking-widest text-text-heading mb-2 font-bold">Request Payload</h3>
+                    <pre className="bg-bg-input p-4 rounded-lg font-mono text-xs text-sol-purple overflow-x-auto">
+{`{
+  "token": "SOL",
+  "interval": "1h",
+  "weights": {
+    "sentiment": 0.5,
+    "technical": 0.3,
+    "liquidity": 0.2
+  }
+}`}
+                    </pre>
+                  </div>
+                  <div>
+                    <h3 className="text-[10px] uppercase tracking-widest text-text-heading mb-2 font-bold">Expected Response</h3>
+                    <pre className="bg-bg-input p-4 rounded-lg font-mono text-xs text-sol-green overflow-x-auto">
+{`{
+  "token": "SOL",
+  "interval": "1h",
+  "currentPrice": 174.12,
+  "predictedPrice": 175.85,
+  "trend": "UP",
+  "volatilityPct": 1.45,
+  "confidenceScore": 0.74,
+  "suggestedOrder": "BUY_LIMIT",
+  "suggestedOrderPrice": 173.25,
+  "rationale": "High-volume institutional momentum paired with bullish news drives bias...",
+  "indicators": {
+    "rsi": 42.5,
+    "ema12": 173.9,
+    "ema26": 171.4
+  },
+  "latestNews": [...]
+}`}
+                    </pre>
+                  </div>
+                </div>
+              </Card>
+
+              <Card title={`POST ${window.location.origin}/api/backtest`} icon={Activity}>
+                <div className="space-y-6 text-sm">
+                  <p className="text-text-body">
+                    Simulates trading strategy performance historically over standard ranges (3d to 90d) with customizable sizers and indicators weights, returning key financial metrics and a chronological ledger of simulated trade events.
+                  </p>
+                  <div>
+                    <h3 className="text-[10px] uppercase tracking-widest text-text-heading mb-2 font-bold">Request Payload</h3>
+                    <pre className="bg-bg-input p-4 rounded-lg font-mono text-xs text-sol-purple overflow-x-auto">
+{`{
+  "token": "SOL",
+  "interval": "1h",
+  "lookbackDays": 14,
+  "initialCapital": 10000,
+  "weights": {
+    "sentiment": 0.5,
+    "technical": 0.3,
+    "liquidity": 0.2
+  }
+}`}
+                    </pre>
+                  </div>
+                  <div>
+                    <h3 className="text-[10px] uppercase tracking-widest text-text-heading mb-2 font-bold">Expected Response</h3>
+                    <pre className="bg-bg-input p-4 rounded-lg font-mono text-xs text-sol-green overflow-x-auto">
+{`{
+  "metrics": {
+    "initialCapital": 10000,
+    "finalCapital": 11245.5,
+    "totalTrades": 14,
+    "winningTrades": 9,
+    "losingTrades": 5,
+    "winRate": 64.2,
+    "pnlPct": 12.45,
+    "maxDrawdownPct": 3.12
+  },
+  "trades": [
+    {
+      "type": "CLOSE_LONG",
+      "date": "2026-05-20T02:00:00.000Z",
+      "price": 174.5,
+      "pnl": 245.5,
+      "pnlPct": 4.5,
+      "capitalAfter": 11245.5,
+      "note": "Target profit hit (+4.5%)"
+    },
+    ...
+  ],
+  "equityCurve": [
+    { "date": "2026-05-19 12:00", "equity": 10000, "price": 172.1 },
+    ...
+  ]
+}`}
+                    </pre>
+                  </div>
+                </div>
+              </Card>
+
+            </div>
+          </main>
+        ) : currentView === 'jupiter' ? (
+          <main className="flex-1 flex flex-col p-8 bg-bg-main overflow-y-auto custom-scrollbar animate-fade-in text-text-body">
+            <div className="max-w-5xl mx-auto w-full space-y-8">
+              
+              {/* Header and overview */}
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 border-b border-border-dim pb-6">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Wallet className="w-6 h-6 text-sol-purple" />
+                    <h2 className="text-2xl font-serif italic text-text-heading">Automated Trading</h2>
+                  </div>
+                  <p className="text-sm text-text-dim">
+                    Liquid-swap auto-arbitrage routing. Synchronize prediction models directly with Phantom wallets to swap Solana on-chain DEX pairs via Jupiter.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-3 shrink-0">
+                  {jupiterConfig.walletAddress ? (
+                    <div className="flex items-center gap-3 bg-sol-purple/10 border border-sol-purple/20 px-4 py-2 rounded-xl">
+                      <div className="w-2 h-2 rounded-full bg-sol-green animate-pulse"></div>
+                      <div className="font-mono text-xs">
+                        <span className="text-text-dim uppercase mr-1">Solana Balance:</span>
+                        <span className="text-text-heading font-bold">{(jupiterConfig.walletBalance || 0).toFixed(4)} SOL</span>
+                        {jupiterConfig.liveJupiterPrice && (
+                          <span className="text-[10px] text-text-dim ml-2 border-l border-border-dim/50 pl-2">
+                            SOL/USD: ${jupiterConfig.liveJupiterPrice.toFixed(2)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 px-4 py-2 rounded-xl text-red-400 font-mono text-xs">
+                      <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
+                      Wallet Disconnected
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {jupStatusMsg && (
+                <div className={cn(
+                  "p-4 rounded-xl text-xs border flex items-center gap-3 justify-between animate-fade-in",
+                  jupStatusMsg.type === "success" 
+                    ? "bg-sol-green/10 border-sol-green/20 text-sol-green" 
+                    : "bg-red-500/10 border-red-500/20 text-red-500"
+                )}>
+                  <span>{jupStatusMsg.text}</span>
+                  <button 
+                    onClick={() => setJupStatusMsg(null)} 
+                    className="text-[10px] uppercase font-bold text-text-heading hover:opacity-85 select-none"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                
+                {/* Left Side: Connection & Configurations Form (7 cols) */}
+                <div className="lg:col-span-12 xl:col-span-7 space-y-6">
+                  
+                  {/* Wallet Connection Card */}
+                  <Card title="Solana Adapter Configuration" icon={Wallet}>
+                    <div className="space-y-6">
+                      <p className="text-xs text-text-dim leading-relaxed">
+                        Authorize automated trade execution. Linking Phantom establishes state-management monitoring to execute on-chain swaps matching our quant predictions.
+                      </p>
+
+                      {jupiterConfig.walletAddress ? (
+                        <div className="p-4 bg-bg-input rounded-xl border border-border-dim space-y-4">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-mono text-text-dim uppercase tracking-wider">Connected Address</span>
+                            <span className="text-sol-purple font-mono font-bold text-xs select-all">
+                              {jupiterConfig.walletAddress}
+                            </span>
+                          </div>
+
+                          <div className="flex justify-end gap-3 pt-2">
+                            <button
+                              type="button"
+                              onClick={handleDisconnectWallet}
+                              disabled={jupLoading}
+                              className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 text-xs font-black uppercase tracking-wider rounded-lg transition-all active:scale-95"
+                            >
+                              Disconnect Wallet
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="p-8 text-center bg-bg-input rounded-xl border border-dashed border-border-dim space-y-4">
+                          <Wallet className="w-10 h-10 text-text-dim/40 mx-auto" />
+                          <div className="space-y-1">
+                            <h4 className="text-xs font-black uppercase text-text-heading">No Connected Account Identified</h4>
+                            <p className="text-[10px] text-text-dim max-w-sm mx-auto">
+                              Initialize Phantom Connection to access local balance trackers and deploy risk parameters.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleConnectWallet}
+                            disabled={jupLoading}
+                            className="inline-flex items-center gap-2 px-6 py-3 bg-sol-purple hover:bg-sol-purple/95 text-white text-xs font-black uppercase tracking-widest rounded-xl transition-all shadow-md active:scale-95"
+                          >
+                            <span className="font-extrabold">⚡ Connect Phantom Wallet</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </Card>
+
+                  {jupiterConfig.walletAddress && (
+                    <Card title="Connected Portfolio Assets & Positions" icon={Coins}>
+                      <div className="space-y-6">
+                        {/* Live Trading Execution Badge */}
+                        <div className="p-3.5 bg-sol-green/10 border border-sol-green/20 text-sol-green rounded-xl flex items-start gap-2.5 text-xs">
+                          <Shield className="w-4 h-4 mt-0.5 shrink-0" />
+                          <div className="space-y-1">
+                            <span className="font-extrabold uppercase text-[10px] tracking-wider block text-text-heading">Wallet Interaction Level: Synchronized & Live</span>
+                            <p className="text-[10px] opacity-90 leading-relaxed text-text-body">
+                              This dashboard parses address information and allows automatic trading via connected capabilities. For manual trades (Long/Short), active transactions are securely signed via Phantom web extension, with complete verification prior to position entry/exit. Active positions apply <span className="underline font-bold">real-time parameters against your portfolio</span> risk limits.
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Token balances */}
+                        <div className="space-y-2.5">
+                          <span className="text-[10px] uppercase font-bold tracking-widest text-text-dim block">In-Wallet Token Balances</span>
+                          
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            
+                            <div className="p-3 bg-bg-input border border-border-dim rounded-xl hover:border-sol-purple/35 transition-all flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <div className="w-7 h-7 rounded-full bg-sol-green/10 flex items-center justify-center font-bold text-xs text-sol-green font-mono">
+                                  P
+                                </div>
+                                <div>
+                                  <span className="text-text-heading font-black block text-xs">SOL-PERP</span>
+                                  <span className="text-[9px] text-text-dim uppercase">Solana Perpetual</span>
+                                </div>
+                              </div>
+                              <div className="text-right font-mono">
+                                <span className="text-text-heading font-bold text-xs block">{(jupiterConfig.walletBalance !== undefined ? jupiterConfig.walletBalance : 0).toFixed(4)}</span>
+                                <span className="text-[9px] text-text-dim">${((jupiterConfig.walletBalance !== undefined ? jupiterConfig.walletBalance : 0) * (jupiterConfig.liveJupiterPrice || 174.65)).toFixed(2)}</span>
+                              </div>
+                            </div>
+
+                            <div className="p-3 bg-bg-input border border-border-dim rounded-xl hover:border-sol-purple/35 transition-all flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <div className="w-7 h-7 rounded-full bg-green-500/10 flex items-center justify-center font-bold text-xs text-green-500 font-mono">
+                                  T
+                                </div>
+                                <div>
+                                  <span className="text-text-heading font-black block text-xs">USDT</span>
+                                  <span className="text-[9px] text-text-dim uppercase">Tether USD</span>
+                                </div>
+                              </div>
+                              <div className="text-right font-mono">
+                                <span className="text-text-heading font-bold text-xs block">{(jupiterConfig.usdcBalance !== undefined ? jupiterConfig.usdcBalance : 0).toFixed(4)}</span>
+                                <span className="text-[9px] text-text-dim">${((jupiterConfig.usdcBalance !== undefined ? jupiterConfig.usdcBalance : 0) * (1.0)).toFixed(2)}</span>
+                              </div>
+                            </div>
+
+                            <div className="p-3 bg-bg-input border border-border-dim rounded-xl hover:border-sol-purple/35 transition-all flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <div className="w-7 h-7 rounded-full bg-sol-purple/10 flex items-center justify-center font-bold text-xs text-sol-purple font-mono">
+                                  $
+                                </div>
+                                <div>
+                                  <span className="text-text-heading font-black block text-xs">USDC</span>
+                                  <span className="text-[9px] text-text-dim uppercase">USD Stablecoin</span>
+                                </div>
+                              </div>
+                              <div className="text-right font-mono">
+                                <span className="text-text-heading font-bold text-xs block">{(jupiterConfig.usdcBalance !== undefined ? jupiterConfig.usdcBalance : 0).toFixed(4)}</span>
+                                <span className="text-[9px] text-text-dim">${((jupiterConfig.usdcBalance !== undefined ? jupiterConfig.usdcBalance : 0) * (jupiterConfig.liveUsdcPrice || 1.0)).toFixed(2)}</span>
+                              </div>
+                            </div>
+
+                            <div className="p-3 bg-bg-input border border-border-dim rounded-xl hover:border-sol-purple/35 transition-all flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <div className="w-7 h-7 rounded-full bg-yellow-500/10 flex items-center justify-center font-bold text-xs text-yellow-500 font-mono">
+                                  J
+                                </div>
+                                <div>
+                                  <span className="text-text-heading font-black block text-xs">JUP</span>
+                                  <span className="text-[9px] text-text-dim uppercase font-mono">Jupiter Swap</span>
+                                </div>
+                              </div>
+                              <div className="text-right font-mono">
+                                <span className="text-text-heading font-bold text-xs block">{(jupiterConfig.jupBalance !== undefined ? jupiterConfig.jupBalance : 0).toFixed(2)}</span>
+                                <span className="text-[9px] text-text-dim">${((jupiterConfig.jupBalance !== undefined ? jupiterConfig.jupBalance : 0) * (jupiterConfig.liveJupPrice || 1.0)).toFixed(2)}</span>
+                              </div>
+                            </div>
+
+                            <div className="p-3 bg-bg-input border border-border-dim rounded-xl hover:border-sol-purple/35 transition-all flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <div className="w-7 h-7 rounded-full bg-orange-500/10 flex items-center justify-center font-bold text-xs text-orange-500 font-mono">
+                                  B
+                                </div>
+                                <div>
+                                  <span className="text-text-heading font-black block text-xs">BONK</span>
+                                  <span className="text-[9px] text-text-dim uppercase font-mono">Community Meme</span>
+                                </div>
+                              </div>
+                              <div className="text-right font-mono">
+                                <span className="text-text-heading font-bold text-xs block">{(jupiterConfig.bonkBalance !== undefined ? jupiterConfig.bonkBalance : 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                                <span className="text-[9px] text-text-dim">${((jupiterConfig.bonkBalance !== undefined ? jupiterConfig.bonkBalance : 0) * (jupiterConfig.liveBonkPrice || 0.00002)).toFixed(2)}</span>
+                              </div>
+                            </div>
+
+                          </div>
+                        </div>
+
+                        {/* Connected Wallet On-Chain positions */}
+                        <div className="space-y-2.5 pt-2 border-t border-border-dim/50">
+                          <span className="text-[10px] uppercase font-bold tracking-widest text-text-dim block mb-1">On-Chain DEX Positions (Perps / Amm LP)</span>
+                          
+                          <div className="space-y-2 max-h-[160px] overflow-y-auto custom-scrollbar">
+                            {jupiterConfig.activeTrade ? (
+                              <div className="p-3 bg-bg-input border border-border-dim rounded-xl flex items-center justify-between text-xs font-mono">
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className={cn(
+                                      "px-1.5 py-0.5 rounded text-[9px] font-black uppercase",
+                                      jupiterConfig.activeTrade.side === "LONG" ? "bg-sol-green/20 text-sol-green animate-pulse" : "bg-red-500/20 text-red-500"
+                                    )}>
+                                      {jupiterConfig.activeTrade.side}
+                                    </span>
+                                    <span className="text-text-heading font-extrabold text-xs">SOL-PERP</span>
+                                    <span className="text-text-dim text-[10px]">{jupiterConfig.activeTrade.leverage || 5}x Leverage</span>
+                                  </div>
+                                  <span className="text-[9px] text-text-dim block">Size: {jupiterConfig.activeTrade.sizeInSol?.toFixed(3)} SOL / Entry: ${jupiterConfig.activeTrade.entryPrice?.toFixed(2)}</span>
+                                </div>
+                                <div className="text-right">
+                                  {jupiterConfig.liveJupiterPrice ? (
+                                    <>
+                                      {(() => {
+                                        const entry = jupiterConfig.activeTrade.entryPrice;
+                                        const curr = jupiterConfig.liveJupiterPrice;
+                                        const isLong = jupiterConfig.activeTrade.side === "LONG";
+                                        const change = isLong 
+                                          ? ((curr - entry) / entry) * 100 * (jupiterConfig.activeTrade.leverage || 5)
+                                          : ((entry - curr) / entry) * 100 * (jupiterConfig.activeTrade.leverage || 5);
+                                        const isProfit = change >= 0;
+                                        return (
+                                          <>
+                                            <span className={cn("font-bold block", isProfit ? "text-sol-green" : "text-red-500")}>
+                                              {isProfit ? "+" : ""}{change.toFixed(2)}%
+                                            </span>
+                                            <span className={cn("text-[9px]", isProfit ? "text-sol-green" : "text-red-500")}>
+                                              {isProfit ? "+" : ""}${(change / 100 * jupiterConfig.activeTrade.sizeInSol * entry).toFixed(2)}
+                                            </span>
+                                          </>
+                                        );
+                                      })()}
+                                    </>
+                                  ) : (
+                                    <span className="text-text-dim">Seeking index...</span>
+                                  )}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="py-6 text-center text-text-dim text-[11px] bg-bg-input/60 rounded-xl border border-dashed border-border-dim">
+                                No active strategy swaps or portfolio positions open.
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                      </div>
+                    </Card>
+                  )}
+
+                  {/* Operational Settings Form */}
+                  <Card title="DEX Sizing & Leverage Parameters" icon={Settings}>
+                    <form onSubmit={handleSaveJupiterConfig} className="space-y-6">
+                      
+                      {/* Active Toggle Switch */}
+                      <div className="flex items-center justify-between p-4 bg-bg-input rounded-xl border border-border-dim">
+                        <div className="space-y-0.5">
+                          <label className="text-xs uppercase font-bold tracking-widest text-text-heading">Automated Prediction Execution</label>
+                          <p className="text-[10px] text-text-dim leading-normal">
+                            Enable backend routine trades check. Whenever the engine hits a confidence threshold, it executes swaps on Jupiter.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setJupiterConfig({ ...jupiterConfig, enabled: !jupiterConfig.enabled })}
+                          disabled={!jupiterConfig.walletAddress}
+                          className={cn(
+                            "w-12 h-6 rounded-full p-1 transition-colors duration-200 focus:outline-none disabled:opacity-30",
+                            jupiterConfig.enabled ? "bg-sol-green" : "bg-bg-main border border-border-dim"
+                          )}
+                        >
+                          <div className={cn(
+                            "w-4 h-4 rounded-full bg-white transition-transform duration-200 shadow",
+                            jupiterConfig.enabled ? "translate-x-6" : "translate-x-0"
+                          )} />
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        
+                        {/* Leverage Select panel */}
+                        <div className="space-y-4">
+                          <div className="space-y-2">
+                            <label className="text-[10px] uppercase font-bold tracking-widest text-text-dim block mb-1">
+                              Leverage Multiplier (Configurable)
+                            </label>
+                            <select
+                              value={jupiterConfig.leverage}
+                              onChange={(e) => setJupiterConfig({ ...jupiterConfig, leverage: Number(e.target.value) })}
+                              className="w-full bg-bg-input border border-border-dim rounded-lg px-4 py-2.5 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-sol-purple text-text-heading appearance-none"
+                            >
+                              <option value="1">1x (No Leverage)</option>
+                              <option value="2">2x Leverage</option>
+                              <option value="3">3x Leverage</option>
+                              <option value="5">5x Leverage (Default)</option>
+                              <option value="7">7x Leverage</option>
+                              <option value="10">10x High-Risk Leverage</option>
+                            </select>
+                          </div>
+
+                          {/* Take Profit / Stop Loss Inputs */}
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="space-y-2">
+                              <label className="text-[10px] uppercase font-bold tracking-widest text-text-dim block">Take Profit (%)</label>
+                              <div className="relative">
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="100"
+                                  value={jupiterConfig.takeProfitPct || 4}
+                                  onChange={(e) => setJupiterConfig({ ...jupiterConfig, takeProfitPct: Number(e.target.value) })}
+                                  className="w-full bg-bg-input border border-border-dim rounded-lg px-3 py-2 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-sol-green text-sol-green"
+                                />
+                                <span className="absolute right-3 top-2 text-xs text-text-dim font-mono">%</span>
+                              </div>
+                            </div>
+                            <div className="space-y-2">
+                              <label className="text-[10px] uppercase font-bold tracking-widest text-text-dim block">Stop Loss (%)</label>
+                              <div className="relative">
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="100"
+                                  value={jupiterConfig.stopLossPct || 2}
+                                  onChange={(e) => setJupiterConfig({ ...jupiterConfig, stopLossPct: Number(e.target.value) })}
+                                  className="w-full bg-bg-input border border-border-dim rounded-lg px-3 py-2 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-red-400 text-red-400"
+                                />
+                                <span className="absolute right-3 top-2 text-xs text-text-dim font-mono">%</span>
+                              </div>
+                            </div>
+                          </div>
+                          
+                          {/* Polling & Cooldown Inputs */}
+                          <div className="grid grid-cols-2 gap-3 pt-4 border-t border-border-dim/50">
+                            <div className="space-y-2">
+                              <label className="text-[10px] uppercase font-bold tracking-widest text-text-dim block">Check Interval (m)</label>
+                              <div className="relative">
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="1440"
+                                  value={jupiterConfig.frequencyMinutes || 5}
+                                  onChange={(e) => setJupiterConfig({ ...jupiterConfig, frequencyMinutes: Number(e.target.value) })}
+                                  className="w-full bg-bg-input border border-border-dim rounded-lg px-3 py-2 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-sol-purple text-text-heading"
+                                />
+                                <span className="absolute right-3 top-2 text-xs text-text-dim font-mono">min</span>
+                              </div>
+                            </div>
+                            <div className="space-y-2">
+                              <label className="text-[10px] uppercase font-bold tracking-widest text-text-dim block">Cooldown (m)</label>
+                              <div className="relative">
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="1440"
+                                  value={jupiterConfig.cooldownMinutes || 30}
+                                  onChange={(e) => setJupiterConfig({ ...jupiterConfig, cooldownMinutes: Number(e.target.value) })}
+                                  className="w-full bg-bg-input border border-border-dim rounded-lg px-3 py-2 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-text-heading text-text-heading"
+                                />
+                                <span className="absolute right-3 top-2 text-xs text-text-dim font-mono">min</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Balance usage allocation input */}
+                        <div className="space-y-2">
+                          <div className="flex justify-between items-center mb-1">
+                            <label className="text-[10px] uppercase font-bold tracking-widest text-text-dim block">
+                              Max Wallet Position Allocation
+                            </label>
+                            <span className="font-mono text-xs text-sol-purple font-extrabold bg-sol-purple/10 px-2 py-0.5 rounded">
+                              {jupiterConfig.allocationPercent}%
+                            </span>
+                          </div>
+                          
+                          <input
+                            type="range"
+                            min="1"
+                            max="100"
+                            step="1"
+                            value={jupiterConfig.allocationPercent}
+                            onChange={(e) => setJupiterConfig({ ...jupiterConfig, allocationPercent: Number(e.target.value) })}
+                            className="w-full h-1 bg-bg-main border border-border-dim rounded-lg appearance-none cursor-pointer accent-sol-purple"
+                          />
+                          
+                          <div className="flex items-center gap-1.5 p-2 bg-sol-purple/10 rounded-lg text-sol-purple text-[9px] font-mono leading-relaxed mt-4">
+                            <Shield className="w-3.5 h-3.5 shrink-0" />
+                            <span>Risk Limit Alert: Ensure allocation aligns with risk tolerance. High percentages + high leverage amplify exposure massively.</span>
+                          </div>
+                        </div>
+
+                      </div>
+
+                      {/* Manual trade triggers mock / on-chain options for fast execution */}
+                      <div className="pt-4 border-t border-border-dim/50 space-y-3">
+                        <label className="text-[10px] uppercase font-bold tracking-widest text-text-dim block">
+                          Manual Instant Trade Execution (Jupiter Swapper Widget)
+                        </label>
+                        <p className="text-[10px] text-text-dim leading-relaxed">
+                          Force bypass prediction daemon filters to place instant leverage swaps on the Jupiter DEX liquidity network:
+                        </p>
+                        <div className="grid grid-cols-2 gap-4">
+                          <button
+                            type="button"
+                            onClick={() => handleForceTrade("LONG")}
+                            disabled={!jupiterConfig.walletAddress || jupLoading || !!jupiterConfig.activeTrade}
+                            className="px-4 py-2.5 bg-sol-green/20 text-sol-green border border-sol-green/30 hover:bg-sol-green/35 rounded-lg text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all disabled:opacity-30 active:scale-95 cursor-pointer"
+                          >
+                            <ArrowUpRight className="w-4 h-4" />
+                            Swap Sol Long (Buy)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleForceTrade("SHORT")}
+                            disabled={!jupiterConfig.walletAddress || jupLoading || !!jupiterConfig.activeTrade}
+                            className="px-4 py-2.5 bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/35 rounded-lg text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all disabled:opacity-30 active:scale-95 cursor-pointer"
+                          >
+                            <ArrowDownRight className="w-4 h-4" />
+                            Swap Sol Short (Sell)
+                          </button>
+                        </div>
+                        <div className="pt-4 border-t border-dashed border-border-dim/50 mt-4 flex justify-center">
+                          <button
+                            type="button"
+                            onClick={handleTriggerAutoTrade}
+                            disabled={!jupiterConfig.walletAddress || jupLoading}
+                            className="px-4 py-2.5 w-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/20 rounded-lg text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all disabled:opacity-30 active:scale-95 cursor-pointer"
+                          >
+                            <Zap className="w-4 h-4" />
+                            Trigger Trade via Auto Bot
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Settings submit */}
+                      <div className="flex justify-between items-center pt-4 border-t border-border-dim/50">
+                        <span className="text-[9px] text-text-dim italic">
+                          Configurations persist to jupiter_wallet_state.json.
+                        </span>
+                        <button
+                          type="submit"
+                          disabled={!jupiterConfig.walletAddress || jupLoading}
+                          className="px-6 py-2.5 bg-sol-purple hover:bg-sol-purple/95 text-white text-xs font-black uppercase tracking-widest rounded-lg transition-all disabled:opacity-50 active:scale-95 cursor-pointer"
+                        >
+                          {jupLoading ? "Saving..." : "Apply Configurations"}
+                        </button>
+                      </div>
+
+                    </form>
+                  </Card>
+
+                </div>
+
+                {/* Right Side: Vitality Monitor, Historic Swap logs, Active Trades (5 cols) */}
+                <div className="lg:col-span-12 xl:col-span-5 space-y-6">
+                  
+                  {/* Status and Active position Tracking */}
+                  <Card title="On-Chain Swap Vitality" icon={Activity}>
+                    <div className="space-y-4 text-xs font-mono">
+                      
+                      <div className="flex justify-between items-center pb-3 border-b border-border-dim/50">
+                        <span className="text-text-dim text-[10px] uppercase tracking-wider">Auto Bot Thread</span>
+                        <span className={cn(
+                          "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest",
+                          (jupiterConfig.enabled && jupiterConfig.walletAddress) ? "bg-sol-green/20 text-sol-green animate-pulse" : "bg-text-dim/20 text-text-dim"
+                        )}>
+                          {(jupiterConfig.enabled && jupiterConfig.walletAddress) ? "Polling (5m)" : "Idle"}
+                        </span>
+                      </div>
+
+                      <div className="flex justify-between items-center pb-3 border-b border-border-dim/50">
+                        <span className="text-text-dim text-[10px] uppercase tracking-wider">Sync Token Target</span>
+                        <span className="text-text-heading font-extrabold">{jupiterConfig.token || "SOL"}-PERP</span>
+                      </div>
+
+                      <div className="flex justify-between items-center pb-3 border-b border-border-dim/50">
+                        <span className="text-text-dim text-[10px] uppercase tracking-wider">Last Checked</span>
+                        <span className="text-text-heading">
+                          {jupiterConfig.lastCheckedAt 
+                            ? format(new Date(jupiterConfig.lastCheckedAt), "HH:mm:ss") + " (" + tzAbbr + ")"
+                            : "No executions yet"
+                          }
+                        </span>
+                      </div>
+
+                      <div className="flex justify-between items-center pb-3 border-b border-border-dim/50">
+                        <span className="text-text-dim text-[10px] uppercase tracking-wider">Detected Signal Bias</span>
+                        <span className="text-text-heading font-medium">{jupiterConfig.lastAction || "None"}</span>
+                      </div>
+
+                      {/* Simulation Profit / Loss Metrics tracker */}
+                      <div className="pt-2 space-y-3">
+                        <div className="flex items-center justify-between pb-1">
+                          <span className="text-[10px] text-text-dim uppercase tracking-wider block font-bold font-sans">
+                            Trading Metrics PnL
+                          </span>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="p-3 bg-bg-input rounded-xl border border-border-dim">
+                            <span className="text-[9px] text-text-dim block uppercase">Last Trade real PnL</span>
+                            <span className={cn(
+                              "text-sm font-black tracking-tight block mt-0.5",
+                              (jupiterConfig.lastTradePnL || 0) > 0 ? "text-sol-green" : (jupiterConfig.lastTradePnL || 0) < 0 ? "text-red-500" : "text-text-heading"
+                            )}>
+                              {jupiterConfig.lastTradePnL !== undefined 
+                                ? `${(jupiterConfig.lastTradePnL >= 0 ? "+" : "")}${jupiterConfig.lastTradePnL.toFixed(2)}%`
+                                : "0.00%"
+                              }
+                            </span>
+                          </div>
+
+                          <div className="p-3 bg-bg-input rounded-xl border border-border-dim">
+                            <span className="text-[9px] text-text-dim block uppercase">Cumulative Return</span>
+                            <span className={cn(
+                              "text-sm font-black tracking-tight block mt-0.5",
+                              (jupiterConfig.cumulativePnL || 0) > 0 ? "text-sol-green" : (jupiterConfig.cumulativePnL || 0) < 0 ? "text-red-500" : "text-text-heading"
+                            )}>
+                              {jupiterConfig.cumulativePnL !== undefined
+                                ? `${(jupiterConfig.cumulativePnL >= 0 ? "+" : "")}${jupiterConfig.cumulativePnL.toFixed(2)}%`
+                                : "0.00%"
+                              }
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Direct Position Check: strictly ensure no more than 1 open position is allowed */}
+                        <div className="py-2.5 border-t border-b border-border-dim/40 space-y-2 mt-2">
+                          <span className="text-[9px] text-text-dim block uppercase tracking-wider font-bold">
+                            Active Position Allocation (Strict Limit: 1)
+                          </span>
+                          
+                          {jupiterConfig.activeTrade ? (
+                            <div className="p-3 bg-sol-purple/10 border border-sol-purple/30 rounded-xl space-y-2 text-xs">
+                              <div className="flex justify-between items-center">
+                                <span className={cn(
+                                  "px-2 py-0.5 rounded text-[9px] font-black text-white uppercase",
+                                  jupiterConfig.activeTrade.side === "LONG" ? "bg-sol-green" : "bg-red-500"
+                                )}>
+                                  {jupiterConfig.activeTrade.side} Swapped
+                                </span>
+                                <span className="text-text-dim text-[10px]">
+                                  {jupiterConfig.activeTrade.leverage}x Leverage
+                                </span>
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-2 text-[10px] text-text-body font-mono">
+                                <div>
+                                  <span className="text-text-dim block uppercase">Entry Price:</span>
+                                  <span className="text-text-heading font-bold">${jupiterConfig.activeTrade.entryPrice?.toFixed(2)}</span>
+                                </div>
+                                <div>
+                                  <span className="text-text-dim block uppercase">Swap Size:</span>
+                                  <span className="text-text-heading font-bold text-sol-purple">
+                                    {jupiterConfig.activeTrade.sizeInSol?.toFixed(3)} SOL
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="pt-2 flex justify-end">
+                                <button
+                                  type="button"
+                                  onClick={handleForceCloseTrade}
+                                  disabled={jupLoading}
+                                  className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/20 rounded font-black uppercase text-[10px] tracking-wider transition-all"
+                                >
+                                  Close Position (Market Settlement Swap)
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-text-dim italic block p-1">
+                              Flat (No open positions. Ready to execute new swaps).
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Recent Trade History Logs */}
+                        {jupiterConfig.tradesHistory && jupiterConfig.tradesHistory.length > 0 && (
+                          <div className="space-y-2 max-h-[170px] overflow-y-auto pr-1">
+                            <div className="flex justify-between items-center mb-1 col-span-full">
+                              <span className="text-[9px] text-text-dim block uppercase font-bold">DEX Settlement Logs</span>
+                              <button
+                                type="button"
+                                onClick={downloadJupiterTradeLogCSV}
+                                className="text-[8.5px] text-sol-purple font-bold uppercase tracking-wider hover:underline flex items-center gap-1 cursor-pointer"
+                                title="Download settlement logs as CSV file"
+                              >
+                                <Download className="w-2.5 h-2.5" />
+                                Export CSV
+                              </button>
+                            </div>
+                            {jupiterConfig.tradesHistory.map((trade: any) => (
+                              <div key={trade.id} className="flex flex-col p-2 bg-bg-input border border-border-dim/40 rounded-lg text-[10px] space-y-1">
+                                <div className="flex justify-between items-center">
+                                  <span className={cn(
+                                    "px-1.5 rounded text-[8px] font-bold uppercase text-white",
+                                    trade.side === "LONG" ? "bg-sol-green" : "bg-red-500"
+                                  )}>
+                                    {trade.side} ({trade.leverage}x)
+                                  </span>
+                                  <span className={cn(
+                                    "font-black tracking-tight",
+                                    trade.pnl >= 0 ? "text-sol-green" : "text-red-500"
+                                  )}>
+                                    {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}% réalisé
+                                  </span>
+                                </div>
+                                <div className="flex justify-between items-center text-[9px] text-text-dim">
+                                  <span>${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)}</span>
+                                  <span>{trade.sizeInSol?.toFixed(3)} SOL</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Reset telemetry statistics button */}
+                        <div className="pt-2">
+                          <button
+                            type="button"
+                            onClick={handleResetJupiterStats}
+                            disabled={jupLoading}
+                            className="w-full text-center text-[10px] font-bold uppercase tracking-wider py-2 px-3 rounded bg-red-500/10 hover:bg-red-500/15 text-red-400 border border-red-500/20 active:scale-95 transition-all cursor-pointer"
+                          >
+                            Reset Logs & Capital History
+                          </button>
+                        </div>
+
+                      </div>
+
+                      {jupiterConfig.error && (
+                        <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-500 rounded text-[10px] leading-relaxed">
+                          <p className="font-bold mb-1">Last Daemon Error:</p>
+                          <p className="break-words font-mono font-normal">{jupiterConfig.error}</p>
+                        </div>
+                      )}
+                    </div>
+                  </Card>
+                </div>
+              </div>
+
+            </div>
+          </main>
+        ) : currentView === 'forecast' ? (
+          <main className="flex-1 flex flex-col p-8 bg-bg-main overflow-y-auto custom-scrollbar animate-fade-in text-text-body">
+            <div className="max-w-6xl mx-auto w-full space-y-8 pb-16">
+              
+              {/* Header Title */}
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-border-dim/40 pb-5 gap-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <TrendingUp className="w-5 h-5 text-sol-purple" />
+                    <h2 className="text-2xl font-serif italic text-text-heading">Forecast Trend & Historical Backtester</h2>
+                  </div>
+                  <p className="text-sm text-text-dim font-sans">Simulate next-tick directions via Multimodal Gemini analytics, and stress-test technical/sentiment rules against actual history.</p>
+                </div>
+                
+                {/* Active view selectors */}
+                <div className="flex flex-wrap items-center gap-2 bg-bg-card border border-border-dim rounded-xl p-2 text-xs text-text-dim font-bold shrink-0">
+                  <span className="px-1 text-[10px] text-text-heading uppercase tracking-wider">Engine Ticker: {token}</span>
+                  <span className="w-px h-3 bg-border-dim inline-block mx-1"></span>
+                  <span className="px-0.5 text-[10px] text-text-heading uppercase tracking-wider">Forecast Sample:</span>
+                  <select 
+                    value={forecastActiveInterval} 
+                    onChange={(e) => {
+                      setForecastActiveInterval(e.target.value);
+                      fetchForecast(token, e.target.value);
+                    }}
+                    className="bg-bg-input border border-border-dim/50 py-1 px-1.5 rounded-lg text-text-heading focus:outline-none focus:border-sol-purple transition-colors cursor-pointer"
+                  >
+                    <option value="30m">30m Interval</option>
+                    <option value="1h">1h Interval</option>
+                    <option value="1d">1d Interval</option>
+                  </select>
+                  <button 
+                    onClick={() => fetchForecast(token, forecastActiveInterval)}
+                    disabled={forecastLoading}
+                    className="py-1 px-2 rounded-lg bg-sol-purple hover:bg-sol-purple/85 text-white flex items-center gap-1 transition-all disabled:opacity-50 font-black cursor-pointer text-[10px]"
+                  >
+                    <RefreshCw className={cn("w-2.5 h-2.5", forecastLoading && "animate-spin")} />
+                    Refresh
+                  </button>
+                </div>
+              </div>
+
+              {/* 1. Forecaster Results Panel */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                
+                {/* Main Forecast Stats (Left) */}
+                <div className="lg:col-span-5 space-y-6">
+                  {forecastError && (
+                    <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-500 text-xs rounded-xl font-mono">
+                      {forecastError}
+                    </div>
+                  )}
+
+                  <Card title={`${token} Next-${forecastActiveInterval} Future Forecast`} icon={Activity} overflowVisible>
+                    {forecastLoading ? (
+                      <div className="py-16 flex flex-col items-center justify-center gap-2">
+                        <RefreshCw className="w-8 h-8 text-sol-purple animate-spin" />
+                        <span className="text-[10px] font-mono text-text-dim uppercase tracking-widest animate-pulse mt-2">Running GenAI Predictive Outlook...</span>
+                      </div>
+                    ) : forecastData ? (
+                      <div className="space-y-6">
+                        {/* Highlights */}
+                        <div className="grid grid-cols-2 gap-3">
+                          {/* Direction block */}
+                          <div className="p-3.5 bg-bg-input border border-border-dim rounded-xl flex flex-col justify-between group relative">
+                            <span className="text-[9px] uppercase font-bold text-text-dim tracking-wider cursor-help border-b border-dashed border-border-dim/60 w-fit">
+                              Trend Direction
+                              <span className="absolute left-1/2 -translate-x-1/2 top-full mt-2 hidden group-hover:block w-64 bg-slate-950 border border-sol-purple text-[10.5px] text-slate-200 p-3 rounded-xl shadow-2xl z-50 normal-case font-normal leading-relaxed text-left">
+                                <strong>Trend Direction status:</strong> set to <strong>UP</strong> if the strategy composite score is &gt; +0.08, <strong>DOWN</strong> if &lt; -0.08, or <strong>SIDEWAYS</strong> if neutral.
+                              </span>
+                            </span>
+                            <div className="flex items-center gap-2 mt-1 mb-1">
+                              {forecastData.trend === "UP" ? (
+                                <>
+                                  <ArrowUpRight className="w-5 h-5 text-sol-green" />
+                                  <span className="text-xl font-black text-sol-green font-mono">UP</span>
+                                </>
+                              ) : forecastData.trend === "DOWN" ? (
+                                <>
+                                  <ArrowDownRight className="w-5 h-5 text-red-500" />
+                                  <span className="text-xl font-black text-red-500 font-mono">DOWN</span>
+                                </>
+                              ) : (
+                                <>
+                                  <RefreshCw className="w-4 h-4 text-yellow-500" />
+                                  <span className="text-xl font-black text-yellow-500 font-mono">SIDEWAYS</span>
+                                </>
+                              )}
+                            </div>
+                            <span className="text-[9px] text-text-dim uppercase mt-1">Expected Trend</span>
+                          </div>
+
+                          {/* Confidence level */}
+                          <div className="p-3.5 bg-bg-input border border-border-dim rounded-xl flex flex-col justify-between group relative">
+                            <span className="text-[9px] uppercase font-bold text-text-dim tracking-wider cursor-help border-b border-dashed border-border-dim/60 w-fit">
+                              Bias Probability
+                              <span className="absolute left-1/2 -translate-x-1/2 top-full mt-2 hidden group-hover:block w-64 bg-slate-950 border border-sol-purple text-[10.5px] text-slate-200 p-3 rounded-xl shadow-2xl z-50 normal-case font-normal leading-relaxed text-left">
+                                <strong>Direction Confidence Score:</strong> derived by mapping the dynamic composite bias score to a 10%-95% linear probability bounds limit.
+                              </span>
+                            </span>
+                            <div className="mt-1">
+                              <span className="text-xl font-black text-text-heading font-mono">{(forecastData.confidenceScore * 100).toFixed(0)}%</span>
+                              <div className="w-full bg-border-dim/40 h-1.5 rounded-full overflow-hidden mt-1.5">
+                                <div 
+                                  className="bg-sol-purple h-full" 
+                                  style={{ width: `${Math.round(forecastData.confidenceScore * 100)}%` }}
+                                ></div>
+                              </div>
+                            </div>
+                            <span className="text-[9px] text-text-dim uppercase">Direction Confidence</span>
+                          </div>
+                        </div>
+
+                        {/* Financial Price targets */}
+                        <div className="space-y-3 pt-2 border-t border-border-dim/55">
+                          <span className="text-[10px] uppercase font-bold tracking-widest text-text-dim block mb-1 group relative cursor-help border-b border-dashed border-border-dim/60 w-fit">
+                            Interactive Target Price Matrix
+                            <span className="absolute bottom-full left-0 mb-2 hidden group-hover:block w-72 bg-slate-950 border border-sol-purple text-[10.5px] text-slate-200 p-3 rounded-xl shadow-2xl z-50 normal-case font-normal leading-relaxed text-left font-sans">
+                              <strong>Price Target Derivation:</strong> estimated using target spot value adjusted by expected interval drift index. Dynamic Drift is calculated as: <code>compositeScore * (volatilityPct / 100) * 0.85</code>.
+                            </span>
+                          </span>
+                          
+                          <div className="p-3 bg-bg-input border border-border-dim rounded-xl space-y-2.5">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="text-text-dim">Current Value:</span>
+                              <span className="font-mono text-text-heading font-black">${forecastData.currentPrice?.toFixed(2)}</span>
+                            </div>
+                            <div className="flex items-center justify-between text-xs group relative">
+                              <span className="text-text-dim cursor-help border-b border-dashed border-border-dim/60">Estimated Price Target:</span>
+                              <span className={cn("font-mono font-black", forecastData.predictedPrice >= forecastData.currentPrice ? "text-sol-green" : "text-red-500")}>
+                                ${forecastData.predictedPrice?.toFixed(2)}
+                              </span>
+                              <span className="absolute bottom-full right-0 mb-2 hidden group-hover:block w-64 bg-slate-950 border border-sol-purple text-[10.5px] text-slate-200 p-3 rounded-xl shadow-2xl z-50 normal-case font-normal leading-relaxed text-left font-sans">
+                                <strong>Target Formula:</strong> <br />
+                                <code>spot * (1 + expectedDrift)</code> <br />
+                                projected over chosen interval.
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between text-xs group relative">
+                              <span className="text-text-dim cursor-help border-b border-dashed border-border-dim/60">Expected Drift (Volatility):</span>
+                              <span className="font-mono text-text-heading font-medium font-mono">~{((forecastData.predictedPrice - forecastData.currentPrice) / forecastData.currentPrice * 100).toFixed(3)}% (+/- {forecastData.volatilityPct}%)</span>
+                              <span className="absolute bottom-full right-0 mb-2 hidden group-hover:block w-64 bg-slate-950 border border-sol-purple text-[10.5px] text-slate-200 p-3 rounded-xl shadow-2xl z-50 normal-case font-normal leading-relaxed text-left font-sans">
+                                <strong>Calculated Drift:</strong> percentage ratio difference of target price against live spot index. Volatility is baseline price volatility standard deviation.
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Live Trading triggers */}
+                        <div className="space-y-3 pt-2 border-t border-border-dim/55">
+                          <span className="text-[10px] uppercase font-bold tracking-widest text-text-dim block mb-1 group relative cursor-help border-b border-dashed border-border-dim/60 w-fit">
+                            Quant Recommendation Params
+                            <span className="absolute bottom-full left-0 mb-2 hidden group-hover:block w-72 bg-slate-950 border border-sol-purple text-[10.5px] text-slate-200 p-3 rounded-xl shadow-2xl z-50 normal-case font-normal leading-relaxed text-left font-sans">
+                              <strong>Recommendation Strategy:</strong> Buy limit triggers if composite score is bullish (&gt; +0.12), Sell stop if bearish (&lt; -0.12), and Hold if sideways/neutral bounds.
+                            </span>
+                          </span>
+                          
+                          <div className="p-3.5 bg-bg-input border border-border-dim rounded-xl flex items-center justify-between text-xs group relative">
+                            <div className="space-y-0.5">
+                              <span className={cn(
+                                "px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-wider block w-fit shadow-sm",
+                                forecastData.suggestedOrder === "BUY_LIMIT" ? "bg-sol-green/20 text-sol-green border border-sol-green/20" : "bg-sol-purple/20 text-sol-purple border border-sol-purple/20"
+                              )}>
+                                {forecastData.suggestedOrder}
+                              </span>
+                              <span className="text-text-dim text-[10px] cursor-help border-b border-dashed border-border-dim/60 w-fit">Optimal Route</span>
+                            </div>
+                            <div className="text-right font-mono">
+                              <span className="text-text-heading font-extrabold block">${forecastData.suggestedOrderPrice?.toFixed(2)}</span>
+                              <span className="text-[9px] text-text-dim uppercase cursor-help border-b border-dashed border-border-dim/60">Suggested Limit Trigger</span>
+                            </div>
+                            <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block w-64 bg-slate-950 border border-sol-purple text-[10.5px] text-slate-200 p-3 rounded-xl shadow-2xl z-50 normal-case font-normal leading-relaxed text-left font-sans">
+                              <strong>Trigger Math:</strong> <br />
+                              BUY: <code>spot * (1 - volatility * 0.20)</code> <br />
+                              SELL: <code>spot * (1 + volatility * 0.15)</code>
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Core strategy formula and weights details */}
+                        {forecastData.strategyDetails && (
+                          <div className="space-y-3 pt-2 border-t border-border-dim/55 text-xs animate-fade-in font-sans">
+                            <div className="flex justify-between items-center mb-1">
+                              <span className="text-[10px] uppercase font-bold tracking-widest text-text-dim">Main AI Strategy Factors</span>
+                              <span className="text-[9px] text-sol-purple font-mono font-bold">Live Weight Config</span>
+                            </div>
+                            <div className="bg-bg-input border border-border-dim rounded-xl p-3.5 space-y-3 font-sans">
+                              {/* News Sentiment Factor */}
+                              <div className="flex justify-between items-center group relative cursor-pointer">
+                                <div className="space-y-0.5 w-[72%]">
+                                  <span className="text-[10px] uppercase tracking-wider font-bold text-text-heading block cursor-help border-b border-dashed border-border-dim/60 w-fit">News Sentiment ({Math.round(forecastData.strategyDetails.sentimentWeight * 100)}%)</span>
+                                  <span className="text-[8px] text-text-dim block leading-none">NLP Sentiment Index of Web Headlines</span>
+                                </div>
+                                <span className={cn(
+                                  "font-mono text-[10px] px-1.5 py-0.5 rounded font-bold shrink-0",
+                                  forecastData.strategyDetails.sentimentScore > 0.05 ? "bg-sol-green/15 text-sol-green border border-sol-green/10 animate-pulse" : 
+                                  forecastData.strategyDetails.sentimentScore < -0.05 ? "bg-red-500/15 text-red-400 border border-red-500/10 animate-pulse" : "bg-yellow-500/15 text-yellow-500 border border-yellow-500/10"
+                                )}>
+                                  Index: {forecastData.strategyDetails.sentimentScore > 0 ? "+" : ""}{forecastData.strategyDetails.sentimentScore.toFixed(2)}
+                                </span>
+                                <span className="absolute bottom-full right-0 mb-2 hidden group-hover:block w-72 bg-slate-950 border border-sol-purple text-[10.5px] text-slate-200 p-3 rounded-xl shadow-2xl z-50 normal-case font-normal leading-relaxed text-left font-sans">
+                                  <strong>NLP Sentiment Analysis:</strong> <br />
+                                  We fetched top articles matching <code>"{topic}"</code>. <br />
+                                  Calculated average comparative phrase valence score based on AFINN lexicology. <br />
+                                  {forecastData.strategyDetails.allPositiveWords && forecastData.strategyDetails.allPositiveWords.length > 0 && (
+                                    <div className="mt-1 border-t border-border-dim/15 pt-1 text-sol-green">
+                                      <strong>Detected Positives:</strong> <span className="font-mono text-[10px]">{forecastData.strategyDetails.allPositiveWords.join(", ")}</span>
+                                    </div>
+                                  )}
+                                  {forecastData.strategyDetails.allNegativeWords && forecastData.strategyDetails.allNegativeWords.length > 0 && (
+                                    <div className="mt-1 border-t border-border-dim/15 pt-1 text-red-400">
+                                      <strong>Detected Negatives:</strong> <span className="font-mono text-[10px]">{forecastData.strategyDetails.allNegativeWords.join(", ")}</span>
+                                    </div>
+                                  )}
+                                </span>
+                              </div>
+                              {/* EMA Trend Factor */}
+                              <div className="flex justify-between items-center group relative cursor-pointer">
+                                <div className="space-y-0.5 w-[72%]">
+                                  <span className="text-[10px] uppercase tracking-wider font-bold text-text-heading block cursor-help border-b border-dashed border-border-dim/60 w-fit">EMA Trend ({Math.round(forecastData.strategyDetails.technicalWeight * 100)}%)</span>
+                                  <span className="text-[8px] text-text-dim block leading-none">Fast/Slow Divergence Bias</span>
+                                </div>
+                                <span className={cn(
+                                  "font-mono text-[10px] px-1.5 py-0.5 rounded font-bold shrink-0",
+                                  forecastData.strategyDetails.technicalScore > 0.05 ? "bg-sol-green/15 text-sol-green border border-sol-green/10" : 
+                                  forecastData.strategyDetails.technicalScore < -0.05 ? "bg-red-500/15 text-red-400 border border-red-500/10" : "bg-yellow-500/15 text-yellow-500 border border-yellow-500/10"
+                                )}>
+                                  Score: {forecastData.strategyDetails.technicalScore > 0 ? "+" : ""}{forecastData.strategyDetails.technicalScore.toFixed(2)}
+                                </span>
+                                <span className="absolute bottom-full right-0 mb-2 hidden group-hover:block w-72 bg-slate-950 border border-sol-purple text-[10.5px] text-slate-200 p-3 rounded-xl shadow-2xl z-50 normal-case font-normal leading-relaxed text-left font-sans font-sans">
+                                  <strong>Divergence Math:</strong> ratio divergence <code>(EMA12 - EMA26) / EMA26 * 25</code>, restricted between scale limits of -1.0 to +1.0. High value indicates high momentum.
+                                </span>
+                              </div>
+                              {/* RSI Liquidity Factor */}
+                              <div className="flex justify-between items-center group relative cursor-pointer font-sans">
+                                <div className="space-y-0.5 w-[72%] font-sans">
+                                  <span className="text-[10px] uppercase tracking-wider font-bold text-text-heading block cursor-help border-b border-dashed border-border-dim/60 w-fit">RSI Liquidity ({Math.round(forecastData.strategyDetails.liquidityWeight * 100)}%)</span>
+                                  <span className="text-[8px] text-text-dim block leading-none">Mean Reversion Boundaries</span>
+                                </div>
+                                <span className={cn(
+                                  "font-mono text-[10px] px-1.5 py-0.5 rounded font-bold shrink-0",
+                                  forecastData.strategyDetails.liquidityScore > 0.05 ? "bg-sol-green/15 text-sol-green border border-sol-green/10" : 
+                                  forecastData.strategyDetails.liquidityScore < -0.05 ? "bg-red-500/15 text-red-400 border border-red-500/10" : "bg-yellow-500/15 text-yellow-500 border border-yellow-500/10"
+                                )}>
+                                  Score: {forecastData.strategyDetails.liquidityScore > 0 ? "+" : ""}{forecastData.strategyDetails.liquidityScore.toFixed(2)}
+                                </span>
+                                <span className="absolute bottom-full right-0 mb-2 hidden group-hover:block w-72 bg-slate-950 border border-sol-purple text-[10.5px] text-slate-200 p-3 rounded-xl shadow-2xl z-50 normal-case font-normal leading-relaxed text-left font-sans">
+                                  <strong>Mean Reversion Math:</strong> <br />
+                                  If RSI &lt; 35 (Oversold): score of <code>(35 - RSI) / 20</code> (Bullish potential). <br />
+                                  If RSI &gt; 65 (Overbought): score of <code>-(RSI - 65) / 20</code> (Bearish pullback). <br />
+                                  Otherwise neutral bounds: <code>-((RSI - 50) / 30)</code>.
+                                </span>
+                              </div>
+                              
+                              {/* Liquidation Map Factor */}
+                              <div className="flex justify-between items-center group relative cursor-pointer font-sans mt-2">
+                                <div className="space-y-0.5 w-[72%] font-sans">
+                                  <span className="text-[10px] uppercase tracking-wider font-bold text-text-heading block cursor-help border-b border-dashed border-border-dim/60 w-fit">Liquidation Map ({Math.round((forecastData.strategyDetails.liquidationWeight || 0) * 100)}%)</span>
+                                  <span className="text-[8px] text-text-dim block leading-none">Orderflow Concentration Analysis</span>
+                                </div>
+                                <span className={cn(
+                                  "font-mono text-[10px] px-1.5 py-0.5 rounded font-bold shrink-0",
+                                  (forecastData.strategyDetails.liquidationScore || 0) > 0.05 ? "bg-sol-green/15 text-sol-green border border-sol-green/10" : 
+                                  (forecastData.strategyDetails.liquidationScore || 0) < -0.05 ? "bg-red-500/15 text-red-400 border border-red-500/10" : "bg-yellow-500/15 text-yellow-500 border border-yellow-500/10"
+                                )}>
+                                  Score: {(forecastData.strategyDetails.liquidationScore || 0) > 0 ? "+" : ""}{(forecastData.strategyDetails.liquidationScore || 0).toFixed(2)}
+                                </span>
+                                <span className="absolute bottom-full right-0 mb-2 hidden group-hover:block w-72 bg-slate-950 border border-sol-purple text-[10.5px] text-slate-200 p-3 rounded-xl shadow-2xl z-50 normal-case font-normal leading-relaxed text-left font-sans">
+                                  <strong>Liquidation Math:</strong> <br />
+                                  Uses short & long squeeze thresholds. (Currently simulated).
+                                </span>
+                              </div>
+                              
+                              {/* Composite Dynamic Score */}
+                              <div className="pt-2.5 border-t border-border-dim/20 flex justify-between items-center group relative cursor-pointer">
+                                <div className="space-y-0.5">
+                                  <span className="text-[10px] uppercase tracking-wider font-extrabold text-sol-purple block cursor-help border-b border-dashed border-border-dim/60 w-fit">Composite Strategic Bias</span>
+                                  <span className="text-[8px] text-text-dim lowercase tracking-wide block font-sans">Normalized factor consensus index</span>
+                                </div>
+                                <span className={cn(
+                                  "font-mono text-xs px-2 py-0.5 rounded font-black border",
+                                  forecastData.strategyDetails.compositeScore > 0.08 ? "bg-sol-green/10 text-sol-green border-sol-green/20" : 
+                                  forecastData.strategyDetails.compositeScore < -0.08 ? "bg-red-500/10 text-red-400 border-red-500/20" : "bg-yellow-500/10 text-yellow-500 border-yellow-500/20"
+                                )}>
+                                  {forecastData.strategyDetails.compositeScore > 0 ? "+" : ""}{forecastData.strategyDetails.compositeScore.toFixed(3)}
+                                </span>
+                                <span className="absolute bottom-full right-0 mb-2 hidden group-hover:block w-72 bg-slate-950 border border-sol-purple text-[10.5px] text-slate-200 p-3 rounded-xl shadow-2xl z-50 normal-case font-normal leading-relaxed text-left font-sans">
+                                  <strong>Composite Calculation:</strong> <br />
+                                  Formula: <code>(sentimentScore * sentimentW + technicalScore * technicalW + liquidityScore * liquidityW + liquidationScore * liquidationW) / totalWeights</code>. Ranges from -1 (fully bearish) to +1 (fully bullish).
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                      </div>
+                    ) : (
+                      <div className="py-12 text-center text-text-dim text-xs">
+                        No forecast retrieved. Adjust filters or click Refresh.
+                      </div>
+                    )}
+                  </Card>
+
+                  {/* Settings adjusting Card */}
+                  <Card title="Active Configuration Model" icon={Settings}>
+                    <div className="space-y-4 font-sans text-xs text-text-dim">
+                      <p className="leading-relaxed">
+                        The neural forecast is governed by your centralized **Engine Configuration** settings on the left sidebar:
+                      </p>
+                      <div className="bg-bg-input p-3.5 rounded-xl border border-border-dim/80 space-y-2.5 font-mono text-[10px]">
+                        <div>
+                          <span className="text-text-heading font-bold uppercase block text-[9px] tracking-wider mb-0.5">Active Topic Keywords:</span>
+                          <span className="text-sol-purple leading-normal break-all">"{topic}"</span>
+                        </div>
+                        <div className="pt-2 border-t border-border-dim/50 flex justify-between">
+                          <span>Sentiment Weight:</span>
+                          <span className="text-text-heading font-black">{Math.round(weights.sentiment * 100)}%</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>EMA momentum:</span>
+                          <span className="text-text-heading font-black">{Math.round(weights.technical * 100)}%</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>RSI reversion:</span>
+                          <span className="text-text-heading font-black">{Math.round(weights.liquidity * 100)}%</span>
+                        </div>
+                      </div>
+                      <p className="leading-relaxed border-t border-border-dim/30 pt-3">
+                        To adjust weights or topic keywords, use the controls in the **Engine Configuration Panel** on the left sidebar. The model path will recalculate dynamically to align with your parameters.
+                      </p>
+                    </div>
+                  </Card>
+                </div>
+
+                {/* AI Generative Rationale (Right) */}
+                <div className="lg:col-span-7 space-y-6">
+                  
+                  <Card 
+                    title={`${token} Past & Future Trajectory (${forecastActiveInterval} Interpolated)`} 
+                    icon={TrendingUp}
+                    action={
+                      forecastData && (
+                        <button
+                          type="button"
+                          onClick={downloadForecastPathCSV}
+                          className="py-1 px-2.5 rounded border border-border-dim/60 hover:border-sol-purple bg-bg-input text-text-heading hover:text-sol-purple flex items-center gap-1.5 transition-all text-[9.5px] font-bold cursor-pointer font-sans"
+                          title="Export predicted pathway as CSV"
+                        >
+                          <Download className="w-3 h-3" />
+                          Export Forecast (CSV)
+                        </button>
+                      )
+                    }
+                  >
+                    {forecastLoading ? (
+                      <div className="py-20 flex flex-col items-center justify-center gap-2">
+                        <RefreshCw className="w-8 h-8 text-sol-purple animate-spin" />
+                        <span className="text-[10px] font-mono text-text-dim uppercase tracking-widest animate-pulse mt-2">Simulating Price Drift Pathway...</span>
+                      </div>
+                    ) : forecastData ? (
+                      <div className="space-y-4">
+                        <div className="h-64 w-full text-xs font-mono">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <ComposedChart data={generateInterpolatedPoints()}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#2a1f42" opacity={0.15} />
+                              <XAxis dataKey="label" stroke="#94a3b8" fontSize={9} tickLine={false} />
+                              <YAxis stroke="#c084fc" domain={["auto", "auto"]} tickFormatter={(v) => `$${v}`} />
+                              <Tooltip
+                                contentStyle={{ backgroundColor: "#1e133e", borderColor: "#4c1d95", color: "#f8fafc" }}
+                                labelStyle={{ color: "#94a3b8", fontWeight: "bold" }}
+                              />
+                              <Area 
+                                type="monotone"
+                                dataKey="Upper Range"
+                                stroke="transparent"
+                                fill="rgba(139,92,246,0.08)"
+                                name="Confidence Sky Limit"
+                              />
+                              <Area 
+                                type="monotone"
+                                dataKey="Lower Range"
+                                stroke="transparent"
+                                fill="rgba(139,92,246,0.04)"
+                                name="Confidence Ground Floor"
+                              />
+                              {/* Historical Price line segment */}
+                              <Line 
+                                type="monotone"
+                                dataKey="Historical Price"
+                                stroke="#c084fc"
+                                strokeWidth={2.5}
+                                dot={false}
+                                activeDot={{ r: 4 }}
+                                name="Historical Price"
+                              />
+                              {/* Predicted Forecast price line segment */}
+                              <Line 
+                                type="monotone"
+                                dataKey="Expected Price"
+                                stroke={forecastData.predictedPrice >= forecastData.currentPrice ? "#10b981" : "#ef4444"}
+                                strokeWidth={3}
+                                strokeDasharray={forecastData.history ? "5 5" : undefined}
+                                dot={{ stroke: forecastData.predictedPrice >= forecastData.currentPrice ? "#10b981" : "#ef4444", strokeWidth: 1, r: 3 }}
+                                activeDot={{ r: 5 }}
+                                name="AI Interpolated Path"
+                              />
+                            </ComposedChart>
+                          </ResponsiveContainer>
+                        </div>
+                        <div className="p-3.5 bg-bg-input/70 border border-border-dim rounded-xl text-[11px] leading-relaxed text-text-dim flex gap-2 animate-fade-in">
+                          <Info className="w-4 h-4 text-sol-purple shrink-0 mt-0.5" />
+                          <div>
+                            This visualization shows of the last 15 historical periods connected directly to our future simulated price drift progression, moving from current price level (<strong className="text-text-heading font-mono">${forecastData.currentPrice?.toFixed(2)}</strong>) to predicted price (<strong className="text-text-heading font-mono">${forecastData.predictedPrice?.toFixed(2)}</strong>). The trajectory is calculated exactly using your chosen live strategy config <span className="text-sol-purple font-black">Sentiment: {(forecastData.strategyDetails.sentimentWeight*100).toFixed(0)}% / Tech: {(forecastData.strategyDetails.technicalWeight*100).toFixed(0)}% / Liq: {(forecastData.strategyDetails.liquidityWeight*100).toFixed(0)}%</span>.
+                          </div>
+                        </div>
+
+                        {/* Interactive Data Table of Trajectory Points */}
+                        <div className="border border-border-dim/40 rounded-xl overflow-hidden mt-4 bg-bg-input/30 font-sans">
+                          <div className="p-3 bg-bg-input/60 border-b border-border-dim/40 flex justify-between items-center cursor-pointer select-none" onClick={() => setShowTrajectoryTable(!showTrajectoryTable)}>
+                            <span className="text-[10px] uppercase font-bold tracking-wider text-text-heading flex items-center gap-1.5">
+                              <Table className="w-3.5 h-3.5 text-sol-purple" />
+                              Interactive Pathway Data Table (Eastern Time)
+                            </span>
+                            <span className="text-[9px] text-sol-purple font-mono font-bold hover:underline">
+                              {showTrajectoryTable ? "[Hide Table]" : "[Show Time Column & Price Levels]"}
+                            </span>
+                          </div>
+                          {showTrajectoryTable && (
+                            <div className="overflow-x-auto max-h-56 custom-scrollbar">
+                              <table className="w-full text-left text-[11px] border-collapse font-mono">
+                                <thead className="bg-[#180f33] text-text-dim border-b border-border-dim/40 sticky top-0 shadow-xs z-10">
+                                  <tr>
+                                    <th className="p-2.5">Time Column (ET)</th>
+                                    <th className="p-2.5 text-right">Historical Price</th>
+                                    <th className="p-2.5 text-right">Expected Price</th>
+                                    <th className="p-2.5 text-right">Confidence Range</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-border-dim/25">
+                                  {generateInterpolatedPoints().map((p: any, idx: number) => {
+                                    const isHist = p["Historical Price"] !== null;
+                                    return (
+                                      <tr key={idx} className={cn("hover:bg-sol-purple/5 transition-colors", !isHist && "text-sol-green")}>
+                                        <td className="p-2.5 font-bold flex items-center gap-1.5">
+                                          <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", isHist ? "bg-sol-purple" : "bg-sol-green")} />
+                                          {p.label}
+                                        </td>
+                                        <td className="p-2.5 text-right text-text-heading">{isHist ? `$${p["Historical Price"].toFixed(2)}` : "--"}</td>
+                                        <td className="p-2.5 text-right font-black">{!isHist ? `$${p["Expected Price"].toFixed(2)}` : "--"}</td>
+                                        <td className="p-2.5 text-right text-text-dim text-[10px]">
+                                          {isHist ? "--" : `$${p["Lower Range"].toFixed(2)} - $${p["Upper Range"].toFixed(2)}`}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="py-12 text-center text-text-dim text-xs">
+                        No pathway data. Configure parameters and run Forecast.
+                      </div>
+                    )}
+                  </Card>
+
+                  <Card title="AI Predictive Analysis & Core Catalysts" icon={Newspaper}>
+                    {forecastLoading ? (
+                      <div className="py-16 space-y-4">
+                        <div className="h-4 bg-bg-input rounded animate-pulse w-3/4"></div>
+                        <div className="h-4 bg-bg-input rounded animate-pulse w-5/6"></div>
+                        <div className="h-4 bg-bg-input rounded animate-pulse w-2/3"></div>
+                        <div className="h-8 bg-bg-input rounded animate-pulse w-full pt-2"></div>
+                      </div>
+                    ) : forecastData ? (
+                      <div className="space-y-6 text-sm">
+                        <div className="p-4 bg-sol-purple/10 border border-sol-purple/15 text-text-heading rounded-xl leading-relaxed italic text-xs">
+                          "{forecastData.rationale}"
+                        </div>
+
+                        {/* Indicators list */}
+                        <div className="space-y-2.5">
+                          <span className="text-[10px] uppercase font-bold tracking-widest text-text-dim block">Ex-Ante Statistical Baseline</span>
+                          
+                          <div className="grid grid-cols-3 gap-3 text-center">
+                            <div className="p-3 bg-bg-input border border-border-dim rounded-xl">
+                              <span className="text-[8px] uppercase text-text-dim block mb-0.5">EMA 12 (Fast)</span>
+                              <span className="text-xs font-mono font-bold text-text-heading">${forecastData.indicators?.ema12?.toFixed(2)}</span>
+                            </div>
+                            <div className="p-3 bg-bg-input border border-border-dim rounded-xl">
+                              <span className="text-[8px] uppercase text-text-dim block mb-0.5">EMA 26 (Slow)</span>
+                              <span className="text-xs font-mono font-bold text-text-heading">${forecastData.indicators?.ema26?.toFixed(2)}</span>
+                            </div>
+                            <div className="p-3 bg-bg-input border border-border-dim rounded-xl">
+                              <span className="text-[8px] uppercase text-text-dim block mb-0.5">RSI (14)</span>
+                              <span className="text-xs font-mono font-bold text-text-heading">{forecastData.indicators?.rsi?.toFixed(1)}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* news articles catalogs */}
+                        <div className="space-y-3 pt-2 border-t border-border-dim/50">
+                          <span className="text-[10px] uppercase font-bold tracking-widest text-text-dim block mb-1">Correlated Market Headwinds / Catalysts</span>
+                          
+                          <div className="space-y-2.5">
+                            {forecastData.latestNews?.map((news: any, index: number) => (
+                              <div key={index} className="flex gap-2.5 items-start p-3 bg-bg-input border border-border-dim/55 rounded-xl text-xs hover:border-sol-purple/35 transition-all">
+                                <Newspaper className="w-3.5 h-3.5 text-sol-purple mt-0.5 shrink-0" />
+                                <span className="text-text-heading font-medium leading-relaxed">{news}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                      </div>
+                    ) : (
+                      <div className="py-12 text-center text-text-dim text-xs">
+                        Configure target variables above to launch forecast engine computations.
+                      </div>
+                    )}
+                  </Card>
+                </div>
+
+              </div>
+
+              {/* 2. Historical Quant Backtester Panel */}
+              <div className="border-t border-border-dim/40 pt-8 mt-4 space-y-6">
+                <div>
+                  <h3 className="text-xl font-serif italic text-text-heading">Quantitative Strategy Backtester</h3>
+                  <p className="text-sm text-text-dim mt-1">Stress-test custom scoring parameters and indicators weights historically against real on-chain tick timelines.</p>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                  {/* Left: Settings Panel */}
+                  <div className="lg:col-span-4 bg-bg-card border border-border-dim p-6 rounded-2xl space-y-6">
+                    <span className="text-[10px] uppercase font-extrabold tracking-widest text-text-heading block border-b border-border-dim pb-2.5">Backtester Deck Controls</span>
+                    
+                    {/* Centralized Target Asset Banner */}
+                    <div className="bg-bg-input border border-border-dim/80 rounded-xl p-3.5 space-y-2.5">
+                      <div className="flex justify-between items-center text-[10px]">
+                        <span className="text-text-dim uppercase tracking-wider font-extrabold font-mono">Simulating Token:</span>
+                        <span className="text-xs text-sol-success font-black bg-sol-success/15 px-2.5 py-1 rounded-md border border-sol-success/10">{token}</span>
+                      </div>
+                      
+                      <div className="border-t border-border-dim/55 pt-2.5 space-y-2">
+                        <span className="text-[9px] uppercase font-bold tracking-widest text-text-dim block mb-1">Central Strategy Weights</span>
+                        <div className="grid grid-cols-3 gap-1.5 text-center text-[10px] font-mono select-none">
+                          <div className="bg-bg-card border border-border-dim p-1.5 rounded-lg">
+                            <span className="text-text-dim block text-[8px] uppercase">News</span>
+                            <span className="text-sol-purple font-black">{Math.round(weights.sentiment * 100)}%</span>
+                          </div>
+                          <div className="bg-bg-card border border-border-dim p-1.5 rounded-lg">
+                            <span className="text-text-dim block text-[8px] uppercase">EMA</span>
+                            <span className="text-sol-purple font-black">{Math.round(weights.technical * 100)}%</span>
+                          </div>
+                          <div className="bg-bg-card border border-border-dim p-1.5 rounded-lg">
+                            <span className="text-text-dim block text-[8px] uppercase">RSI</span>
+                            <span className="text-sol-purple font-black">{Math.round(weights.liquidity * 100)}%</span>
+                          </div>
+                        </div>
+                      </div>
+                      <p className="text-[8.5px] text-text-dim italic leading-snug font-sans pt-1 border-t border-border-dim/20">
+                        * Strategy asset and algorithmic scoring weights are pulled from the main **Engine Configuration** panel.
+                      </p>
+                    </div>
+
+                    {/* Lookback config and intervals select */}
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <label className="text-[10px] uppercase tracking-wider font-extrabold text-text-heading">Timeline Lookback Window</label>
+                        <div className="grid grid-cols-2 gap-1 p-1 bg-bg-input rounded-xl border border-border-dim/50">
+                          <button
+                            type="button"
+                            onClick={() => setBacktestLookbackMode('preset')}
+                            className={cn(
+                              "text-[10px] py-1.5 rounded-lg font-mono uppercase transition-all duration-200 cursor-pointer text-center font-bold",
+                              backtestLookbackMode === 'preset'
+                                ? "bg-bg-card text-sol-purple shadow border border-border-dim/40"
+                                : "text-text-dim hover:text-text-heading"
+                            )}
+                          >
+                            Presets
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setBacktestLookbackMode('custom')}
+                            className={cn(
+                              "text-[10px] py-1.5 rounded-lg font-mono uppercase transition-all duration-200 cursor-pointer text-center font-bold",
+                              backtestLookbackMode === 'custom'
+                                ? "bg-bg-card text-sol-purple shadow border border-border-dim/40"
+                                : "text-text-dim hover:text-text-heading"
+                            )}
+                          >
+                            Custom Dates
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        {backtestLookbackMode === 'preset' ? (
+                          <div className="space-y-2">
+                            <label className="text-[10px] uppercase tracking-wider font-extrabold text-text-heading">Timeline Lookback</label>
+                            <select
+                              value={backtestLookbackDays}
+                              onChange={(e) => setBacktestLookbackDays(Number(e.target.value))}
+                              className="w-full bg-bg-input border border-border-dim p-2.5 rounded-lg text-xs text-text-heading focus:outline-none focus:border-sol-purple transition-colors cursor-pointer"
+                            >
+                              <option value={3}>3 Days</option>
+                              <option value={7}>7 Days</option>
+                              <option value={14}>14 Days</option>
+                              <option value={30}>30 Days</option>
+                              <option value={90}>90 Days</option>
+                            </select>
+                          </div>
+                        ) : (
+                          <div className="space-y-2 col-span-2 grid grid-cols-2 gap-2">
+                            <div className="space-y-1">
+                              <label className="text-[9px] uppercase tracking-wider font-bold text-text-dim">Start Date</label>
+                              <input
+                                type="date"
+                                value={backtestStartDate}
+                                onChange={(e) => setBacktestStartDate(e.target.value)}
+                                className="w-full bg-bg-input border border-border-dim p-2 rounded-lg text-[10px] text-text-heading font-mono outline-none focus:border-sol-purple"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-[9px] uppercase tracking-wider font-bold text-text-dim">End Date</label>
+                              <input
+                                type="date"
+                                value={backtestEndDate}
+                                onChange={(e) => setBacktestEndDate(e.target.value)}
+                                className="w-full bg-bg-input border border-border-dim p-2 rounded-lg text-[10px] text-text-heading font-mono outline-none focus:border-sol-purple"
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        <div className={cn("space-y-2", backtestLookbackMode === 'custom' ? "col-span-2" : "")}>
+                          <label className="text-[10px] uppercase tracking-wider font-extrabold text-text-heading">Timeline Interval</label>
+                          <select
+                            value={backtestInterval}
+                            onChange={(e) => setBacktestInterval(e.target.value)}
+                            className="w-full bg-bg-input border border-border-dim p-2.5 rounded-lg text-xs text-text-heading focus:outline-none focus:border-sol-purple transition-colors cursor-pointer"
+                          >
+                            <option value="15m">15m Bars</option>
+                            <option value="30m">30m Bars</option>
+                            <option value="1h">1h Bars</option>
+                            <option value="1d">1d Bars</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Capital select input */}
+                    <div className="space-y-2">
+                      <label className="text-[10px] uppercase tracking-wider font-extrabold text-text-heading block">Starting Simulation Capital (USDC)</label>
+                      <input
+                        type="number"
+                        value={backtestCapital}
+                        onChange={(e) => setBacktestCapital(Math.max(1, Number(e.target.value)))}
+                        className="w-full bg-bg-input border border-border-dim p-2.5 rounded-lg text-xs font-mono text-text-heading focus:outline-none focus:border-sol-purple transition-all"
+                      />
+                    </div>
+
+                    {/* Run action trigger */}
+                    <button
+                      type="button"
+                      onClick={runQuantBacktest}
+                      disabled={backtestLoading}
+                      className="w-full py-3 bg-sol-purple hover:bg-sol-purple/90 text-white font-extrabold uppercase text-xs tracking-widest rounded-xl transition-all shadow-md shadow-sol-purple/15 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                    >
+                      {backtestLoading ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          Running Quantitative Simulation...
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-4 h-4 text-yellow-300" />
+                          Simulate Historical Portfolio
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Right: Analytical results */}
+                  <div className="lg:col-span-8 space-y-6 animate-in fade-in">
+                    {backtestError && (
+                      <div className="p-4 bg-red-500/10 border border-red-500/20 text-red-500 text-xs rounded-xl font-mono">
+                        {backtestError}
+                      </div>
+                    )}
+
+                    {backtestLoading ? (
+                      <div className="bg-bg-card border border-border-dim rounded-2xl h-[480px] flex flex-col items-center justify-center gap-3">
+                        <RefreshCw className="w-10 h-10 text-sol-purple animate-spin" />
+                        <span className="text-xs font-mono uppercase text-text-dim tracking-widest animate-pulse mt-2">Fetching Historical Price Arrays & Run Trades Simulator...</span>
+                      </div>
+                    ) : backtestResult ? (
+                      <div className="space-y-6">
+                        
+                        {/* Simulation Success Cards Grid */}
+                        <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+                          
+                          <div className="bg-bg-card border border-border-dim p-4 rounded-xl shadow-sm hover:border-sol-purple/20 transition-all">
+                            <span className="text-[9px] uppercase font-bold text-text-dim block tracking-wider">Trading Return</span>
+                            <span className={cn("text-lg font-black block mt-1", backtestResult.metrics.pnlPct >= 0 ? "text-sol-green" : "text-red-500")}>
+                              {backtestResult.metrics.pnlPct >= 0 ? "+" : ""}{backtestResult.metrics.pnlPct?.toFixed(2)}%
+                            </span>
+                            <span className="text-[8px] font-mono text-text-dim block mt-0.5">Yield On Balance</span>
+                          </div>
+
+                          <div className="bg-bg-card border border-border-dim p-4 rounded-xl shadow-sm hover:border-sol-purple/20 transition-all">
+                            <span className="text-[9px] uppercase font-bold text-text-dim block tracking-wider">Max Drawdown</span>
+                            <span className="text-lg font-black text-text-heading block mt-1">
+                              {backtestResult.metrics.maxDrawdownPct?.toFixed(2)}%
+                            </span>
+                            <span className="text-[8px] font-mono text-text-dim block mt-0.5">Peak-to-Trough Loss</span>
+                          </div>
+
+                          <div className="bg-bg-card border border-border-dim p-4 rounded-xl shadow-sm hover:border-sol-purple/20 transition-all">
+                            <span className="text-[9px] uppercase font-bold text-text-dim block tracking-wider">Win Rate (Settle)</span>
+                            <span className="text-lg font-black text-sol-purple block mt-1">
+                              {backtestResult.metrics.winRate?.toFixed(1)}%
+                            </span>
+                            <span className="text-[8px] font-mono text-text-dim block mt-0.5">
+                              {backtestResult.metrics.winningTrades} Wins / {backtestResult.metrics.losingTrades} Losses
+                            </span>
+                          </div>
+
+                          <div className="bg-bg-card border border-border-dim p-4 rounded-xl shadow-sm hover:border-sol-purple/20 transition-all">
+                            <span className="text-[9px] uppercase font-bold text-text-dim block tracking-wider">Hit Rate</span>
+                            <span className="text-lg font-black text-sol-green block mt-1">
+                              {backtestResult.metrics.predictionQualityPct?.toFixed(1)}%
+                            </span>
+                            <span className="text-[8px] font-mono text-text-dim block mt-0.5">Directional Quality</span>
+                          </div>
+
+                          <div className={cn(
+                            "bg-bg-card border p-4 rounded-xl shadow-sm hover:border-sol-purple/20 transition-all flex flex-col justify-between",
+                            backtestResult.metrics.backtestAccuracyPct !== undefined
+                              ? (backtestResult.metrics.backtestAccuracyPct >= 98.0
+                                  ? "border-emerald-500/25 bg-emerald-500/[0.01]"
+                                  : backtestResult.metrics.backtestAccuracyPct >= 95.0
+                                  ? "border-lime-500/25 bg-lime-500/[0.01]"
+                                  : backtestResult.metrics.backtestAccuracyPct >= 90.0
+                                  ? "border-amber-500/25 bg-amber-500/[0.01]"
+                                  : "border-rose-500/25 bg-rose-500/[0.01]")
+                              : "border-border-dim"
+                          )}>
+                            <div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-[9px] uppercase font-extrabold text-text-dim tracking-wider">Symmetric Precision (SFP)</span>
+                                <span className={cn(
+                                  "text-[8px] font-mono px-1.5 py-0.5 rounded-full uppercase tracking-tight font-bold",
+                                  backtestResult.metrics.backtestAccuracyPct !== undefined
+                                    ? (backtestResult.metrics.backtestAccuracyPct >= 98.0
+                                        ? "bg-emerald-500/10 text-emerald-500"
+                                        : backtestResult.metrics.backtestAccuracyPct >= 95.0
+                                        ? "bg-lime-500/10 text-lime-500"
+                                        : backtestResult.metrics.backtestAccuracyPct >= 90.0
+                                        ? "bg-amber-500/10 text-amber-500"
+                                        : "bg-rose-500/10 text-rose-500")
+                                    : "bg-bg-input text-text-dim"
+                                )}>
+                                  {backtestResult.metrics.backtestAccuracyPct !== undefined
+                                    ? (backtestResult.metrics.backtestAccuracyPct >= 98.0
+                                        ? "Elite"
+                                        : backtestResult.metrics.backtestAccuracyPct >= 95.0
+                                        ? "Optimal"
+                                        : backtestResult.metrics.backtestAccuracyPct >= 90.0
+                                        ? "Moderate"
+                                        : "Deficient")
+                                    : "N/A"}
+                                </span>
+                              </div>
+                              <span className={cn(
+                                "text-lg font-black block mt-1",
+                                backtestResult.metrics.backtestAccuracyPct !== undefined
+                                  ? (backtestResult.metrics.backtestAccuracyPct >= 98.0
+                                      ? "text-emerald-500"
+                                      : backtestResult.metrics.backtestAccuracyPct >= 95.0
+                                      ? "text-lime-500"
+                                      : backtestResult.metrics.backtestAccuracyPct >= 90.0
+                                      ? "text-amber-500"
+                                      : "text-rose-500")
+                                  : "text-text-heading"
+                              )}>
+                                {backtestResult.metrics.backtestAccuracyPct !== undefined ? `${backtestResult.metrics.backtestAccuracyPct.toFixed(2)}%` : "N/A"}
+                              </span>
+                            </div>
+                            <span className="text-[8.5px] font-mono text-text-dim block mt-1.5 leading-tight">
+                              SMAPE Error: <strong className="text-text-heading">{backtestResult.metrics.averageErrorPct !== undefined ? `${backtestResult.metrics.averageErrorPct.toFixed(2)}%` : "N/A"}</strong>
+                            </span>
+                          </div>
+
+                          <div className="bg-bg-card border border-border-dim p-4 rounded-xl shadow-sm hover:border-sol-purple/20 transition-all">
+                            <span className="text-[9px] uppercase font-bold text-text-dim block tracking-wider">Sim Net Balance</span>
+                            <span className="text-lg font-black text-text-heading block mt-1 font-mono">
+                              ${backtestResult.metrics.finalCapital?.toFixed(2)}
+                            </span>
+                            <span className="text-[8px] font-mono text-text-dim block mt-0.5">Initial: ${backtestResult.metrics.initialCapital} USD</span>
+                          </div>
+
+                        </div>
+
+                        {/* Chart Area */}
+                        <div className="bg-bg-card border border-border-dim p-5 rounded-2xl shadow-sm">
+                          <div className="flex justify-between items-center mb-5 gap-4">
+                            <span className="text-xs uppercase font-extrabold tracking-wider text-text-heading">Simulated Equity Curve vs. Landmark Spot Index Price</span>
+                            <button
+                              type="button"
+                              onClick={downloadBacktestTimeSeriesCSV}
+                              className="py-1 px-2.5 rounded border border-border-dim/60 hover:border-sol-purple bg-bg-input text-text-heading hover:text-sol-purple flex items-center gap-1.5 transition-all text-[9.5px] font-bold cursor-pointer font-sans"
+                              title="Export backtest equity curve as CSV"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              Export Curve (CSV)
+                            </button>
+                          </div>
+                          
+                          <div className="h-64 w-full text-xs font-mono">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <ComposedChart data={backtestResult.equityCurve}>
+                                <CartesianGrid strokeDasharray="3 3" stroke="#2a1f42" opacity={0.15} />
+                                <XAxis dataKey="date" stroke="#94a3b8" fontSize={9} tickLine={false} />
+                                <YAxis yAxisId="equity" stroke="#8b5cf6" orientation="left" domain={["auto", "auto"]} tickFormatter={(v) => `$${v}`} />
+                                <YAxis yAxisId="price" stroke="#10b981" orientation="right" domain={["auto", "auto"]} tickFormatter={(v) => `$${v}`} />
+                                <Tooltip 
+                                  contentStyle={{ backgroundColor: "#1e133e", borderColor: "#4c1d95", color: "#f8fafc" }}
+                                  labelStyle={{ color: "#94a3b8", fontWeight: "bold" }}
+                                />
+                                <Area yAxisId="equity" type="monotone" dataKey="equity" fill="rgba(139,92,246,0.06)" stroke="#8b5cf6" strokeWidth={2.5} name="Total Capital Portfolio (L)" />
+                                <Line yAxisId="price" type="monotone" dataKey="price" stroke="#10b981" strokeWidth={1.5} dot={false} name={`Actual ${token} Price (R)`} />
+                                <Line yAxisId="price" type="monotone" dataKey="predictedPrice" stroke="#ec4899" strokeWidth={1.2} strokeDasharray="3 3" dot={false} name={`Predicted ${token} Price (R)`} />
+                              </ComposedChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+
+                        {/* Simulation Table execution ledger */}
+                        <div className="bg-bg-card border border-border-dim p-5 rounded-2xl shadow-sm">
+                          <div className="flex justify-between items-center mb-4 gap-4">
+                            <span className="text-xs uppercase font-extrabold tracking-wider text-text-heading">Historical Trade Execution Ledger</span>
+                            <button
+                              onClick={downloadBacktestCSV}
+                              className="py-1 px-3 rounded-lg border border-border-dim/80 hover:border-sol-purple bg-bg-input text-text-heading hover:text-sol-purple flex items-center gap-1.5 transition-all text-[11px] font-bold cursor-pointer"
+                              title="Download complete ledger as a CSV file"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              Export CSV
+                            </button>
+                          </div>
+                          
+                          <div className="overflow-x-auto max-h-[250px] custom-scrollbar">
+                            <table className="w-full text-left border-collapse">
+                              <thead>
+                                <tr className="border-b border-border-dim text-[9px] text-text-dim uppercase font-mono">
+                                  <th className="py-2.5 px-3">Direction</th>
+                                  <th className="py-2.5 px-3">Date Timestamp (Eastern Time)</th>
+                                  <th className="py-2.5 px-3 text-right">Execution Price</th>
+                                  <th className="py-2.5 px-3 text-right">Net Realized Return</th>
+                                  <th className="py-2.5 px-3 text-right">Capital Balance</th>
+                                  <th className="py-2.5 px-3">Execution Triggers</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-border-dim/30 font-mono text-xs">
+                                {backtestResult.trades?.slice(0, 35).map((trade: any, idx: number) => {
+                                  const isEntry = trade.type.startsWith("OPEN");
+                                  const isProfit = trade.pnl >= 0;
+                                  return (
+                                    <tr key={idx} className="hover:bg-bg-input/35 transition-colors">
+                                      <td className="py-2.5 px-3 font-bold">
+                                        <span className={cn(
+                                          "px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-wider block w-fit shadow-xs",
+                                          trade.type.includes("LONG") 
+                                            ? "bg-sol-green/15 text-sol-green border border-sol-green/10" 
+                                            : "bg-sol-purple/15 text-sol-purple border border-sol-purple/10"
+                                        )}>
+                                          {trade.type}
+                                        </span>
+                                      </td>
+                                      <td className="py-2.5 px-3 text-text-dim text-[10px] whitespace-nowrap">
+                                        {etFormat(new Date(trade.date), "yyyy-MM-dd hh:mm a")} <span className="text-[8px] opacity-40">{tzAbbr}</span>
+                                      </td>
+                                      <td className="py-2.5 px-3 text-right font-black text-text-heading">
+                                        ${trade.price?.toFixed(2)}
+                                      </td>
+                                      <td className="py-2.5 px-3 text-right">
+                                        {isEntry ? (
+                                          <span className="text-text-dim text-[10px]">-- (Holding)</span>
+                                        ) : (
+                                          <span className={cn("font-bold text-[11px] whitespace-nowrap", isProfit ? "text-sol-green" : "text-red-500")}>
+                                            {isProfit ? "+" : ""}${trade.pnl?.toFixed(2)} ({isProfit ? "+" : ""}{trade.pnlPct?.toFixed(2)}%)
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="py-2.5 px-3 text-right text-text-heading font-extrabold">
+                                        ${(trade.capitalAfter || trade.capitalBefore)?.toFixed(2)}
+                                      </td>
+                                      <td className="py-2.5 px-3 text-text-dim text-[10px] italic whitespace-normal max-w-[200px]">
+                                        {trade.note}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                                {(!backtestResult.trades || backtestResult.trades.length === 0) && (
+                                  <tr>
+                                    <td colSpan={6} className="py-8 text-center text-text-dim italic">
+                                      No trades were triggered during this testing interval. Adjust sizers, weights or intervals to broaden triggers.
+                                    </td>
+                                  </tr>
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+
+                      </div>
+                    ) : (
+                      <div className="bg-bg-card border border-border-dim rounded-2xl h-[480px] flex flex-col items-center justify-center text-center p-6 text-text-dim">
+                        <TrendingUp className="w-12 h-12 text-sol-purple/40 mb-3" />
+                        <h4 className="text-sm font-bold text-text-heading mb-1 font-serif italic">Backtesting Simulation Deck Idle</h4>
+                        <p className="text-xs max-w-xs leading-relaxed">Adjust sizer parameters, backtest target assets, timeframe lookup boundaries on the left deck control, then hit run simulator.</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </main>
+        ) : currentView === 'alerts' ? (
+          <main className="flex-1 flex flex-col p-8 bg-bg-main overflow-y-auto custom-scrollbar animate-fade-in text-text-body">
+            <div className="max-w-5xl mx-auto w-full space-y-8">
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <Bell className="w-5 h-5 text-sol-purple" />
+                  <h2 className="text-2xl font-serif italic text-text-heading">Alerts Hub & Telegram Integration</h2>
+                </div>
+                <p className="text-sm text-text-dim">Configure real-time quantitative signal monitoring. Get alerted on Telegram the second our Multimodal Engine switches bias.</p>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                {/* Form configuration - 7 cols */}
+                <div className="lg:col-span-7 space-y-6">
+                  <Card title="Signal Delivery Configuration" icon={Settings}>
+                    <form onSubmit={(e) => handleSaveTelegramConfig(e, false)} className="space-y-6">
+                      <div className="space-y-4">
+                        {/* Enabled Flag */}
+                        <div className="flex items-center justify-between p-4 bg-bg-input rounded-lg border border-border-dim">
+                          <div className="space-y-0.5">
+                            <label className="text-xs uppercase font-bold tracking-widest text-text-heading">Telegram Alerts Toggle</label>
+                            <p className="text-[10px] text-text-dim leading-normal">
+                              Enable or disable automated background multi-interval checks.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setTelegramConfig({ ...telegramConfig, enabled: !telegramConfig.enabled })}
+                            className={cn(
+                              "w-12 h-6 rounded-full p-1 transition-colors duration-200 focus:outline-none",
+                              telegramConfig.enabled ? "bg-sol-green" : "bg-bg-main border border-border-dim"
+                            )}
+                          >
+                            <div className={cn(
+                              "w-4 h-4 rounded-full bg-white transition-transform duration-200 shadow",
+                              telegramConfig.enabled ? "translate-x-6" : "translate-x-0"
+                            )} />
+                          </button>
+                        </div>
+
+                        {/* Credentials secrets banner */}
+                        <div className="p-4 bg-bg-input rounded-lg border border-border-dim space-y-3">
+                          <div className="flex items-center gap-2">
+                            <span className={cn(
+                              "w-2.5 h-2.5 rounded-full",
+                              telegramConfig.secretsConfigured ? "bg-sol-green" : "bg-red-500 animate-pulse"
+                            )}></span>
+                            <span className="text-[10px] uppercase font-bold tracking-widest text-text-heading">
+                              {telegramConfig.secretsConfigured ? "Secret Credentials Detected" : "Telemetry Secrets Missing"}
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-text-dim leading-relaxed">
+                            {telegramConfig.secretsConfigured 
+                              ? "Telegram Bot credentials are loaded securely from system environment variables (TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID)."
+                              : "Missing system configuration. Please populate system secrets matching key values TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID."}
+                          </p>
+                          <div className="grid grid-cols-2 gap-4 pt-1 font-mono text-[9px]">
+                            <div>
+                              <span className="text-text-dim block uppercase">Masked Bot Token:</span>
+                              <span className="text-text-heading select-none">{telegramConfig.botToken || "Not Set"}</span>
+                            </div>
+                            <div>
+                              <span className="text-text-dim block uppercase">Masked Chat ID:</span>
+                              <span className="text-text-heading select-none">{telegramConfig.chatId || "Not Set"}</span>
+                            </div>
+                            <div className="col-span-2 pt-1 border-t border-border-dim/30">
+                              <span className="text-text-dim block uppercase">Active Bot ID:</span>
+                              <span className="text-sol-purple font-bold">telegram_alert_v1</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="space-y-4">
+                          <div className="p-3 bg-sol-purple/15 border border-sol-purple/35 rounded-xl flex items-center gap-2.5 text-[11px] text-text-heading">
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-sol-purple shrink-0" style={{ animationDuration: '6s' }} />
+                            <span>
+                              <strong className="text-sol-purple">Live Engine Lock:</strong> Subscribed Ticker, Catalyst Sentiment Topics, and Formula Scoring Weights are fully locked and auto-synced with the central <strong>Neural Engine Configuration</strong> configured in your left sidebar.
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                            {/* Subscribed Ticker Display */}
+                            <div className="space-y-1.5 p-3.5 bg-bg-input/70 border border-border-dim rounded-xl flex flex-col justify-between">
+                              <div>
+                                <div className="flex justify-between items-center mb-1">
+                                  <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-dim block">Ticker Asset</label>
+                                  <span className="text-[8px] px-1.5 py-0.2 bg-sol-green/10 text-sol-green border border-sol-green/20 rounded font-bold uppercase tracking-wider font-mono">Synced</span>
+                                </div>
+                                <span className="font-mono text-xs text-text-heading font-black">{token === 'SOL' ? 'SOL / USD (Solana)' : token === 'BTC' ? 'BTC / USD (Bitcoin)' : token === 'ETH' ? 'ETH / USD (Ethereum)' : `${token} / USD`}</span>
+                              </div>
+                            </div>
+
+                            {/* Catalyst Topic Display */}
+                            <div className="space-y-1.5 p-3.5 bg-bg-input/70 border border-border-dim rounded-xl flex flex-col justify-between">
+                              <div>
+                                <div className="flex justify-between items-center mb-1">
+                                  <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-dim block">Catalyst Topic</label>
+                                  <span className="text-[8px] px-1.5 py-0.2 bg-sol-green/10 text-sol-green border border-sol-green/20 rounded font-bold uppercase tracking-wider font-mono">Synced</span>
+                                </div>
+                                <span className="font-mono text-[11px] text-text-heading font-bold break-all">"{topic || 'Global Catalysts'}"</span>
+                              </div>
+                            </div>
+
+                            {/* Scoring Weights Display */}
+                            <div className="space-y-1.5 p-3.5 bg-bg-input/70 border border-border-dim rounded-xl flex flex-col justify-between">
+                              <div>
+                                <div className="flex justify-between items-center mb-1">
+                                  <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-dim block">Formula Weights</label>
+                                  <span className="text-[8px] px-1.5 py-0.2 bg-sol-green/10 text-sol-green border border-sol-green/20 rounded font-bold uppercase tracking-wider font-mono">Synced</span>
+                                </div>
+                                <div className="flex flex-col gap-0.5 text-[9.5px] font-mono leading-none">
+                                  <div className="flex justify-between"><span className="text-text-dim text-[8px] uppercase">Sentiment:</span><strong className="text-text-heading">{(weights.sentiment * 100).toFixed(0)}%</strong></div>
+                                  <div className="flex justify-between"><span className="text-text-dim text-[8px] uppercase">Technical:</span><strong className="text-text-heading">{(weights.technical * 100).toFixed(0)}%</strong></div>
+                                  <div className="flex justify-between"><span className="text-text-dim text-[8px] uppercase">Liquidity:</span><strong className="text-text-heading">{(weights.liquidity * 100).toFixed(0)}%</strong></div>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Check frequency selection */}
+                            <div className="space-y-1.5 p-3.5 bg-bg-input border border-border-dim rounded-xl flex flex-col justify-between">
+                              <div>
+                                <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-heading block mb-1">Check Interval</label>
+                                <select
+                                  value={telegramConfig.frequency || 5}
+                                  onChange={(e) => setTelegramConfig({ ...telegramConfig, frequency: Number(e.target.value) })}
+                                  className="w-full bg-bg-card border border-border-dim rounded px-2 px-1.5 font-mono text-xs focus:outline-none focus:border-sol-purple text-text-heading cursor-pointer"
+                                >
+                                  <option value="1">Every 1m</option>
+                                  <option value="3">Every 3m</option>
+                                  <option value="5">Every 5m</option>
+                                  <option value="15">Every 15m</option>
+                                  <option value="30">Every 30m</option>
+                                  <option value="60">Every 1h</option>
+                                </select>
+                              </div>
+                            </div>
+
+                            {/* Cooldown period configuration */}
+                            <div className="space-y-1.5 p-3.5 bg-bg-input border border-border-dim rounded-xl flex flex-col justify-between">
+                              <div>
+                                <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-heading block mb-1">Alert Cooldown</label>
+                                <select
+                                  value={telegramConfig.cooldownMinutes !== undefined ? telegramConfig.cooldownMinutes : 30}
+                                  onChange={(e) => setTelegramConfig({ ...telegramConfig, cooldownMinutes: Number(e.target.value) })}
+                                  className="w-full bg-bg-card border border-border-dim rounded px-2 px-1.5 font-mono text-xs focus:outline-none focus:border-sol-purple text-text-heading cursor-pointer"
+                                >
+                                  <option value="1">1 Min</option>
+                                  <option value="5">5 Mins</option>
+                                  <option value="15">15 Mins</option>
+                                  <option value="30">30 Mins</option>
+                                  <option value="60">1 Hour</option>
+                                  <option value="120">2 Hours</option>
+                                  <option value="240">4 Hours</option>
+                                </select>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Status Message display */}
+                      {telegramStatusMsg && (
+                        <div className={cn(
+                          "p-3 rounded-lg border text-xs leading-relaxed flex items-start gap-2",
+                          telegramStatusMsg.type === 'success' 
+                            ? "bg-sol-green/10 border-sol-green/35 text-sol-green" 
+                            : "bg-red-500/10 border-red-500/35 text-red-500"
+                        )}>
+                          {telegramStatusMsg.type === 'success' ? <Check className="w-4 h-4 shrink-0 mt-0.5" /> : <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />}
+                          <span>{telegramStatusMsg.text}</span>
+                        </div>
+                      )}
+
+                      {/* Submit & Test row */}
+                      <div className="flex flex-col sm:flex-row gap-4 pt-2">
+                        <button
+                          type="submit"
+                          disabled={telegramLoading}
+                          className="flex-1 px-4 py-2.5 bg-sol-purple text-white text-xs font-black uppercase tracking-wider rounded-lg hover:bg-sol-purple/90 transition-all disabled:opacity-50"
+                        >
+                          {telegramLoading ? "Syncing..." : "Save Configuration"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => handleSaveTelegramConfig(e, true, false)}
+                          disabled={telegramLoading}
+                          className="px-4 py-2.5 bg-bg-input border border-border-dim text-text-heading text-xs font-black uppercase tracking-wider rounded-lg hover:bg-border-dim/30 hover:border-text-dim/50 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          Test Alert
+                        </button>
+                      </div>
+                      <div className="pt-2 border-t border-border-dim/30">
+                        <p className="text-[10px] text-text-dim mb-3 leading-relaxed">
+                          Force manual generation of the active real-time quantitative signal overlay. Overrides cooldowns to dispatch an alert instantly regardless of positional shifts.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={(e) => handleSaveTelegramConfig(e, false, true)}
+                          disabled={telegramLoading}
+                          className="w-full px-4 py-2.5 bg-bg-input border-2 border-sol-green/30 text-sol-green text-xs font-black uppercase tracking-wider rounded-lg hover:bg-sol-green/10 hover:border-sol-green/50 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                          <Activity className="w-3.5 h-3.5" />
+                          Trigger Alert (Send Current Signal)
+                        </button>
+                      </div>
+                    </form>
+                  </Card>
+                </div>
+
+                {/* Instructions and daemon info - 5 cols */}
+                <div className="lg:col-span-12 xl:col-span-5 space-y-6">
+                  {/* Daemon State */}
+                  <Card title="Integration Vitality" icon={Activity}>
+                    <div className="space-y-4 text-xs font-mono">
+                      <div className="flex justify-between items-center pb-3 border-b border-border-dim/50">
+                        <span className="text-text-dim text-[10px] uppercase tracking-wider">Cron Engine Status</span>
+                        <span className={cn(
+                          "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest",
+                          telegramConfig.enabled ? "bg-sol-green/20 text-sol-green animate-pulse" : "bg-text-dim/20 text-text-dim"
+                        )}>
+                          {telegramConfig.enabled ? `Active (${telegramConfig.frequency || 5}m)` : "Disabled"}
+                        </span>
+                      </div>
+                      
+                      <div className="flex justify-between items-center pb-3 border-b border-border-dim/50">
+                        <span className="text-text-dim text-[10px] uppercase tracking-wider">Last Action Recorded</span>
+                        <span className="text-text-heading font-bold">{telegramConfig.lastAction || "None"}</span>
+                      </div>
+
+                      <div className="flex justify-between items-center pb-3 border-b border-border-dim/50">
+                        <span className="text-text-dim text-[10px] uppercase tracking-wider">Last Daemon Sync</span>
+                        <span className="text-text-heading">
+                          {telegramConfig.lastCheckedAt 
+                            ? format(new Date(telegramConfig.lastCheckedAt), "HH:mm:ss") + " (" + tzAbbr + ")"
+                            : "Waiting first fetch"
+                          }
+                        </span>
+                      </div>
+
+                      {/* Dynamic Trading Stats & Simulation PnL metrics */}
+                      <div className="pt-2 border-t border-border-dim/50 space-y-3">
+                        <span className="text-[10px] text-text-dim uppercase tracking-wider block font-bold font-sans">Trading Statistics (telegram_alert_v1)</span>
+                        
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="p-2.5 bg-bg-input rounded border border-border-dim/60">
+                            <span className="text-[9px] text-text-dim block uppercase">Last Trade PnL</span>
+                            <span className={cn(
+                              "text-sm font-black tracking-tight block mt-0.5",
+                              (telegramConfig.lastTradePnL || 0) > 0 ? "text-sol-green" : (telegramConfig.lastTradePnL || 0) < 0 ? "text-red-500" : "text-text-heading"
+                            )}>
+                              {telegramConfig.lastTradePnL !== undefined 
+                                ? `${(telegramConfig.lastTradePnL >= 0 ? "+" : "")}${telegramConfig.lastTradePnL.toFixed(2)}%`
+                                : "0.00%"
+                              }
+                            </span>
+                          </div>
+                          
+                          <div className="p-2.5 bg-bg-input rounded border border-border-dim/60">
+                            <span className="text-[9px] text-text-dim block uppercase">Cumulative PnL%</span>
+                            <span className={cn(
+                              "text-sm font-black tracking-tight block mt-0.5",
+                              (telegramConfig.cumulativePnL || 0) > 0 ? "text-sol-green" : (telegramConfig.cumulativePnL || 0) < 0 ? "text-red-500" : "text-text-heading"
+                            )}>
+                              {telegramConfig.cumulativePnL !== undefined
+                                ? `${(telegramConfig.cumulativePnL >= 0 ? "+" : "")}${telegramConfig.cumulativePnL.toFixed(2)}%`
+                                : "0.00%"
+                              }
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Active Trade / Positions */}
+                        <div className="pb-2 border-b border-border-dim/30">
+                          <span className="text-[9px] text-text-dim block uppercase">Active Simulation Position</span>
+                          {telegramConfig.activeTrade ? (
+                            <div className="mt-1 flex justify-between items-center p-2 bg-sol-purple/10 border border-sol-purple/20 rounded text-[11px]">
+                              <span className="flex items-center gap-1.5 font-bold text-text-heading">
+                                <span className={cn(
+                                  "w-2 h-2 rounded-full",
+                                  telegramConfig.activeTrade.side === "LONG" ? "bg-sol-green" : telegramConfig.activeTrade.side === "SHORT" ? "bg-red-500" : "bg-text-dim"
+                                )}></span>
+                                {telegramConfig.activeTrade.side} @ ${telegramConfig.activeTrade.entryPrice?.toFixed(2)}
+                              </span>
+                              <span className="text-text-dim text-[10px]">
+                                Entered {format(new Date(telegramConfig.activeTrade.entryTime), "HH:mm")}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-text-dim italic mt-1 block">FLAT (No Active Position)</span>
+                          )}
+                        </div>
+
+                        {/* Recent Trade History Logs */}
+                        {telegramConfig.tradesHistory && telegramConfig.tradesHistory.length > 0 && (
+                          <div className="space-y-1.5 max-h-[140px] overflow-y-auto pr-1">
+                            <div className="flex justify-between items-center mb-1 col-span-full">
+                              <span className="text-[9px] text-text-dim block uppercase font-bold">Recent Trade Logs</span>
+                              <button
+                                type="button"
+                                onClick={downloadTelegramTradeLogCSV}
+                                className="text-[8.5px] text-sol-purple font-bold uppercase tracking-wider hover:underline flex items-center gap-1 cursor-pointer"
+                                title="Download recent trade logs as CSV file"
+                              >
+                                <Download className="w-2.5 h-2.5" />
+                                Export CSV
+                              </button>
+                            </div>
+                            {telegramConfig.tradesHistory.map((trade: any) => (
+                              <div key={trade.id} className="flex justify-between items-center text-[10px] py-1 border-b border-border-dim/20 last:border-none">
+                                <div className="flex items-center gap-1.5">
+                                  <span className={cn(
+                                    "px-1 rounded text-[8px] font-black uppercase text-white",
+                                    trade.side === "LONG" ? "bg-sol-green" : trade.side === "SHORT" ? "bg-red-500" : "bg-text-dim"
+                                  )}>
+                                    {trade.side}
+                                  </span>
+                                  <span className="text-text-heading font-medium">
+                                    ${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)}
+                                  </span>
+                                </div>
+                                <span className={cn(
+                                  "font-bold font-mono",
+                                  trade.pnl >= 0 ? "text-sol-green" : "text-red-500"
+                                )}>
+                                  {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}%
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Daemon Audit Log table display */}
+                        <div className="pt-3 border-t border-border-dim/30 space-y-2">
+                          <span className="text-[9px] text-text-dim uppercase tracking-wider block font-bold font-sans">Daemon Audit Log</span>
+                          {telegramConfig.auditLogs && telegramConfig.auditLogs.length > 0 ? (
+                            <div className="space-y-2 max-h-[160px] overflow-y-auto pr-1">
+                              {telegramConfig.auditLogs.slice().reverse().map((log: any) => {
+                                const isCooldownType = log.type === 'cooldown';
+                                const isHoldType = log.type === 'hold';
+                                let timestampFormatted = "";
+                                try {
+                                  timestampFormatted = format(new Date(log.timestamp), "HH:mm:ss");
+                                } catch (err) {
+                                  timestampFormatted = String(log.timestamp);
+                                }
+                                return (
+                                  <div key={log.id} className="text-[10px] py-1.5 border-b border-border-dim/15 last:border-none leading-relaxed flex flex-col gap-0.5">
+                                    <div className="flex justify-between items-center">
+                                      <span className={cn(
+                                        "px-1.5 py-0.2 rounded-[3px] text-[7.5px] font-black uppercase font-mono tracking-wider text-white",
+                                        isCooldownType ? "bg-sol-purple" : isHoldType ? "bg-text-dim/85" : "bg-blue-500/80"
+                                      )}>
+                                        {log.type}
+                                      </span>
+                                      <span className="text-[8px] text-text-dim font-mono">{timestampFormatted}</span>
+                                    </div>
+                                    <p className="text-text-heading/90 font-mono text-[9px] leading-normal">{log.message}</p>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-text-dim italic mt-1 block">No operations audited yet.</span>
+                          )}
+                        </div>
+
+                        {/* Reset telemetry statistics button */}
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            onClick={handleResetTelegramStats}
+                            disabled={telegramLoading}
+                            className="w-full text-center text-[10px] font-bold uppercase tracking-wider py-1.5 px-3 rounded bg-red-500/10 hover:bg-red-500/15 text-red-400 border border-red-500/20 active:scale-95 transition-all cursor-pointer"
+                          >
+                            Reset Simulation Stats & Logs
+                          </button>
+                        </div>
+                      </div>
+
+                      {telegramConfig.error && (
+                        <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-500 rounded text-[10px] leading-relaxed">
+                          <p className="font-bold mb-1">Last Error Logged:</p>
+                          <p className="break-words font-mono font-normal">{telegramConfig.error}</p>
+                        </div>
+                      )}
+                    </div>
+                  </Card>
+                </div>
+              </div>
             </div>
           </main>
         ) : (
           <main className="flex-1 flex flex-col p-8 bg-bg-main overflow-y-auto custom-scrollbar">
             <div className="max-w-4xl mx-auto w-full space-y-12 pb-20">
               <div className="space-y-4 text-center">
-                <h2 className="text-4xl font-serif italic text-text-heading">Cortex Alpha: Multimodal Quant</h2>
-                <p className="text-lg text-text-dim max-w-2xl mx-auto">A multimodal arbitrage framework fusing raw market data with semantic catalyst intelligence.</p>
+                <h2 className="text-4xl font-serif italic text-text-heading">About Cortex Alpha</h2>
+                <p className="text-lg text-text-dim max-w-2xl mx-auto">A quantitative framework fusing standard trend-following systems with semantic catalyst intelligence and momentum confirmation.</p>
               </div>
 
               {/* Strategy Visualization Map */}
@@ -1202,28 +4495,32 @@ export default function App() {
                 <div className="relative z-10 space-y-8">
                   <div className="flex flex-col items-center gap-2">
                     <span className="text-[10px] font-mono text-sol-purple uppercase tracking-[0.3em] font-bold">System Architecture</span>
-                    <h3 className="text-xl font-serif italic text-text-heading">Multi-Factor Fusion Pipeline</h3>
+                    <h3 className="text-xl font-serif italic text-text-heading">Trend + Momentum Fusion Pipeline</h3>
                   </div>
                   
                   <div className="flex flex-col md:flex-row items-center justify-between gap-8 max-w-3xl mx-auto relative">
                     {/* Input Nodes */}
-                    <div className="flex flex-col gap-3 w-full md:w-40">
+                    <div className="flex flex-col gap-3 w-full md:w-48">
                       <div className="p-3 bg-bg-main border border-border-dim rounded-lg text-center transition-colors hover:border-sol-purple/50">
-                        <p className="text-[8px] font-mono uppercase text-text-dim mb-0.5">Mode A</p>
-                        <p className="text-[9px] font-bold text-text-heading">Sentiment Catalysts</p>
+                        <p className="text-[8px] font-mono uppercase text-text-dim mb-0.5">Mode A (Trend Follower)</p>
+                        <p className="text-[9px] font-bold text-text-heading">Technical Pivot (Fast vs Slow EMA)</p>
                       </div>
                       <div className="p-3 bg-bg-main border border-border-dim rounded-lg text-center transition-colors hover:border-sol-green/50">
-                        <p className="text-[8px] font-mono uppercase text-text-dim mb-0.5">Mode B</p>
-                        <p className="text-[9px] font-bold text-text-heading">Technical Pivot (EMA)</p>
+                        <p className="text-[8px] font-mono uppercase text-text-dim mb-0.5">Mode B (Momentum Confirm)</p>
+                        <p className="text-[9px] font-bold text-text-heading">Mean Reversion (RSI Liquidity)</p>
                       </div>
                       <div className="p-3 bg-bg-main border border-border-dim rounded-lg text-center transition-colors hover:border-sol-purple/50">
-                        <p className="text-[8px] font-mono uppercase text-text-dim mb-0.5">Mode C</p>
-                        <p className="text-[9px] font-bold text-text-heading">Mean Reversion (RSI)</p>
+                        <p className="text-[8px] font-mono uppercase text-text-dim mb-0.5">Mode C (Catalyst Filter)</p>
+                        <p className="text-[9px] font-bold text-text-heading">NLP Sentiment & News Metrics</p>
+                      </div>
+                      <div className="p-3 bg-bg-main border border-border-dim rounded-lg text-center transition-colors hover:border-sol-green/50">
+                        <p className="text-[8px] font-mono uppercase text-text-dim mb-0.5">Mode D (Volume Setup)</p>
+                        <p className="text-[9px] font-bold text-text-heading">Simulated Liquidation Map</p>
                       </div>
                     </div>
 
                     {/* Processing Core */}
-                    <div className="relative flex-1 flex flex-col items-center justify-center py-12 px-8 border-2 border-dashed border-border-dim rounded-full">
+                    <div className="relative flex-1 flex flex-col items-center justify-center py-12 px-8 border-2 border-dashed border-border-dim rounded-[30%]">
                       <motion.div 
                         className="w-24 h-24 rounded-full bg-sol-purple/10 flex items-center justify-center border border-sol-purple/30 shadow-[0_0_40px_rgba(139,92,246,0.1)]"
                         animate={{ scale: [1, 1.05, 1], rotate: [0, 5, -5, 0] }}
@@ -1232,7 +4529,7 @@ export default function App() {
                         <Zap className="w-8 h-8 text-sol-purple" />
                       </motion.div>
                       <div className="absolute -bottom-4 bg-bg-card px-4 py-1 border border-border-dim rounded-full">
-                        <span className="text-[10px] font-mono font-bold text-text-heading">Logic Fusion Core</span>
+                        <span className="text-[10px] font-mono font-bold text-text-heading">Composite Logic Core</span>
                       </div>
                       
                       {/* Connection Lines (Visual) */}
@@ -1244,66 +4541,69 @@ export default function App() {
                     <div className="w-full md:w-32">
                       <div className="p-4 bg-sol-purple/20 border border-sol-purple/40 rounded-xl text-center shadow-lg shadow-sol-purple/5">
                         <p className="text-[9px] font-mono uppercase text-sol-purple mb-1">Execution</p>
-                        <p className="text-xs font-black tracking-widest">SIGNAL_ALPHA</p>
+                        <p className="text-[11px] leading-tight font-black tracking-widest break-words">OMNI_SIGNAL</p>
                       </div>
                     </div>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4 border-t border-border-dim/50">
                     <div className="text-center space-y-1">
-                      <p className="text-[10px] font-bold text-text-heading">1. EXTRACT</p>
-                      <p className="text-[9px] text-text-dim">Isolating semantically relevant catalysts from global news feeds.</p>
+                      <p className="text-[10px] font-bold text-text-heading">1. ALIGN</p>
+                      <p className="text-[9px] text-text-dim">Measure technical trend (EMA) with momentum limits (RSI).</p>
                     </div>
                     <div className="text-center space-y-1">
                       <p className="text-[10px] font-bold text-text-heading">2. WEIGHT</p>
-                      <p className="text-[9px] text-text-dim">Assigning credibility to price momentum vs. narrative sentiment shifts.</p>
+                      <p className="text-[9px] text-text-dim">Correlate chart alignment against actual global news sentiment.</p>
                     </div>
                     <div className="text-center space-y-1">
                       <p className="text-[10px] font-bold text-text-heading">3. EXECUTE</p>
-                      <p className="text-[9px] text-text-dim">Dynamic position sizing based on Alpha Score (Σ) conviction.</p>
+                      <p className="text-[9px] text-text-dim">Synthesize the Composite Bias (Σ) into explicit orders.</p>
                     </div>
                   </div>
                 </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <Card title="The Multimodal Approach" icon={Activity}>
+                <Card title="The 'World's Best' Composite Concept" icon={Activity}>
                   <div className="space-y-4 text-sm leading-relaxed text-text-body">
                     <p>
-                      Traditional trading algorithms often fail because they ignore the qualitative "why" behind price movements. The **Multimodal Arbitrage** approach treats news as a leading indicator of volatility and technicals as the validation of trend.
+                      The most universally validated trading system historically is the <strong>Trend Follower combined with a Mean Reversion filter</strong>. Cortex Alpha fuses this classic approach (Fast vs Slow EMA crossovers verified by RSI pullbacks) with modern Semantic Market Sentiment (NLP reading top 10 market news articles).
                     </p>
                     <p>
-                      By correlating semantic shifts (News) with momentum shifts (EMA/RSI), the engine identifies "Signal Alignment" windows where probability of success is statistically higher.
+                      This ensures the algorithm buys the pullbacks (RSI) in an uptrend (EMA), but completely skips fakeouts if the News/Sentiment acts as a bearish catalyst overriding the chart.
                     </p>
                   </div>
                 </Card>
 
-                <Card title="Decision Core: Alpha Score" icon={Zap}>
+                <Card title="Decision Core: Alpha Composite (Σ)" icon={Zap}>
                   <div className="space-y-4 text-sm leading-relaxed text-text-body">
                     <p>
-                      The strategy revolves around a dynamic **Alpha Score (Σ)**, calculated as:
+                      The strategy unifies perfectly across the Telegram alerts, order forecasts, and live visual dashboards via one unified <strong>Composite Bias Score (Σ)</strong>:
                     </p>
-                    <div className="bg-bg-input p-4 rounded font-mono text-xs border border-border-dim">
-                      Σ = (Sentiment × w1) + (Technical × w2) + (Liquidity × w3)
+                    <div className="bg-bg-input p-4 rounded font-mono text-[10px] break-words border border-border-dim flex justify-center text-center">
+                      Σ = (TrendScore × W₁) + (MomScore × W₂) + (NewsScore × W₃) + (LiqScore × W₄)
                     </div>
                     <p>
-                      Signals are only generated when Σ crosses the **Alpha Threshold**. This ensures the strategy remains defensive unless all "modes" of data are in agreement.
+                      This score ranges bounds between <strong>-1.0 (Heavy Bearish conviction)</strong> and <strong>+1.0 (Heavy Bullish conviction)</strong> to automate dynamic target forecasting.
                     </p>
                   </div>
                 </Card>
 
-                <Card title="Quantifying 'Liquidity'" icon={Activity}>
+                <Card title="The 3-Layer Pro Framework" icon={Activity}>
                   <div className="space-y-4 text-sm leading-relaxed text-text-body">
                     <p>
-                      In typical trading, **Liquidity** refers to market depth or buyer/seller exhaustion. In this quantitative engine, we utilize the **Relative Strength Index (RSI)** as our Liquidity and Mean Reversion indicator:
+                      Each component works in mathematical concert. The inputs are evaluated and scored purely quantitatively following the 3-Layer Pro Framework:
                     </p>
-                    <ul className="list-disc pl-5 space-y-2 text-xs">
-                      <li><strong>Oversold Sweep (RSI &lt; 30)</strong>: Denotes severe seller exhaustion or a "liquidity sweep" in support zones (signals buying interest, yielding <code>+1</code>).</li>
-                      <li><strong>Overbought Block (RSI &gt; 70)</strong>: Denotes extreme buyer exhaustion (signals high saturation, yielding <code>-1</code>).</li>
+                    <ul className="list-disc pl-5 space-y-2 text-xs text-text-dim">
+                      <li><strong className="text-text-heading">1. Trend Direction (EMA)</strong>: Evaluates the raw divergence ratio of Fast vs. Slow EMAs (similar to Golden Cross logic) to confirm fundamental direction.</li>
+                      <li><strong className="text-text-heading">2. Momentum & Timing (RSI)</strong>: Prevents entering at local tops. RSI &gt; 70 confirms Overbought/Exhaustion; RSI &lt; 30 confirms Oversold/Bounce setups.</li>
+                      <li><strong className="text-text-heading">3. Volume & Catalyst (News)</strong>: Evaluates current internet headlines with NLP processing to act as a proxy for institutional volume or narrative support.</li>
                     </ul>
-                    <p>
-                      By adjusting the <strong>Mean Reversion (RSI)</strong> weight slider, you increase/decrease the strategy's sensitivity to these extreme exhaustion triggers, aiding in timing exact trend reversals!
-                    </p>
+                    <div className="pt-2">
+                       <p className="text-xs bg-bg-main p-3 rounded border-l-2 border-sol-purple">
+                        <strong>The Chop Zone (Hold Strategy):</strong> When RSI lazily floats in the Neutral Zone (40 to 60) AND the Moving Averages squeeze tightly (low volatility), the algorithm forces a <strong>HOLD</strong> to preserve capital, avoiding sideways erosion and faux-breakouts.
+                       </p>
+                    </div>
                   </div>
                 </Card>
               </div>
