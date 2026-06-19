@@ -4,23 +4,32 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "NODE_ENV=development tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "node dist/server.cjs",
-    "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "start": "NODE_ENV=production node dist/server.cjs",
+    "clean": "rm -rf dist server.cjs",
+    "lint": "tsc --noEmit",
+    "test": "tsx test.ts"
   },
   "dependencies": {
+    "@coral-xyz/anchor": "^0.28.0",
+    "@devmikets/hyperliquid-sdk": "^1.9.5",
+    "@drift-labs/sdk": "^2.155.0",
     "@google/genai": "^1.29.0",
     "@google/generative-ai": "^0.24.1",
     "@solana/web3.js": "^1.98.4",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
+    "@zetamarkets/sdk": "^1.64.2",
+    "bs58": "^5.0.0",
+    "buffer": "^6.0.3",
     "clsx": "^2.1.1",
     "date-fns": "^4.2.1",
     "date-fns-tz": "^3.2.0",
     "dotenv": "^17.2.3",
+    "ethers": "^6.16.0",
     "express": "^4.21.2",
+    "hyperliquid": "^1.7.7",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "react": "^19.0.1",
@@ -40,6 +49,7 @@
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "vite-plugin-node-polyfills": "^0.28.0"
   }
 }

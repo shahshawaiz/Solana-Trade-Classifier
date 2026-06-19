@@ -22,6 +22,14 @@ export interface Trade {
   exitPrice?: number;
   pnl: number;
   cumPnL: number;
+  tpPct?: number;
+  slPct?: number;
+  closeReason?: string;
+  sentimentScore?: number;
+  technicalScore?: number;
+  rsiScore?: number;
+  compositeScore?: number;
+  elliotWavePhase?: string;
 }
 
 export interface BacktestResult {
@@ -53,7 +61,9 @@ export function runBacktest(
   threshold: number,
   cooldownMinutes: number = 30,
   tradeSize: number = 1.0,
-  maxPositionSize: number = 1.0
+  maxPositionSize: number = 1.0,
+  takeProfitPct: number = 4.0,
+  stopLossPct: number = 2.0
 ): BacktestResult {
   let marketCum = 1;
   let strategyCum = 1;
@@ -62,38 +72,190 @@ export function runBacktest(
   let trades: Trade[] = [];
   let currentTrade: Partial<Trade> | null = null;
   let runningPnL = 0;
+  let lastExecutedTrend = "HOLD";
+  const ema200Arr = calculateEMA(data.map(x => x.close), Math.min(200, data.length));
 
   const processedData = data.map((d, i) => {
-    // 1. Technical Signal (EMA Cross + RSI)
+    // 1. Technical Signal (EMA Cross + RSI) scoped per evaluation index
+    const evaluateStrategyAtIndex = (index: number) => {
+      const dNow = data[index];
+      const emaFast = dNow.emaFast || dNow.close;
+      const emaSlow = dNow.emaSlow || dNow.close;
+      const techSig = emaFast > emaSlow ? 1 : -1;
+      
+      let rsiSig = 0;
+      if (dNow.rsi) {
+        if (dNow.rsi < 30) rsiSig = 1;      
+        else if (dNow.rsi > 70) rsiSig = -1;
+      }
+
+      const weightedSentNow = (dNow.sentiment || 0) * weights.sentiment;
+      const weightedTechNow = techSig * weights.technical;
+      const weightedRsiNow = rsiSig * weights.liquidity;
+      
+      return weightedSentNow + weightedTechNow + weightedRsiNow;
+    };
+
+    // Calculate current tick variables to use for logging and condition checking
     const emaFast = d.emaFast || d.close;
     const emaSlow = d.emaSlow || d.close;
     const techSig = emaFast > emaSlow ? 1 : -1;
-    
     let rsiSig = 0;
     if (d.rsi) {
       if (d.rsi < 30) rsiSig = 1;      
       else if (d.rsi > 70) rsiSig = -1;
     }
-
-    // 2. Multimodal Score
     const weightedSent = (d.sentiment || 0) * weights.sentiment;
     const weightedTech = techSig * weights.technical;
     const weightedRsi = rsiSig * weights.liquidity;
-    
     const score = weightedSent + weightedTech + weightedRsi;
+
+    // 5-Point Elliot Wave FIRST GATE
+    const evaluateEwSig = (index: number) => {
+      // Return HOLD if not enough data
+      if (index < 33) return "HOLD";
+      const currentCloses = data.slice(0, index + 1).map(x => x.close);
+      const ewData = calculateElliotWave(currentCloses);
+      let ewDir = "HOLD";
+      if (ewData.phase.includes("Wave 1") || ewData.phase.includes("Wave 3") || ewData.phase.includes("Wave 4")) {
+         ewDir = "LONG";
+      } else if (ewData.phase.includes("Wave A") || ewData.phase.includes("Wave C") || ewData.phase.includes("Wave 5")) {
+         ewDir = "SHORT";
+      }
+      
+      let pSide = "HOLD";
+      // ONLY evaluate rest of strategy if Elliot Wave gate passes
+      if (ewDir !== "HOLD") {
+        const sc = evaluateStrategyAtIndex(index);
+        const currentClose = data[index].close;
+        const currentEma200 = ema200Arr[index];
+        
+        if (sc > threshold && ewDir === "LONG" && currentClose > currentEma200) pSide = "LONG";
+        else if (sc < -threshold && ewDir === "SHORT" && currentClose < currentEma200) pSide = "SHORT";
+        
+        const rVal = data[index].rsi || 50;
+        if (rVal > 70 && ewDir === "SHORT" && currentClose < currentEma200) pSide = "SHORT";
+        if (rVal < 30 && ewDir === "LONG" && currentClose > currentEma200) pSide = "LONG";
+      }
+      return pSide;
+    };
+
+    let pSide = evaluateEwSig(i);
 
     // 3. Signal Generation
     let signal = 0;
     const currentTimestamp = d.date ? new Date(d.date).getTime() : 0;
     const isCooldown = currentTimestamp > 0 && lastTradeTime > 0 && (currentTimestamp - lastTradeTime < cooldownMinutes * 60 * 1000);
 
-    if (!isCooldown) {
-      if (score > threshold) signal = 1; // LONG BUY
-      else if (score < -threshold) signal = -1; // SHORT SELL
+    // 2x 15m tick validation check for trend reversals
+    let isTrendConfirmed3x = false;
+    let prevSig1 = "HOLD";
+    let prevSig2 = "HOLD";
+    if (i >= 1) {
+      prevSig1 = evaluateEwSig(i - 1);
+      if (i >= 2) {
+        prevSig2 = evaluateEwSig(i - 2);
+      }
+      isTrendConfirmed3x = (pSide !== "HOLD" && pSide === prevSig1);
+    }
+    
+    if (currentTrade === null && !isCooldown) {
+      if (pSide === "HOLD") {
+        lastExecutedTrend = "HOLD"; // Reset on HOLD
+      } else if (pSide !== lastExecutedTrend && i >= 1) {
+        const is1stConfirmation = pSide !== prevSig1;
+        const is2ndConfirmation = pSide === prevSig1 && pSide !== prevSig2;
+        
+        const currentEw = calculateElliotWave(data.slice(0, i + 1).map(x => x.close));
+        
+        if (is1stConfirmation) {
+          trades.push({
+            type: pSide === "LONG" ? "CONFIRM_LONG" : "CONFIRM_SHORT" as any,
+            entryTime: d.time || d.date || "",
+            entryPrice: d.close,
+            pnl: 0,
+            cumPnL: runningPnL,
+            closeReason: `1st Signal Confirmation (${pSide})`,
+            sentimentScore: d.sentiment || 0,
+            technicalScore: techSig,
+            rsiScore: rsiSig,
+            compositeScore: score,
+            elliotWavePhase: currentEw.phase
+          });
+        } else if (is2ndConfirmation) {
+          trades.push({
+            type: pSide === "LONG" ? "CONFIRM_LONG" : "CONFIRM_SHORT" as any,
+            entryTime: d.time || d.date || "",
+            entryPrice: d.close,
+            pnl: 0,
+            cumPnL: runningPnL,
+            closeReason: `2nd Signal Confirmation (${pSide})`,
+            sentimentScore: d.sentiment || 0,
+            technicalScore: techSig,
+            rsiScore: rsiSig,
+            compositeScore: score,
+            elliotWavePhase: currentEw.phase
+          });
+        }
+      }
+    }
+    
+    // Check TP / SL before processing entry signals
+    let tpSlHit = false;
+    let timeLimitExit = false;
+    let timeLimitReason = "";
+    if (currentTrade && currentTrade.entryPrice) {
+      const entryPrice = currentTrade.entryPrice;
+      const currentPnL = currentTrade.type === 'Long'
+        ? (d.close - entryPrice) / entryPrice
+        : (entryPrice - d.close) / entryPrice;
+
+      if (currentPnL * 100 >= takeProfitPct) {
+        signal = currentTrade.type === 'Long' ? -2 : 2; // Exit signal
+        tpSlHit = true;
+      } else if (currentPnL * 100 <= -stopLossPct) {
+        signal = currentTrade.type === 'Long' ? -2 : 2;
+        tpSlHit = true;
+      }
+
+      // Check Rule 1: Exit after 90–120 minutes if unrealized PnL < +0.5%
+      const rawCurrentTime = d.date || d.time;
+      const rawEntryTime = currentTrade.entryTime;
+      if (rawCurrentTime && rawEntryTime) {
+        const curTimestamp = new Date(rawCurrentTime).getTime();
+        const entTimestamp = new Date(rawEntryTime).getTime();
+        const elapsedMinutes = (curTimestamp - entTimestamp) / (60 * 1000);
+        const unrealizedPnL = currentPnL * 100;
+        if (elapsedMinutes >= 90 && unrealizedPnL < 0.5) {
+          signal = currentTrade.type === 'Long' ? -2 : 2;
+          timeLimitExit = true;
+          timeLimitReason = `PnL Threshold Time Limit Exceeded (Duration: ${Math.round(elapsedMinutes)} mins, PnL: ${unrealizedPnL.toFixed(2)}% < +0.5%)`;
+        }
+      }
+    }
+
+    if (!isCooldown && !tpSlHit) {
+      // Reversal trend changes close positions early without 3x validation
+      if (currentPosition > 0 && pSide === "SHORT") {
+        signal = -2; // Force close long
+      } else if (currentPosition < 0 && pSide === "LONG") {
+        signal = 2; // Force close short
+      }
+
+      if (pSide === "LONG" && isTrendConfirmed3x && signal === 0 && lastExecutedTrend !== "LONG") {
+        signal = 1; // LONG BUY
+      } else if (pSide === "SHORT" && isTrendConfirmed3x && signal === 0 && lastExecutedTrend !== "SHORT") {
+        signal = -1; // SHORT SELL
+      }
       
       // 4. Overrides/Exits
-      if (d.rsi && d.rsi > 75) signal = -2; // LONG SELL (Exit long)
-      if (d.rsi && d.rsi < 25) signal = 2;  // SHORT BUY (Exit short)
+      // For overrides, E.g. RSI exhaustion
+      if (d.rsi && d.rsi > 75 && signal === 0) {
+        if (currentPosition > 0 && calculateElliotWave(data.slice(0, i+1).map(x=>x.close)).phase.includes("Wave 5")) signal = -2;
+      }
+      if (d.rsi && d.rsi < 25 && signal === 0) {
+        if (currentPosition < 0 && calculateElliotWave(data.slice(0, i+1).map(x=>x.close)).phase.includes("Wave C")) signal = 2;
+      }
     }
     
     // 5. Returns Calculation
@@ -108,7 +270,7 @@ export function runBacktest(
     }
 
     // 6. Update Position & Record Trades
-    const closeTrade = (isForcedExit: boolean = false) => {
+    const closeTrade = (reason: string, isForcedExit: boolean = false) => {
       if (currentTrade) {
         const exitPrice = d.close;
         const entryPrice = currentTrade.entryPrice!;
@@ -123,7 +285,8 @@ export function runBacktest(
           exitTime: d.time,
           exitPrice: exitPrice,
           pnl: pnl,
-          cumPnL: runningPnL
+          cumPnL: runningPnL,
+          closeReason: reason
         };
         trades.push(finishedTrade);
         currentTrade = null;
@@ -139,15 +302,24 @@ export function runBacktest(
 
     if (signal === 1) { // LONG BUY
       if (currentPosition <= 0) {
-        closeTrade();
+        if (currentPosition < 0) closeTrade("Trend Reversal");
         currentPosition = tradeSize;
+        const currentEw = calculateElliotWave(data.slice(0, i + 1).map(x => x.close));
         currentTrade = {
           type: 'Long',
           entryTime: d.time,
           entryPrice: d.close,
           pnl: 0,
-          cumPnL: 0
+          cumPnL: 0,
+          tpPct: takeProfitPct,
+          slPct: stopLossPct,
+          sentimentScore: d.sentiment || 0,
+          technicalScore: techSig,
+          rsiScore: rsiSig,
+          compositeScore: score,
+          elliotWavePhase: currentEw.phase
         };
+        lastExecutedTrend = "LONG";
         lastTradeTime = currentTimestamp;
         effectiveSignal = 1;
 
@@ -158,15 +330,24 @@ export function runBacktest(
       }
     } else if (signal === -1) { // SHORT SELL
       if (currentPosition >= 0) {
-        closeTrade();
+        if (currentPosition > 0) closeTrade("Trend Reversal");
         currentPosition = -tradeSize;
+        const currentEw = calculateElliotWave(data.slice(0, i + 1).map(x => x.close));
         currentTrade = {
           type: 'Short',
           entryTime: d.time,
           entryPrice: d.close,
           pnl: 0,
-          cumPnL: 0
+          cumPnL: 0,
+          tpPct: takeProfitPct,
+          slPct: stopLossPct,
+          sentimentScore: d.sentiment || 0,
+          technicalScore: techSig,
+          rsiScore: rsiSig,
+          compositeScore: score,
+          elliotWavePhase: currentEw.phase
         };
+        lastExecutedTrend = "SHORT";
         lastTradeTime = currentTimestamp;
         effectiveSignal = -1;
         
@@ -177,14 +358,20 @@ export function runBacktest(
       }
     } else if (signal === -2 || (currentPosition > 0 && d.rsi && d.rsi > 75)) { // Exit Long
       if (currentPosition > 0) {
-        if (closeTrade()) {
+        let reason = tpSlHit ? (d.close >= currentTrade!.entryPrice! * (1 + takeProfitPct / 100) ? "Take Profit Hit" : "Stop Loss Hit") : "Signal Expiration/RSI Exhaustion";
+        if (timeLimitExit) reason = timeLimitReason;
+        else if (signal === -2 && pSide === "SHORT") reason = "Trend Reversal";
+        if (closeTrade(reason)) {
           effectiveSignal = -2;
           if (weightedSent < 0) isSentimentCatalyst = true;
         }
       }
     } else if (signal === 2 || (currentPosition < 0 && d.rsi && d.rsi < 25)) { // Exit Short
       if (currentPosition < 0) {
-        if (closeTrade()) {
+        let reason = tpSlHit ? (d.close <= currentTrade!.entryPrice! * (1 - takeProfitPct / 100) ? "Take Profit Hit" : "Stop Loss Hit") : "Signal Expiration/RSI Exhaustion";
+        if (timeLimitExit) reason = timeLimitReason;
+        else if (signal === 2 && pSide === "LONG") reason = "Trend Reversal";
+        if (closeTrade(reason)) {
           effectiveSignal = 2;
           if (weightedSent > 0) isSentimentCatalyst = true;
         }
@@ -193,7 +380,7 @@ export function runBacktest(
 
     // Forced exit at very end of loop if it's the last element
     if (i === data.length - 1 && currentPosition !== 0) {
-      closeTrade(true);
+      closeTrade("End of Backtest", true);
     }
 
     return {
@@ -266,4 +453,87 @@ export function calculateRSI(closes: number[], period: number = 14): number[] {
   }
 
   return rsis;
+}
+
+export function calculateElliotWave(closes: number[]): { score: number; phase: string; details: string; value: number } {
+  if (closes.length < 34) {
+    const current = closes[closes.length - 1] || 0;
+    const first = closes[0] || 0;
+    const score = current > first ? 0.3 : (current < first ? -0.3 : 0);
+    return {
+      score,
+      phase: "Initial Setup Phase",
+      details: "Not enough historical price candles are available yet to compute structural EWO.",
+      value: current - first
+    };
+  }
+
+  const ewos: number[] = [];
+  for (let i = 33; i < closes.length; i++) {
+    let sum5 = 0;
+    for (let j = 0; j < 5; j++) {
+      sum5 += closes[i - j];
+    }
+    const sma5 = sum5 / 5;
+
+    let sum34 = 0;
+    for (let j = 0; j < 34; j++) {
+      sum34 += closes[i - j];
+    }
+    const sma34 = sum34 / 34;
+    ewos.push(sma5 - sma34);
+  }
+
+  const currentEwo = ewos[ewos.length - 1];
+  const prevEwo = ewos.length > 1 ? ewos[ewos.length - 2] : currentEwo;
+  
+  const recentEwos = ewos.slice(-34);
+  const maxEwo = Math.max(...recentEwos);
+  const minEwo = Math.min(...recentEwos);
+
+  let score = 0;
+  if (maxEwo > minEwo) {
+    score = ((currentEwo - minEwo) / (maxEwo - minEwo)) * 2 - 1;
+  }
+
+  let phase = "Wave 1 - Initial Impulse";
+  let details = "Early-stage breakout starting to form on SMA crossover.";
+
+  const currentPrice = closes[closes.length - 1];
+  const recentPrices = closes.slice(-34);
+  const maxPrice = Math.max(...recentPrices);
+
+  if (currentEwo > 0) {
+    if (currentEwo >= maxEwo * 0.8 && currentPrice >= maxPrice * 0.95) {
+      phase = "Wave 3 - Strong Bullish Impulse";
+      details = "Strong bullish trend where momentum peaks. Highest volatility expected.";
+    } else if (currentEwo < maxEwo * 0.6 && currentPrice >= maxPrice * 0.98) {
+      phase = "Wave 5 - Exhaustion Trend Peak";
+      details = "Price has exceeded previous high, but momentum Oscillator is making a lower high (bearish divergence).";
+    } else if (currentEwo < prevEwo && currentEwo < maxEwo * 0.5) {
+      phase = "Wave 4 - Profit-taking Pullback";
+      details = "Consolidation pullback towards the zero line of the oscillator.";
+    } else {
+      phase = "Wave 1/3 Build Phases";
+      details = "Early impulse structures showing steady buying momentum.";
+    }
+  } else {
+    if (currentEwo <= minEwo * 0.8) {
+      phase = "Wave C - Capitulation Correction";
+      details = "Active corrective selloff. Heavy momentum on the downside.";
+    } else if (currentEwo > minEwo * 0.5 && currentEwo > prevEwo) {
+      phase = "Wave B - Bear Market Rally";
+      details = "Temporary corrective relief rally. Bearish environment remains active.";
+    } else {
+      phase = "Wave A - Correction Trigger";
+      details = "Onset of corrective phase following peak exhaustion.";
+    }
+  }
+
+  return {
+    score: Math.max(-1, Math.min(1, score)),
+    phase,
+    details,
+    value: currentEwo
+  };
 }

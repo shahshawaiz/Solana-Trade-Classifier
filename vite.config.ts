@@ -2,10 +2,37 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
+import { nodePolyfills } from 'vite-plugin-node-polyfills';
 
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      react(), 
+      tailwindcss(),
+      nodePolyfills({
+        include: ['path', 'stream', 'util', 'events', 'assert', 'crypto', 'http', 'https', 'buffer'],
+        globals: {
+          Buffer: true,
+          global: true,
+          process: true,
+        },
+      })
+    ],
+    build: {
+      minify: false,
+      sourcemap: false,
+      commonjsOptions: {
+        transformMixedEsModules: true,
+      },
+      rollupOptions: {
+        external: [
+          '@drift-labs/sdk',
+          '@zetamarkets/sdk',
+          '@coral-xyz/anchor',
+          '@project-serum/anchor'
+        ]
+      }
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

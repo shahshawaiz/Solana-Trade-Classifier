@@ -4,6 +4,8 @@ import { Flame, RefreshCw, Layers, Crosshair, ChevronRight, Settings, Download, 
 interface LiquidityHeatmapProps {
   token: string;
   spotPrice: number;
+  spread: number;
+  onSpreadChange: (s: number) => void;
 }
 
 interface CustomOrder {
@@ -14,8 +16,8 @@ interface CustomOrder {
   timestamp: string;
 }
 
-export const LiquidityHeatmap: React.FC<LiquidityHeatmapProps> = ({ token, spotPrice }) => {
-  const [filterMode, setFilterMode] = useState<"ALL" | "BIDS" | "ASKS">("ALL");
+export const LiquidityHeatmap: React.FC<LiquidityHeatmapProps> = ({ token, spotPrice, spread, onSpreadChange }) => {
+  const [filterMode, setFilterMode] = useState<"ALL" | "LONG_LIQ" | "SHORT_LIQ">("ALL");
   const [sensitivity, setSensitivity] = useState<number>(1.2); // Sensitivity Multiplier for heatmap colors
   const [placedOrders, setPlacedOrders] = useState<CustomOrder[]>([]);
   const [simulationActive, setSimulationActive] = useState<boolean>(false);
@@ -25,30 +27,33 @@ export const LiquidityHeatmap: React.FC<LiquidityHeatmapProps> = ({ token, spotP
   // Time ticks for the horizontal axis (16 columns)
   const columnsCount = 16;
   
-  // Price offset levels vertical (percentage from spot price)
-  const rows = useMemo(() => [
-    { label: "+2.5%", offset: 0.025, side: "ASK" },
-    { label: "+2.0%", offset: 0.020, side: "ASK" },
-    { label: "+1.5%", offset: 0.015, side: "ASK" },
-    { label: "+1.0%", offset: 0.010, side: "ASK" },
-    { label: "+0.5%", offset: 0.005, side: "ASK" },
-    { label: "+0.2%", offset: 0.002, side: "ASK" },
-    { label: "SPOT", offset: 0.0, side: "SPOT" },
-    { label: "-0.2%", offset: -0.002, side: "BID" },
-    { label: "-0.5%", offset: -0.005, side: "BID" },
-    { label: "-1.0%", offset: -0.010, side: "BID" },
-    { label: "-1.5%", offset: -0.015, side: "BID" },
-    { label: "-2.0%", offset: -0.020, side: "BID" },
-    { label: "-2.5%", offset: -0.025, side: "BID" }
-  ], []);
+  // Price offset levels vertical (absolute dollar offset from spot price based on spread)
+  const rows = useMemo(() => {
+    const arr = [];
+    for (let i = 6; i >= 1; i--) {
+      arr.push({ label: `+$${(i * spread).toFixed(spread >= 1 ? 0 : spread >= 0.1 ? 1 : spread >= 0.01 ? 2 : 3)}`, offset: i * spread, side: "ASK" });
+    }
+    arr.push({ label: "SPOT", offset: 0, side: "SPOT" });
+    for (let i = 1; i <= 6; i++) {
+      arr.push({ label: `-$${(i * spread).toFixed(spread >= 1 ? 0 : spread >= 0.1 ? 1 : spread >= 0.01 ? 2 : 3)}`, offset: -i * spread, side: "BID" });
+    }
+    return arr;
+  }, [spread]);
 
   // Grid Matrix state: rows.length rows by columnsCount columns
   // Each element represents volume size in token units
   const [matrix, setMatrix] = useState<number[][]>(() => {
-    return Array.from({ length: rows.length }, () =>
-      Array.from({ length: columnsCount }, () => 0)
-    );
+    return Array.from({ length: 13 }, () => Array.from({ length: 16 }, () => 0));
   });
+
+  useEffect(() => {
+    // Reset matrix when rows length changes
+    if (matrix.length !== rows.length) {
+      setMatrix(Array.from({ length: rows.length }, () =>
+        Array.from({ length: columnsCount }, () => 0)
+      ));
+    }
+  }, [rows.length, columnsCount]);
 
   // Keep static mock order walls to make simulation highly realistic
   // Level index matching high-liquidity sell/buy walls
@@ -115,7 +120,7 @@ export const LiquidityHeatmap: React.FC<LiquidityHeatmapProps> = ({ token, spotP
           }
 
           // Merge in user placed active limit order volumes
-          const rowPrice = spotPrice * (1 + rowDef.offset);
+          const rowPrice = spotPrice + rowDef.offset;
           const activeOrdersAtLevel = placedOrders.filter(o => {
             const diffPct = Math.abs((o.price - rowPrice) / rowPrice);
             return diffPct < 0.0015; // Within 15 bps limit
@@ -173,7 +178,7 @@ export const LiquidityHeatmap: React.FC<LiquidityHeatmapProps> = ({ token, spotP
       return;
     }
 
-    const orderPrice = spotPrice * (1 + rowDef.offset);
+    const orderPrice = spotPrice + rowDef.offset;
     const orderSize = rowDef.side === "BID" ? 250 : 180; // Default sizing in tokens
     const type = rowDef.side === "BID" ? "BUY" : "SELL";
 
@@ -210,7 +215,7 @@ export const LiquidityHeatmap: React.FC<LiquidityHeatmapProps> = ({ token, spotP
   const exportHeatmapCSV = () => {
     const headers = ["Price Level", "Percentage Offset", "Market Depth Side", ...Array.from({ length: columnsCount }, (_, i) => `Tick T-${columnsCount - 1 - i}`)];
     const dataRows = rows.map((row, rIdx) => {
-      const calcPrice = spotPrice * (1 + row.offset);
+      const calcPrice = spotPrice + row.offset;
       return [
         `$${calcPrice.toFixed(3)}`,
         row.label,
@@ -271,26 +276,40 @@ export const LiquidityHeatmap: React.FC<LiquidityHeatmapProps> = ({ token, spotP
             </div>
           </div>
           <p className="text-[10.5px] text-text-dim mt-1.5 leading-relaxed font-sans">
-            Visualizes buy wall (bids) and sell wall (asks) concentration indices (Liquidation Map). **Click on any cell to place a limit order** directly into the order book cluster.
+            Visualizes dynamic long liquidations (support thresholds) and short liquidations (resistance clusters) mapped against real-time derivative leverage. **Click on any cell to place a limit order** directly into the target cluster.
           </p>
         </div>
 
         {/* Global Toolbar */}
         <div className="flex flex-wrap items-center gap-2 font-sans w-full md:w-auto justify-end">
+          {/* Spread toggle */}
+          <div className="flex items-center gap-2 border border-border-dim bg-bg-main px-2 py-1 rounded-lg mr-2">
+            <span className="text-[10px] uppercase font-bold text-text-dim tracking-wider items-center flex gap-1"><Settings className="w-3 h-3" /> Spread:</span>
+            <select
+              className="bg-transparent text-text-heading text-xs outline-none font-mono font-bold cursor-pointer"
+              value={spread}
+              onChange={(e) => onSpreadChange(Number(e.target.value))}
+            >
+              <option value={1}>1</option>
+              <option value={0.1}>0.1</option>
+              <option value={0.01}>0.01</option>
+              <option value={0.001}>0.001</option>
+            </select>
+          </div>
           {/* Filters toggle */}
           <div className="flex items-center gap-1 bg-bg-input border border-border-dim/80 p-1.5 rounded-lg text-[10px] select-none">
-            {(["ALL", "BIDS", "ASKS"] as const).map(m => (
+            {([{id: "ALL", label: "ALL"}, {id: "LONG_LIQ", label: "LONG LIQ"}, {id: "SHORT_LIQ", label: "SHORT LIQ"}] as const).map(m => (
               <button
-                key={m}
+                key={m.id}
                 type="button"
-                onClick={() => setFilterMode(m)}
+                onClick={() => setFilterMode(m.id)}
                 className={`px-2 py-1 rounded-md font-bold transition-all cursor-pointer ${
-                  filterMode === m 
+                  filterMode === m.id 
                     ? "bg-sol-purple border border-sol-purple/20 text-white" 
                     : "text-text-dim hover:text-text-heading"
                 }`}
               >
-                {m}
+                {m.label}
               </button>
             ))}
           </div>
@@ -337,12 +356,12 @@ export const LiquidityHeatmap: React.FC<LiquidityHeatmapProps> = ({ token, spotP
           <div className="space-y-1">
             {rows.map((row, rIdx) => {
               // Hide rows if filter mode excludes side
-              if (filterMode === "BIDS" && row.side === "ASK") return null;
-              if (filterMode === "ASKS" && row.side === "BID") return null;
+              if (filterMode === "LONG_LIQ" && row.side === "ASK") return null;
+              if (filterMode === "SHORT_LIQ" && row.side === "BID") return null;
 
               const isSpot = row.side === "SPOT";
               const isBid = row.side === "BID";
-              const valPrice = spotPrice * (1 + row.offset);
+              const valPrice = spotPrice + row.offset;
 
               // Check if user has an active limit order at this exact offset row
               const rowActiveOrders = placedOrders.filter(o => {
@@ -391,9 +410,9 @@ export const LiquidityHeatmap: React.FC<LiquidityHeatmapProps> = ({ token, spotP
 
                           {/* Hover visual tag for any cell */}
                           <div className="pointer-events-none opacity-0 group-hover:opacity-100 absolute left-full z-50 bg-slate-950 border border-sol-purple p-2 text-[9px] text-slate-100 rounded-lg shadow-2xl transition-all duration-150 ml-2 whitespace-nowrap">
-                            <span className="font-extrabold block text-sol-purple">{row.side === "ASK" ? "🛡️ Sell Liquidity (Ask)" : "🌊 Buy Liquidity (Bid)"}</span>
+                            <span className="font-extrabold block text-sol-purple">{row.side === "ASK" ? "🛡️ Short Liquidations (Resistance)" : "🌊 Long Liquidations (Support)"}</span>
                             <span>Price: <strong className="text-white">${valPrice.toFixed(2)}</strong></span> <br />
-                            <span>Depth Vol: <strong className="text-white">{colVal.toLocaleString(undefined, {maximumFractionDigits:0})} {token}</strong></span> <br />
+                            <span>Liq Vol: <strong className="text-white">{colVal.toLocaleString(undefined, {maximumFractionDigits:0})} {token}</strong></span> <br />
                             <span>Value: <strong className="text-sol-green">${(colVal * valPrice).toLocaleString(undefined, {maximumFractionDigits:0})}</strong></span>
                           </div>
 
@@ -434,18 +453,18 @@ export const LiquidityHeatmap: React.FC<LiquidityHeatmapProps> = ({ token, spotP
             
             <div className="flex justify-between">
               <span className="text-text-dim">Spread Width / Cost:</span>
-              <span className="font-bold text-text-heading">{(spreadPct * 10).toFixed(2)} bps / $0.05</span>
+              <span className="font-bold text-text-heading">{((spread / spotPrice) * 10000).toFixed(2)} bps / ${spread.toFixed(spread >= 1 ? 0 : spread >= 0.1 ? 1 : spread >= 0.01 ? 2 : 3)}</span>
             </div>
 
             <div className="flex justify-between">
-              <span className="text-text-dim">Total Bid Depth Vol:</span>
+              <span className="text-text-dim">Total Long Liq Volume:</span>
               <span className="font-bold text-sol-green">
                 {totalBidsDepth.toLocaleString(undefined, { maximumFractionDigits: 0 })} {token}
               </span>
             </div>
 
             <div className="flex justify-between">
-              <span className="text-text-dim">Total Ask Depth Vol:</span>
+              <span className="text-text-dim">Total Short Liq Volume:</span>
               <span className="font-bold text-sol-purple">
                 {totalAsksDepth.toLocaleString(undefined, { maximumFractionDigits: 0 })} {token}
               </span>
@@ -454,8 +473,8 @@ export const LiquidityHeatmap: React.FC<LiquidityHeatmapProps> = ({ token, spotP
             {/* Book imbalance meter */}
             <div className="space-y-1.5 pt-1">
               <div className="flex justify-between text-[9px] font-bold text-text-dim">
-                <span>IMBALANCE (BIDS VS ASKS):</span>
-                <span>{orderBookImbalance.toFixed(1)}% BIDS</span>
+                <span>IMBALANCE (LONG VS SHORT):</span>
+                <span>{orderBookImbalance.toFixed(1)}% LONG</span>
               </div>
               <div className="w-full bg-bg-card h-1.5 rounded-full overflow-hidden flex border border-border-dim">
                 <div 
@@ -469,8 +488,8 @@ export const LiquidityHeatmap: React.FC<LiquidityHeatmapProps> = ({ token, spotP
               </div>
               <p className="text-[8.5px] text-text-dim mt-1.5 leading-snug font-sans italic">
                 {orderBookImbalance > 52 
-                  ? "🔥 Heavy buy-wall clustering detected below current spot price: bullish support builds." 
-                  : orderBookImbalance < 48 ? "🛡️ High-density sell walls overhead: impending resistance clusters." : "⚖️ Symmetrical depth allocation: passive spread mean-reversion favored."}
+                  ? "🔥 Heavy LONG liquidation clustering detected below spot: cascading support structure builds." 
+                  : orderBookImbalance < 48 ? "🛡️ High-density SHORT liquidations overhead: impending resistance clusters." : "⚖️ Symmetrical depth allocation: passive volatility reversion favored."}
               </p>
             </div>
           </div>

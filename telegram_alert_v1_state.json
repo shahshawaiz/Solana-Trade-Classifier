@@ -1,0 +1,28 @@
+{
+  "botToken": "",
+  "chatId": "",
+  "enabled": true,
+  "token": "SOL",
+  "topic": "crypto,war",
+  "weights": {
+    "sentiment": 0.9,
+    "technical": 0.9,
+    "liquidity": 0.9,
+    "elliottWave": 0.9
+  },
+  "lastAction": "Hold",
+  "lastSentDirection": "HOLD",
+  "frequency": 5,
+  "cooldownMinutes": 30,
+  "lastTradeAddedAt": "",
+  "lastTradePnL": 0,
+  "cumulativePnL": 0,
+  "takeProfitPct": 4,
+  "stopLossPct": 2,
+  "leverage": 5,
+  "interval": "15m",
+  "activeTrade": null,
+  "tradesHistory": [],
+  "auditLogs": [],
+  "newsTelegramChannel": "https://t.me/+1C0c6rUVmjo3Y2Y8"
+}
