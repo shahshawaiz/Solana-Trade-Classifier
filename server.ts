@@ -16,6 +16,7 @@ import { Connection, PublicKey, Transaction, TransactionInstruction, Transaction
 import bs58Import from "bs58";
 import dns from "dns";
 import https from "https";
+import { execFile } from "child_process";
 
 dotenv.config();
 
@@ -432,79 +433,9 @@ async function fetchTelegramChannelFeed(channelUrl: string, token: string): Prom
       });
     }
 
-    // For private invite links (like https://t.me/+1C0c6rUVmjo3Y2Y8) or has no public messages, 
-    // fetch real-time simulated posts using Gemini matching the actual channel context and active token token
-    try {
-      const prompt = `You are a high-fidelity simulation engine mimicking a live Telegram feed for a premium crypto trading community.
-      Channel Name: "${channelTitle}"
-      Channel Description: "${channelDesc}"
-      Current Asset/Token being monitored: ${token}
-
-      Based on this context, generate exactly 5 realistic, action-oriented telegram posts containing a mix of high-conviction signals (long buy, target prices, leverage guidelines, stop loss), hot market news catalysts, and VIP updates. Include typical crypto trading emojis (🚀, 📈, 🔴, 🟢, 🚨, 💡, 🔥). Keep each post short, punchy, and authentic.
-      Return them strictly as a JSON array of strings: ["post 1", "post 2", ...]. Do not write any markdown codeblocks or conversational text around it, just raw JSON.`;
-
-      const aiResponse = await generateContentResilient({
-        model: "gemini-3.5-flash",
-        contents: prompt
-      });
-
-      const responseText = (aiResponse.text || "").trim();
-      const cleanJsonStr = responseText.replace(/^```json\s*/i, "").replace(/```$/, "").trim();
-      const postsArray = JSON.parse(cleanJsonStr);
-
-      if (Array.isArray(postsArray)) {
-        return postsArray.map((postText, index) => {
-          return {
-            title: postText,
-            source: { name: `${channelTitle} (Live)` },
-            publishedAt: new Date(Date.now() - index * 12 * 60 * 1000).toISOString(),
-            url: channelUrl
-          };
-        });
-      }
-    } catch (e: any) {
-      const isQuota = isSpendingCapError(e) || (e.message && e.message.includes("quota"));
-      if (isQuota) {
-        console.log(`[Telegram AI Feed Info] Gemini spending cap/resource exhaustion detected. Seamlessly using local dynamic mock signal generator.`);
-      } else {
-        console.log(`[Telegram AI Feed Info] Failed to generate AI feed, falling back:`, e.message || e);
-      }
-    }
-
-    // Fallback if AI generation fails
-    const timeNow = Date.now();
-    return [
-      {
-        title: `🚨 [SIGNAL INSTANT ENTRY] ${token} is consolidating inside a tight bullish pennant. High potential breakout imminent. Entry range: dynamic. Target 1: +6.5%, Target 2: +15.2%. Stop Loss: tight.`,
-        source: { name: channelTitle },
-        publishedAt: new Date(timeNow - 8 * 60 * 1000).toISOString(),
-        url: channelUrl
-      },
-      {
-        title: `📊 Multi-interval RSI and MACD crossovers indicator just turned bullish for ${token}. Order book liquidity skew is favoring a massive squeeze on shorts! Accumulate accordingly!`,
-        source: { name: channelTitle },
-        publishedAt: new Date(timeNow - 40 * 60 * 1000).toISOString(),
-        url: channelUrl
-      },
-      {
-        title: `🔥 CONGRATS VIP GROUP! Previous take-profit signal for ${token} hit perfectly! Clean +18% net gain locked in. Matrix smashed. Let's look for our next leg!`,
-        source: { name: channelTitle },
-        publishedAt: new Date(timeNow - 2 * 60 * 60 * 1000).toISOString(),
-        url: channelUrl
-      },
-      {
-        title: `💡 Smart money is aggressively scanning the Solana ecosystem. Keep close eyes on decentralized orderbook alerts. Volatility is rising!`,
-        source: { name: /SOL/i.test(token) ? "Solana" : token },
-        publishedAt: new Date(timeNow - 4 * 60 * 60 * 1000).toISOString(),
-        url: channelUrl
-      },
-      {
-        title: `⚠️ Risk Management Reminder: Weekend volume drains are common. Maintain strict capital allocation rules. Never over-leverage your spot wallets!`,
-        source: { name: channelTitle },
-        publishedAt: new Date(timeNow - 7 * 60 * 60 * 1000).toISOString(),
-        url: channelUrl
-      }
-    ];
+    // No public posts available to scrape. We never fabricate or simulate news —
+    // return empty so sentiment is derived only from real, verifiable headlines.
+    return [];
   } catch (error: any) {
     console.error("Error in fetchTelegramChannelFeed", error);
     return [];
@@ -964,6 +895,7 @@ export function performCoreAnalysis(closes: number[], headlines: string[] = [], 
 
   // 3. MACD
   let macdScore = 0;
+  let maSpreadPct = Infinity; // |fastEMA - slowEMA| as % of price — used for Chop Zone squeeze detection
   if (closes.length >= 34) {
     const fastEma = calculateEMA(closes, 12);
     const slowEma = calculateEMA(closes, 26);
@@ -973,6 +905,8 @@ export function performCoreAnalysis(closes: number[], headlines: string[] = [], 
     const prevHist = (macdLine.length >= 2) ? macdLine[macdLine.length - 2] - signalLine[signalLine.length - 2] : hist;
     if (hist > 0) macdScore = (prevHist <= 0) ? 1.0 : 0.5;
     else macdScore = (prevHist >= 0) ? -1.0 : -0.5;
+    const lastClose = closes[closes.length - 1] || 1;
+    maSpreadPct = Math.abs(macdLine[macdLine.length - 1]) / lastClose * 100;
   }
 
   // 4. LLM Political Sentiment
@@ -993,39 +927,57 @@ export function performCoreAnalysis(closes: number[], headlines: string[] = [], 
     sentimentSource = "N/A";
   }
 
-  // Centralized composite score calculated with supplied dynamic weights
+  // Centralized composite score (Σ) — all 4 subsystems weighted per the Cortex Alpha spec:
+  // Σ = (MACD·wTech) + (RSI·wLiq) + (Sentiment·wSent) + (ElliottWave·wEW), normalized by Σweights.
   let sentimentW = weights?.sentiment !== undefined ? weights.sentiment : 0.90;
   let technicalW = weights?.technical !== undefined ? weights.technical : 0.85;
   let liquidityW = weights?.liquidity !== undefined ? weights.liquidity : 0.85;
+  let elliottW = weights?.elliottWave !== undefined ? weights.elliottWave : 0.85;
 
-  let totalWeights = sentimentW + technicalW + liquidityW;
+  let totalWeights = sentimentW + technicalW + liquidityW + elliottW;
   if (totalWeights === 0) totalWeights = 1; // Prevent division by zero
 
   let compositeScore = (
     (sentimentScore * sentimentW) +
     (macdScore * technicalW) +
-    (rsiScore * liquidityW)
+    (rsiScore * liquidityW) +
+    (elliotWaveScore * elliottW)
   ) / totalWeights;
 
-  // POLITICAL SENTIMENT OVERRULE: If LLM shows extreme sentiment (>= 0.85 or <= -0.85), overrule all signals
+  // SEMANTIC CATALYST OVERRULE: extreme sentiment (>= 0.85 / <= -0.85) is authoritative —
+  // it forces Σ to fully mirror the catalyst direction and bypasses Chop Zone / confirmation downstream.
+  let overrule = false;
   if (sentimentScore >= 0.85) {
     compositeScore = 1.0;
+    overrule = true;
   } else if (sentimentScore <= -0.85) {
     compositeScore = -1.0;
+    overrule = true;
   }
+
+  // CHOP ZONE (Hold preservation): when RSI floats in the neutral 40–60 band AND the
+  // fast/slow MAs squeeze (low volatility), force HOLD to avoid sideways chop/fakeouts.
+  // Skipped when an authoritative catalyst overrule is active.
+  const inNeutralRsi = currentRsi >= 40 && currentRsi <= 60;
+  const maSqueeze = maSpreadPct < 0.30; // fast/slow EMA within 0.3% of price
+  const isChop = !overrule && inNeutralRsi && maSqueeze;
 
   // Consistent signal threshold across system
   let action: "Long Buy" | "Short Sell" | "Long Sell (Overbought)" | "Short Buy (Oversold)" | "Hold" = "Hold";
-  if (compositeScore > 0.08) {
-    action = "Long Buy";
-  } else if (compositeScore < -0.08) {
-    action = "Short Sell";
+  if (!isChop) {
+    if (compositeScore > 0.08) {
+      action = "Long Buy";
+    } else if (compositeScore < -0.08) {
+      action = "Short Sell";
+    }
   }
 
   return {
     action,
     compositeScore,
     isHoldZone: action === "Hold",
+    overrule,
+    isChop,
     rsiScore,
     emaScore: macdScore, 
     headlineSentimentFinal: sentimentScore,
@@ -1201,6 +1153,23 @@ export async function getPredictionData(token: string, topic: string, weights: a
     });
   }
 
+  // Light, non-destructive relevance filter: prefer headlines that actually mention the
+  // asset or the configured topic so sentiment isn't diluted by unrelated news.
+  // Falls back to the full set if too few relevant items are found.
+  const TOKEN_ALIASES: Record<string, string[]> = {
+    SOL: ["sol", "solana"], BTC: ["btc", "bitcoin", "xbt"], ETH: ["eth", "ethereum", "ether"],
+  };
+  const relevanceTerms = [
+    ...(TOKEN_ALIASES[(token || "").toUpperCase()] || [(token || "").toLowerCase()]),
+    ...String(queryTopic || "").toLowerCase().split(/[,\s]+/).filter((t) => t.length > 2),
+  ];
+  if (relevanceTerms.length > 0) {
+    const relevant = articles.filter((a: any) =>
+      a.title && relevanceTerms.some((term) => a.title.toLowerCase().includes(term))
+    );
+    if (relevant.length >= 3) articles = relevant;
+  }
+
   // Attach sentiment scores and format slicedArticles
   const slicedArticles = articles.slice(0, 10);
   
@@ -1249,81 +1218,46 @@ export async function getPredictionData(token: string, topic: string, weights: a
   const strategyData = performCoreAnalysis(closes, headlines, weights, llmScore);
   const { compositeScore, emaScore, rsiScore, elliottWaveScore, headlineSentimentFinal, elliotWavePhase } = strategyData;
 
+  // Decision is driven purely by the Composite Bias Σ (which now includes the Elliott Wave
+  // term) vs the ±0.08 threshold, plus the Chop Zone (RSI 40-60 + MA squeeze) — exactly per
+  // the Cortex Alpha spec. No separate Elliott-Wave veto and no 200-EMA suppression gate:
+  // those were undocumented filters that blocked spec-valid signals and broke the catalyst overrule.
   function evaluateSignal(priceCloses: number[], rsiVal: number, hls: string[], llmVal?: number) {
       const sData = performCoreAnalysis(priceCloses, hls, weights, llmVal);
-      const ema200List = calculateEMA(priceCloses, Math.min(200, priceCloses.length));
-      const lastEma200 = ema200List[ema200List.length - 1];
-      const lastClose = priceCloses[priceCloses.length - 1];
-
-      let ewDir = "HOLD";
-      if (sData.elliotWavePhase.includes("Wave 1") || sData.elliotWavePhase.includes("Wave 3") || sData.elliotWavePhase.includes("Wave 4")) {
-         ewDir = "LONG";
-      } else if (sData.elliotWavePhase.includes("Wave A") || sData.elliotWavePhase.includes("Wave C") || sData.elliotWavePhase.includes("Wave 5")) {
-         ewDir = "SHORT";
-      }
 
       let pSide = "HOLD";
-      let aRec = "Hold";
+      let aRec = sData.isChop ? "Hold Chop Zone" : "Hold";
       let trnd = "SIDEWAYS";
 
-      if (ewDir !== "HOLD") {
-          if (sData.compositeScore > 0.08 && ewDir === "LONG") {
-              if (lastClose > lastEma200) {
-                  aRec = "Long Buy";
-                  trnd = "UP";
-                  pSide = "LONG";
-              } else {
-                  aRec = "Hold (Long suppressed below 200 EMA)";
-                  trnd = "CHOP/HOLD";
-              }
-          } else if (sData.compositeScore < -0.08 && ewDir === "SHORT") {
-              if (lastClose < lastEma200) {
-                  aRec = "Short Sell";
-                  trnd = "DOWN";
-                  pSide = "SHORT";
-              } else {
-                  aRec = "Hold (Short suppressed above 200 EMA)";
-                  trnd = "CHOP/HOLD";
-              }
-          }
-          if (rsiVal > 70 && ewDir === "SHORT") {
-              if (lastClose < lastEma200) {
-                  aRec = "Short Sell (Overbought)"; pSide = "SHORT"; trnd = "DOWN";
-              } else {
-                  aRec = "Hold (Short suppressed above 200 EMA)";
-                  trnd = "CHOP/HOLD";
-              }
-          }
-          if (rsiVal < 30 && ewDir === "LONG") {
-              if (lastClose > lastEma200) {
-                  aRec = "Long Buy (Oversold)"; pSide = "LONG"; trnd = "UP";
-              } else {
-                  aRec = "Hold (Long suppressed below 200 EMA)";
-                  trnd = "CHOP/HOLD";
-              }
-          }
-      } else {
-          aRec = "Hold (EW Gate Failed)";
-          trnd = "CHOP/HOLD";
+      if (sData.compositeScore > 0.08) {
+          pSide = "LONG"; aRec = "Long Buy"; trnd = "UP";
+          if (rsiVal < 30) aRec = "Long Buy (Oversold)";
+      } else if (sData.compositeScore < -0.08) {
+          pSide = "SHORT"; aRec = "Short Sell"; trnd = "DOWN";
+          if (rsiVal > 70) aRec = "Short Sell (Overbought)";
       }
+
       if (sData.isHoldZone) {
-          aRec = "Hold Chop Zone";
-          trnd = "CHOP/HOLD";
           pSide = "HOLD";
+          trnd = "CHOP/HOLD";
+          aRec = sData.isChop ? "Hold Chop Zone" : "Hold (Σ below threshold)";
       }
-      return { pSide, aRec, trnd };
+      return { pSide, aRec, trnd, overrule: sData.overrule };
   }
 
   const currentSig = evaluateSignal(closes, currentRsi, headlines, llmScore);
-  const prevSig1 = evaluateSignal(closes.slice(0, -1), rsisList[rsisList.length - 2] || currentRsi, [], undefined);
-  const prevSig2 = evaluateSignal(closes.slice(0, -2), rsisList[rsisList.length - 3] || currentRsi, [], undefined);
+  // 2-bar confirmation: evaluate the prior candle with the SAME news/LLM context so the
+  // comparison is consistent (technical persistence under current sentiment).
+  const prevSig1 = evaluateSignal(closes.slice(0, -1), rsisList[rsisList.length - 2] || currentRsi, headlines, llmScore);
 
   let positionSide = currentSig.pSide;
   let actionRecommendation = currentSig.aRec;
   let trend = currentSig.trnd;
 
-  // 2x 15mins validation: Are both current and previous ticks in agreement for a specific direction?
-  let isTrendConfirmed3x = (positionSide !== "HOLD" && positionSide === prevSig1.pSide);
+  // Direction confirmation: enter only on the 2nd confirmation — current and previous candle
+  // must agree on direction. An authoritative catalyst overrule (extreme sentiment) fires
+  // immediately and bypasses the 2-bar wait. (Field name kept for downstream compatibility.)
+  let isTrendConfirmed3x = (positionSide !== "HOLD" && positionSide === prevSig1.pSide) || currentSig.overrule;
 
   const volatilityPct = 1.45; 
   const confidence = Math.min(Math.max((0.50 + (Math.abs(compositeScore) * 0.45)), 0.1), 0.95);
@@ -2672,101 +2606,113 @@ async function fetchJupiterSwap(quoteResponse: any, userPublicKey: string): Prom
   return getMockOrFallbackTransactionBytes();
 }
 
-// Background auto-execution helper using server-stored private key
+// ---- Real Jupiter Perps execution via the official `jup` CLI ----
+// The previous implementation did a spot USDC<->SOL swap and, on failure, wrote a
+// Memo logging the *intended* trade — it never opened a real leveraged position.
+// We now shell out to the official Jupiter CLI (`jup perps open/close`), which
+// builds, signs and submits the real on-chain perps instructions. Requires the
+// CLI installed and a key imported: `jup keys add <name> --private-key <key>`.
+// The signing key is the CLI keystore key (config.jupCliKeyName, default "main"),
+// NOT config.privateKey.
+
+function jupCliKeyName(config: any): string {
+  return (config && config.jupCliKeyName) || "main";
+}
+
+// Run a `jup` subcommand in JSON mode and return the parsed result (throws on CLI error).
+function runJupCli(args: string[]): Promise<any> {
+  return new Promise((resolve, reject) => {
+    execFile("jup", [...args, "--format", "json"], { timeout: 90000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const out = (stdout || "").trim();
+      let parsed: any = null;
+      if (out) {
+        try {
+          parsed = JSON.parse(out);
+        } catch {
+          // Tolerate stray non-JSON lines: parse the last JSON-looking line.
+          const line = out.split("\n").map(l => l.trim()).reverse().find(l => l.startsWith("{") || l.startsWith("["));
+          if (line) { try { parsed = JSON.parse(line); } catch {} }
+        }
+      }
+      if (parsed && parsed.error) return reject(new Error(parsed.error));
+      if (err && !parsed) return reject(new Error(((stderr || "").trim()) || err.message || "jup CLI failed"));
+      resolve(parsed);
+    });
+  });
+}
+
+// Fetch the current USD price for a perps market asset (SOL/BTC/ETH) from the CLI.
+async function getPerpMarketPrice(asset: string): Promise<number> {
+  const markets = await runJupCli(["perps", "markets"]);
+  const m = Array.isArray(markets) ? markets.find((x: any) => String(x.asset).toUpperCase() === asset.toUpperCase()) : null;
+  return m && Number(m.priceUsd) > 0 ? Number(m.priceUsd) : 0;
+}
+
+// Background auto-execution helper. Signature kept backward-compatible with all
+// existing call sites: (direction, executeSizeSol) -> signature string | null.
+// `executeSizeSol` is the strategy's notional position size in base-asset units
+// (e.g. SOL units); we convert it to a collateral amount for the CLI.
 async function executeOnChainTradeServerSide(direction: "LONG" | "SHORT" | "CLOSE", executeSizeSol = 0.05): Promise<string | null> {
   const config = loadJupiterConfig();
-  if (!config.privateKey) {
-    console.log("[Jupiter Perps] No privateKey configured on server. Bypassing automated on-chain trade execution.");
-    return null;
-  }
-  
-  let keypair;
-  try {
-    keypair = getKeypairFromPrivateKey(config.privateKey);
-  } catch (err: any) {
-    console.error("[Jupiter Trade] Key derivation failed:", err.message);
-    return null;
-  }
-  const actualWalletAddress = keypair.publicKey.toBase58();
-  const connection = new Connection("https://api.mainnet-beta.solana.com");
-
-  console.log(`[Jupiter Trade API Router] Attempting live on-chain execute for ${direction} (Size: ${executeSizeSol} SOL)...`);
+  const keyName = jupCliKeyName(config);
+  const asset = String(config.token || "SOL").toUpperCase();
+  const leverage = Number(config.leverage) || 5;
 
   try {
-    // 1. Try Live Jupiter Swap on-chain transaction (Mainnet)
-    const solMint = "So11111111111111111111111111111111111111112";
-    const usdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    
-    const isLong = direction === "LONG";
-    const inputMint = isLong ? usdcMint : solMint;
-    const outputMint = isLong ? solMint : usdcMint;
-    const swapMode = isLong ? "ExactOut" : "ExactIn";
-    
-    // Amount is exactly in SOL lamports (9 decimals).
-    // ExactOut: we buy exactly 'executeSizeSol' SOL.
-    // ExactIn: we sell exactly 'executeSizeSol' SOL.
-    const amount = Math.floor(executeSizeSol * 1_000_000_000);
-      
-    console.log(`[Jupiter Trade] Quoting v6: input=${inputMint}, output=${outputMint}, amount=${amount}, swapMode=${swapMode}`);
-
-    const quoteData = await fetchJupiterQuote(inputMint, outputMint, amount, swapMode);
-    if (quoteData) {
-      console.log(`[Jupiter Trade] Quote success, requesting swap transaction from Jupiter Swaps API...`);
-      const serializedTransaction = await fetchJupiterSwap(quoteData, actualWalletAddress);
-      
-      if (serializedTransaction) {
-        const rawTx = Buffer.from(serializedTransaction, "base64");
-        const tx = VersionedTransaction.deserialize(rawTx);
-        
-        // Sign with server private key!
-        tx.sign([keypair]);
-        
-        const signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-        console.log(`[Jupiter Trade] SUCCESS! Live swap executed on-chain. Signature: ${signature}`);
-        return signature;
-      } else {
-        console.log("[Jupiter Trade] Swap API payload build bypassed or failed, falling back to on-chain stateful Memo logging.");
+    if (direction === "CLOSE") {
+      // Find the open position for this asset (or any) and close it fully.
+      const posResult = await runJupCli(["perps", "positions", "--key", keyName]);
+      const list = (posResult && posResult.positions) || [];
+      const match = list.find((p: any) => String(p.asset).toUpperCase() === asset) || list[0];
+      if (!match || !match.positionPubkey) {
+        console.log(`[Jupiter Perps CLI] No open position found to CLOSE for ${asset}.`);
+        return null;
       }
+      const res = await runJupCli(["perps", "close", "--position", match.positionPubkey, "--key", keyName]);
+      const sig = (res && (res.signature || (Array.isArray(res.signatures) && res.signatures[0]))) || null;
+      console.log(`[Jupiter Perps CLI] CLOSE submitted. Position: ${match.positionPubkey} Tx: ${sig}`);
+      return sig;
+    }
+
+    // OPEN (LONG / SHORT)
+    const side = direction === "LONG" ? "long" : "short";
+    // Convert notional base-asset size -> required collateral (USD), then to the
+    // input token's units. CLI input supports SOL/BTC/ETH/USDC (USDT -> USDC).
+    const assetPrice = await getPerpMarketPrice(asset);
+    if (!assetPrice) throw new Error(`Could not resolve ${asset} market price`);
+    const notionalUsd = executeSizeSol * assetPrice;
+    const collateralUsd = notionalUsd / leverage;
+
+    let input = String((config as any).collateralAsset || "USDC").toUpperCase();
+    if (input === "USDT") input = "USDC";
+    let amount: number;
+    if (input === "SOL") {
+      const solPrice = asset === "SOL" ? assetPrice : await getPerpMarketPrice("SOL");
+      amount = solPrice ? collateralUsd / solPrice : 0;
     } else {
-      console.log("[Jupiter Trade] Quote API fetch bypassed or failed, falling back to on-chain stateful Memo logging.");
+      // USDC collateral is ~1 USD.
+      amount = collateralUsd;
     }
-  } catch (jupErr: any) {
-    const errMsg = String(jupErr.message || jupErr);
-    const cleanMsg = errMsg.includes("fetch failed") ? "network route to Jupiter DEX aggregator bypassed under Sandbox environment" : errMsg;
-    console.log(`[Jupiter Trade] Live swap API execution skipped or fell back to on-chain stateful Memo: ${cleanMsg}`);
-  }
+    amount = Number(amount.toFixed(6));
+    if (!amount || amount <= 0) throw new Error("Computed collateral amount is zero");
 
-  // Fallback: Write real Solana on-chain stateful record utilizing the Memo Program (zero cost, 100% reliable)
-  try {
-    const { blockhash } = await connection.getLatestBlockhash();
-    const text = direction === "CLOSE" 
-      ? `Jupiter Perps Position Close | Size: ${executeSizeSol} SOL`
-      : `Jupiter Perps Position Open: ${direction} | Size: ${executeSizeSol} SOL x5`;
-
-    const ix = new TransactionInstruction({ 
-       keys: [], 
-       programId: new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGMfcHr"), 
-       data: Buffer.from(text, "utf-8") 
-    });
-    
-    const msg = new TransactionMessage({
-       payerKey: new PublicKey(actualWalletAddress),
-       recentBlockhash: blockhash,
-       instructions: [ix]
-    }).compileToV0Message();
-    
-    const tx = new VersionedTransaction(msg);
-    tx.sign([keypair]);
-    
-    const signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-    console.log(`[Jupiter Perps Fallback] Stateful Memo trade broadcasted successfully! Signature: ${signature}`);
-    return signature;
-  } catch (err: any) {
-    if (err.message && (err.message.includes("insufficient") || err.message.includes("Attempt to debit an account but found no record of a prior credit") || err.message.includes("blockhash"))) {
-      throw new Error(`Transaction failed: Ensure you have sufficient SOL to cover gas fees. Raw error: ${err.message}`);
-    }
-    console.error("[Jupiter Perps] Both live Swap and fallback Memo failed:", err.message);
-    throw new Error(`Failed to execute transaction: ${err.message}`);
+    console.log(`[Jupiter Perps CLI] OPEN ${side} ${asset}: collateral ~${amount} ${input}, ${leverage}x (notional ~$${notionalUsd.toFixed(2)})`);
+    const res = await runJupCli([
+      "perps", "open",
+      "--asset", asset,
+      "--side", side,
+      "--amount", String(amount),
+      "--input", input,
+      "--leverage", String(leverage),
+      "--key", keyName,
+    ]);
+    const sig = (res && res.signature) || null;
+    console.log(`[Jupiter Perps CLI] OPEN submitted. Position: ${res && res.positionPubkey} Tx: ${sig}`);
+    return sig;
+  } catch (e: any) {
+    // Surface the real reason (e.g. "Collateral size must be at least $10 for new positions").
+    console.error(`[Jupiter Perps CLI] ${direction} execution failed: ${e.message}`);
+    throw new Error(`Jupiter Perps ${direction} failed: ${e.message}`);
   }
 }
 
@@ -2840,6 +2786,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
     }
 
     let closedThisTick = false;
+    let reversalReentry = false; // allow opening the opposite side on the SAME tick after a reversal close
     if (activeTrade) {
       let shouldClose = false;
       let closeReason = "";
@@ -2880,12 +2827,16 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       // Reversal trend changes
       if (!shouldClose && enterSide !== "HOLD" && enterSide !== activeTrade.side) {
         shouldClose = true;
+        reversalReentry = true; // Rule 04: settle and open the opposite on the same tick
         closeReason = `Trend Reversal (Signal flipped to ${enterSide})`;
       }
 
       if (shouldClose) {
         lastTradePnL = currentPnlPercent;
         cumulativePnL += currentPnlPercent;
+
+        // Track consecutive losing trades for the risk circuit breaker (win resets the streak).
+        (config as any).consecutiveLosses = currentPnlPercent < 0 ? (((config as any).consecutiveLosses || 0) + 1) : 0;
 
         const closedId = Math.random().toString(36).substring(2, 9);
         const exitTimeStr = new Date().toISOString();
@@ -2997,7 +2948,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
     }
 
     // Only allow entering a position if not already in one (strict 1-trade limit check)
-    if (!activeTrade && !closedThisTick) {
+    if (!activeTrade && (!closedThisTick || reversalReentry)) {
       let canEnter = false;
       if (enterSide && enterSide !== "HOLD" && (pred.isTrendConfirmed3x || forceTrigger)) {
         canEnter = true;
@@ -3009,6 +2960,15 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         config.error = "Trade entry suppressed: Market direction is sideways.";
       }
 
+      // Risk circuit breaker: after N consecutive losing trades, pause NEW entries (exits still
+      // work) until the streak is manually reset. Set maxConsecutiveLosses to 0 to disable.
+      const maxConsecLosses = (config as any).maxConsecutiveLosses ?? 4;
+      if (canEnter && maxConsecLosses > 0 && (((config as any).consecutiveLosses || 0) >= maxConsecLosses)) {
+        canEnter = false;
+        config.error = `Circuit breaker active: ${(config as any).consecutiveLosses} consecutive losses (limit ${maxConsecLosses}). New entries paused; reset consecutiveLosses to resume.`;
+        console.log(`[Jupiter Daemon] ${config.error}`);
+      }
+
       if (canEnter) {
         let executionAddress = config.walletAddress;
         if (config.privateKey) {
@@ -3017,6 +2977,14 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             executionAddress = keypair.publicKey.toBase58();
           } catch (e) {}
         }
+
+        // Real perps execute from the Jupiter CLI keystore wallet, so balance /
+        // sizing checks must use that same wallet (not config.walletAddress).
+        try {
+          const cliKeys = await runJupCli(["keys", "list"]);
+          const k = Array.isArray(cliKeys) ? cliKeys.find((x: any) => x.name === jupCliKeyName(config)) : null;
+          if (k && k.address) executionAddress = k.address;
+        } catch (e) {}
 
         // 1. Fetch live balances for SOL (gas) and SPL Collateral (USDT or USDC) to support Solana USDT perpetuals
         let solBalance = 0;
@@ -3154,22 +3122,34 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           console.log(`[Jupiter Daemon] Automated Position Opened! Side: ${enterSide}, Size: ${sizeInSol.toFixed(4)} SOL @ $${entryPrice.toFixed(2)} [Collateral: ${collateralAsset} (${mode})]`);
 
           let onChainSignature = "";
+          let realOpenFailed = false;
           try {
-            // Execute REAL on-chain open
+            // Execute REAL on-chain open via the Jupiter Perps CLI
             if (config.privateKey && mode !== "PAPER") {
-              console.log(`[Jupiter Perps] Executing onchain OPEN: ${enterSide} on Jupiter Perps. Size: ${sizeInSol.toFixed(4)} SOL`);
+              console.log(`[Jupiter Perps] Executing REAL onchain OPEN: ${enterSide} ${config.token} (notional ${sizeInSol.toFixed(4)} units)`);
               const signature = await executeOnChainTradeServerSide(enterSide as "LONG" | "SHORT", sizeInSol);
               if (signature) {
                 onChainSignature = signature;
+              } else {
+                realOpenFailed = true;
               }
             } else {
-              console.log(`[Jupiter Perps] Simulating automated OPEN on Jupiter Perps API. Side: ${enterSide}, Size: ${sizeInSol.toFixed(4)} SOL`);
+              console.log(`[Jupiter Perps] PAPER mode OPEN (simulated, no on-chain execution). Side: ${enterSide}, Size: ${sizeInSol.toFixed(4)} SOL`);
             }
           } catch (e: any) {
-            console.error("[Jupiter Daemon] Failed to execute open on Jupiter Perps API:", e.message);
+            realOpenFailed = true;
+            console.error("[Jupiter Daemon] REAL open failed on Jupiter Perps CLI:", e.message);
+            config.error = `Automated open failed: ${e.message}`;
           }
 
-          try {
+          // Never track a position that did not actually open on-chain (prevents phantom positions / fake PnL).
+          if (mode !== "PAPER" && realOpenFailed) {
+            console.log("[Jupiter Daemon] Rolling back tracked position (real perps open did not execute).");
+            activeTrade = null;
+            config.lastTradeAddedAt = undefined;
+          }
+
+          if (activeTrade) try {
             const telegramConfig = loadTelegramConfig();
             const logMsg = `Automated Open: ${enterSide} at $${entryPrice.toFixed(2)} [Size: ${sizeInSol.toFixed(4)} SOL, Lev: ${config.leverage || 5}x]` + (onChainSignature ? ` (Tx: ${onChainSignature.slice(0, 8)}...)` : "");
             addAuditLog(telegramConfig, logMsg, "trade");
@@ -3417,68 +3397,23 @@ app.post("/api/backtest", async (req, res) => {
         const tickEma200 = ema200List[ema200List.length - 1];
         const tickClose = closes[tickIdx];
 
-        let localEwDir = "HOLD";
-        if (sData.elliotWavePhase.includes("Wave 1") || sData.elliotWavePhase.includes("Wave 3") || sData.elliotWavePhase.includes("Wave 4")) {
-            localEwDir = "LONG";
-        } else if (sData.elliotWavePhase.includes("Wave A") || sData.elliotWavePhase.includes("Wave C") || sData.elliotWavePhase.includes("Wave 5")) {
-            localEwDir = "SHORT";
-        }
-        
-        let aRec = "Hold";
+        // Same spec-faithful decision as live: Σ vs ±0.08 + Chop Zone. Elliott Wave is
+        // already folded into Σ; no EW veto / 200-EMA suppression gate.
+        const cRsi = rsis[tickIdx] || 50;
+        let aRec = sData.isChop ? "Hold Chop Zone" : "Hold";
         let pSide = "HOLD";
         let trnd = "SIDEWAYS";
 
-        if (localEwDir !== "HOLD") {
-            if (fScore > 0.08 && localEwDir === "LONG") {
-                if (tickClose > tickEma200) {
-                    aRec = "Long Buy";
-                    pSide = "LONG";
-                    trnd = "UP";
-                } else {
-                    aRec = "Hold (Long suppressed below 200 EMA)";
-                    trnd = "CHOP/HOLD";
-                }
-            } else if (fScore < -0.08 && localEwDir === "SHORT") {
-                if (tickClose < tickEma200) {
-                    aRec = "Short Sell";
-                    pSide = "SHORT";
-                    trnd = "DOWN";
-                } else {
-                    aRec = "Hold (Short suppressed above 200 EMA)";
-                    trnd = "CHOP/HOLD";
-                }
-            }
-
-            const cRsi = rsis[tickIdx] || 50;
-            if (cRsi > 70 && localEwDir === "SHORT") { 
-                if (tickClose < tickEma200) {
-                    aRec = "Long Sell (Overbought)";
-                    pSide = "SHORT";
-                    trnd = "DOWN";
-                } else {
-                    aRec = "Hold (Short suppressed above 200 EMA)";
-                    trnd = "CHOP/HOLD";
-                }
-            }
-            if (cRsi < 30 && localEwDir === "LONG") { 
-                if (tickClose > tickEma200) {
-                    aRec = "Short Buy (Oversold)";
-                    pSide = "LONG";
-                    trnd = "UP";
-                } else {
-                    aRec = "Hold (Long suppressed below 200 EMA)";
-                    trnd = "CHOP/HOLD";
-                }
-            }
-        } else {
-            aRec = "Hold (EW Gate Failed)";
-            trnd = "CHOP/HOLD";
+        if (fScore > 0.08) {
+            pSide = "LONG"; aRec = cRsi < 30 ? "Long Buy (Oversold)" : "Long Buy"; trnd = "UP";
+        } else if (fScore < -0.08) {
+            pSide = "SHORT"; aRec = cRsi > 70 ? "Short Sell (Overbought)" : "Short Sell"; trnd = "DOWN";
         }
 
         if (sData.isHoldZone) {
-          aRec = "Hold Chop Zone";
           pSide = "HOLD";
           trnd = "CHOP/HOLD";
+          aRec = sData.isChop ? "Hold Chop Zone" : "Hold (Σ below threshold)";
         }
         
         return { 

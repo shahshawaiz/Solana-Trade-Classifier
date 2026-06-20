@@ -5464,10 +5464,10 @@ export default function App() {
                       The strategy unifies perfectly across the Telegram alerts, order forecasts, and live visual dashboards via one unified <strong>Composite Bias Score (Σ)</strong>:
                     </p>
                     <div className="bg-bg-input p-4 rounded font-mono text-[10px] break-words border border-border-dim flex justify-center text-center">
-                      Σ = (TrendScore × W₁) + (MomScore × W₂) + (NewsScore × W₃) + (LiqScore × W₄)
+                      Σ = (MACD × W₁) + (RSI × W₂) + (News × W₃) + (ElliottWave × W₄)
                     </div>
                     <p>
-                      This score ranges bounds between <strong>-1.0 (Heavy Bearish conviction)</strong> and <strong>+1.0 (Heavy Bullish conviction)</strong> to automate dynamic target forecasting.
+                      All <strong>four</strong> weighted subsystems contribute to Σ (the Elliott Wave term is now active, not just a phase tag), and the result is normalized by the sum of weights. The score is bounded between <strong>-1.0 (Heavy Bearish conviction)</strong> and <strong>+1.0 (Heavy Bullish conviction)</strong> to automate dynamic target forecasting.
                     </p>
                   </div>
                 </Card>
@@ -5481,7 +5481,7 @@ export default function App() {
                       <li>
                         <strong className="text-text-heading">1. Elliott Wave Score (EWO)</strong>: Computes the oscillator mathematically as `SMA(5) - SMA(34)` over the most recent 34 periods. 
                         The system finds the minimum and maximum extremes of this oscillator and normalizes the current EWO value into a strict `[-1.0, 1.0]` bounds scale: <code>((currentEWO - minEWO) / (maxEWO - minEWO)) * 2 - 1</code>. 
-                        It cross-references this with Price highs to detect specific structural phases like <i>Wave 3 Impulses</i> or <i>Wave 5 Bearish Divergences</i>.
+                        It cross-references this with Price highs to detect specific structural phases like <i>Wave 3 Impulses</i> or <i>Wave 5 Bearish Divergences</i>. This normalized score is one of the four weighted inputs to Σ.
                       </li>
                       <li>
                         <strong className="text-text-heading">2. RSI Score (Reversals)</strong>: Computes standard 14-period RSI to prevent entering at local tops. 
@@ -5493,7 +5493,7 @@ export default function App() {
                       </li>
                       <li>
                         <strong className="text-text-heading">4. Semantic Catalyst Score (News)</strong>: High-weight external analysis layer that evaluates recent market headlines using localized CPU heuristics and Gemini LLM verification. 
-                        Scores are averaged and clamped within `[-1.0, 1.0]`. <strong>CRITICAL OVERRIDE:</strong> If political or catalyst sentiment hits extreme bands (<code>&gt;= 0.85</code> or <code>&lt;= -0.85</code>), it triggers an authoritative system overrule, forcing the Composite Bias Score to fully mirror the hyper-catalyst direction.
+                        Scores are averaged and clamped within `[-1.0, 1.0]`. <strong>CRITICAL OVERRIDE:</strong> If political or catalyst sentiment hits extreme bands (<code>&gt;= 0.85</code> or <code>&lt;= -0.85</code>), it triggers an authoritative system overrule, forcing the Composite Bias Score to fully mirror the hyper-catalyst direction — and it bypasses the Chop Zone and the 2-bar confirmation so the catalyst fires immediately.
                       </li>
                     </ul>
                     <div className="pt-2">
@@ -5580,6 +5580,37 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Engine Updates / Changelog — keep in sync whenever strategy behavior changes */}
+              <div className="p-8 bg-bg-card border border-border-dim rounded-2xl relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-64 h-64 bg-sol-green/5 blur-[100px] rounded-full -mr-32 -mt-32"></div>
+                <div className="relative z-10 space-y-6">
+                  <div className="flex items-center gap-3">
+                    <Activity className="w-5 h-5 text-sol-green" />
+                    <h3 className="text-xl font-serif italic text-text-heading">Engine Updates (Changelog)</h3>
+                  </div>
+                  <p className="text-xs text-text-dim max-w-2xl leading-relaxed">
+                    Strategy and execution changes are logged here so the documented behavior always matches the live engine.
+                  </p>
+                  <div className="space-y-5 pt-2">
+                    <div className="flex gap-4 items-start pb-4 border-b border-border-dim/40">
+                      <div className="px-2 py-1 rounded bg-sol-purple/10 border border-sol-purple/30 text-[10px] font-mono text-sol-purple shrink-0">2026-06-20</div>
+                      <ul className="list-disc pl-5 space-y-2 text-xs text-text-dim leading-relaxed">
+                        <li><strong className="text-text-heading">Elliott Wave now contributes to Σ.</strong> The composite is the full 4-factor sum <code>Σ = (MACD·wTech + RSI·wLiq + Sentiment·wSent + EW·wElliott) / Σweights</code>. Previously the Elliott Wave weight was configured but unused.</li>
+                        <li><strong className="text-text-heading">Removed undocumented gates.</strong> The Elliott-Wave "phase veto" and the 200-EMA suppression filter were removed — entries now decide purely on Σ vs ±0.08 plus the Chop Zone, exactly as specified.</li>
+                        <li><strong className="text-text-heading">Catalyst override is now authoritative.</strong> Extreme sentiment (≥ +0.85 / ≤ −0.85) forces Σ = ±1 and bypasses the Chop Zone and the 2-bar confirmation, firing immediately.</li>
+                        <li><strong className="text-text-heading">Chop Zone matches spec.</strong> HOLD now requires RSI in 40–60 <em>and</em> a fast/slow MA squeeze (&lt; 0.3%), instead of just a low Σ.</li>
+                        <li><strong className="text-text-heading">2-bar direction confirmation.</strong> Entry requires the current and previous candle to agree (evaluated under the same news context); the override skips the wait.</li>
+                        <li><strong className="text-text-heading">Same-tick reversal re-entry.</strong> A direction flip now closes and opens the opposite position on the same tick.</li>
+                        <li><strong className="text-text-heading">Real news only.</strong> All synthetic/LLM-fabricated "Telegram posts" and hardcoded sample signals were deleted. With no real headlines, sentiment is neutral (0) — never fabricated.</li>
+                        <li><strong className="text-text-heading">Telegram news source fixed.</strong> Switched from an unreadable private invite link to a public, scrapeable channel; light relevance filtering keeps sentiment on-topic.</li>
+                        <li><strong className="text-text-heading">Risk circuit breaker.</strong> After <code>maxConsecutiveLosses</code> consecutive losing trades (default 4) new entries pause while exits still work; a win resets the streak. Set to 0 to disable.</li>
+                        <li><strong className="text-text-heading">Real perps execution.</strong> Automated on-chain trades now route through the official Jupiter CLI (<code>jup perps open/close</code>) — actual leveraged positions, not spot swaps or memos. Defaults to PAPER mode; failed opens roll back (no phantom positions).</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <section className="space-y-6">
                 <h3 className="text-xl font-serif italic text-text-heading border-b border-border-dim pb-4">Data Architecture</h3>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -5589,7 +5620,7 @@ export default function App() {
                     </div>
                     <h4 className="font-bold text-text-heading uppercase text-xs tracking-widest">Aggregated News</h4>
                     <p className="text-xs text-text-dim leading-relaxed">
-                      Real-time extraction from Google News, Yahoo Finance, and CryptoCompare. Headlines are filtered for semantic relevance to the selected **Topic** and **Ticker**.
+                      Real-time extraction from Google News, Yahoo Finance, CryptoCompare, and an optional public Telegram channel. Headlines are filtered for semantic relevance to the selected Topic and Ticker. Only real, verifiable news is used — there is no synthetic or LLM-fabricated news fallback.
                     </p>
                   </div>
                   <div className="p-6 bg-bg-card border border-border-dim rounded-xl space-y-4">

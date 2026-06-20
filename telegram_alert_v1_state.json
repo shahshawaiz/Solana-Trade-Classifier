@@ -23,6 +23,25 @@
   "interval": "15m",
   "activeTrade": null,
   "tradesHistory": [],
-  "auditLogs": [],
-  "newsTelegramChannel": "https://t.me/+1C0c6rUVmjo3Y2Y8"
+  "auditLogs": [
+    {
+      "id": "at85233",
+      "timestamp": "2026-06-20T20:58:35.483Z",
+      "message": "Automated Open: LONG at $71.80 [Size: 0.0348 SOL, Lev: 5x]",
+      "type": "trade"
+    },
+    {
+      "id": "1q4zwhg",
+      "timestamp": "2026-06-20T21:13:23.243Z",
+      "message": "Automated Close: \ud83d\udfe2 at $72.12. Take Profit Pool Hit ($71.95). PnL: \ud83d\udd35 +2.18%",
+      "type": "trade"
+    },
+    {
+      "id": "ipvs4df",
+      "timestamp": "2026-06-20T21:13:31.627Z",
+      "message": "Automated Open: LONG at $72.13 [Size: 0.0347 SOL, Lev: 5x]",
+      "type": "trade"
+    }
+  ],
+  "newsTelegramChannel": "https://t.me/cointelegraph"
 }
