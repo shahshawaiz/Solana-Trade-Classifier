@@ -79,6 +79,26 @@ export function calculateRSI(data: number[], period: number = 14): number[] {
   return rsi;
 }
 
+// Average True Range — volatility measure used to size TP/SL and the trailing stop.
+// Wilder's smoothing over `period`. Returns the latest ATR (absolute price units).
+export function calculateATR(quotes: any[], period: number = 14): number {
+  if (!Array.isArray(quotes) || quotes.length < period + 1) return 0;
+  const trs: number[] = [];
+  for (let i = 1; i < quotes.length; i++) {
+    const h = quotes[i].high ?? quotes[i].close;
+    const l = quotes[i].low ?? quotes[i].close;
+    const pc = quotes[i - 1].close;
+    trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  if (trs.length < period) return 0;
+  // Seed with SMA of first `period` TRs, then Wilder-smooth.
+  let atr = trs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < trs.length; i++) {
+    atr = (atr * (period - 1) + trs[i]) / period;
+  }
+  return atr;
+}
+
 // Standard initialization for yahoo-finance2 v3.
 const imported = yahooFinanceModule as any;
 const YfClass = imported.default?.default || imported.default || imported;
@@ -1361,27 +1381,38 @@ export async function getPredictionData(token: string, topic: string, weights: a
   
   let orderPrice = latest.close;
 
-  // Dynamic Take Profit & Stop Loss Adjustment using Liquidation levels integration
-  // We approximate liquidation pools by finding recent local highs (Short Liquidation Pool)
-  // and local lows (Long Liquidation Pool) within the last 20 periods.
+  // Volatility-adaptive TP/SL using ATR (Average True Range). The stop sits ATR_SL_MULT*ATR
+  // away from entry and the target ATR_TP_MULT*ATR away — a fixed reward:risk of
+  // (ATR_TP_MULT / ATR_SL_MULT):1 (default 3.0/1.5 = 2:1). When ATR can't be computed yet,
+  // fall back to recent swing highs/lows (liquidation pools).
+  const ATR_SL_MULT = Number(process.env.ATR_SL_MULT) || 1.5;
+  const ATR_TP_MULT = Number(process.env.ATR_TP_MULT) || 3.0;
+  const atr = calculateATR(quotes, 14);
+
   const recentHighs = quotes.slice(-20).map((q: any) => q.high || q.close);
   const recentLows = quotes.slice(-20).map((q: any) => q.low || q.close);
   const localHigh = Math.max(...recentHighs, orderPrice);
   const localLow = Math.min(...recentLows, orderPrice);
-  
+
   let suggestedTpPrice = orderPrice;
   let suggestedSlPrice = orderPrice;
 
-  if (positionSide === "LONG") {
-      // Aim for short liquidation pool just above local high
-      suggestedTpPrice = localHigh * 1.002;
-      // Stop out gracefully just below long liquidation pool
-      suggestedSlPrice = localLow * 0.998;
+  if (atr > 0) {
+    const slDist = ATR_SL_MULT * atr;
+    const tpDist = ATR_TP_MULT * atr;
+    if (positionSide === "LONG") {
+      suggestedSlPrice = orderPrice - slDist;
+      suggestedTpPrice = orderPrice + tpDist;
+    } else if (positionSide === "SHORT") {
+      suggestedSlPrice = orderPrice + slDist;
+      suggestedTpPrice = orderPrice - tpDist;
+    }
+  } else if (positionSide === "LONG") {
+    suggestedTpPrice = localHigh * 1.002;
+    suggestedSlPrice = localLow * 0.998;
   } else if (positionSide === "SHORT") {
-      // Aim for long liquidation pool target drop
-      suggestedTpPrice = localLow * 0.998;
-      // Stop out gracefully just above short liquidation pool
-      suggestedSlPrice = localHigh * 1.002;
+    suggestedTpPrice = localLow * 0.998;
+    suggestedSlPrice = localHigh * 1.002;
   }
   
   // Calculate the raw unleveraged distances
@@ -1445,6 +1476,9 @@ Return JSON ONLY: { "rationale": "expert justification here", "suggestedOrder": 
     suggestedOrderPrice: orderPrice,
     suggestedTpPrice,
     suggestedSlPrice,
+    atr, // latest ATR (price units) — daemon derives ATR-based TP/SL for the actual trade side
+    atrSlMult: ATR_SL_MULT,
+    atrTpMult: ATR_TP_MULT,
     indicators: { rsi: currentRsi, ema12: currentEmaFast, ema26: currentEmaSlow },
     strategyDetails: {
         sentimentWeight: strategyData.wSent,
@@ -1677,6 +1711,8 @@ export interface JupiterConfig {
     mode?: string;
     takeProfitPct?: number;
     stopLossPct?: number;
+    trailPeak?: number;
+    positionPubkey?: string;
     sentiment?: number;
     technicalScore?: number;
     news?: string[];
@@ -2744,7 +2780,7 @@ async function getPerpMarketPrice(asset: string): Promise<number> {
 // existing call sites: (direction, executeSizeSol) -> signature string | null.
 // `executeSizeSol` is the strategy's notional position size in base-asset units
 // (e.g. SOL units); we convert it to a collateral amount for the CLI.
-async function executeOnChainTradeServerSide(direction: "LONG" | "SHORT" | "CLOSE", executeSizeSol = 0.05): Promise<string | null> {
+async function executeOnChainTradeServerSide(direction: "LONG" | "SHORT" | "CLOSE", executeSizeSol = 0.05, opts: { tpPct?: number; slPct?: number } = {}): Promise<string | null> {
   const config = loadJupiterConfig();
   const keyName = jupCliKeyName(config);
   const asset = String(config.token || "SOL").toUpperCase();
@@ -2788,7 +2824,20 @@ async function executeOnChainTradeServerSide(direction: "LONG" | "SHORT" | "CLOS
     amount = Number(amount.toFixed(6));
     if (!amount || amount <= 0) throw new Error("Computed collateral amount is zero");
 
-    console.log(`[Jupiter Perps CLI] OPEN ${side} ${asset}: collateral ~${amount} ${input}, ${leverage}x (notional ~$${notionalUsd.toFixed(2)})`);
+    // ALWAYS attach hard on-chain Take-Profit and Stop-Loss trigger prices so the position
+    // is protected by Jupiter's keepers even if this bot is offline. TP/SL percentages are
+    // leveraged returns, so the underlying price move is pct/leverage.
+    // Prefer the ATR-derived TP/SL passed by the daemon; fall back to config %.
+    const tpPct = Number(opts.tpPct) > 0 ? Number(opts.tpPct) : (Number((config as any).takeProfitPct) > 0 ? Number((config as any).takeProfitPct) : 4);
+    const slPct = Number(opts.slPct) > 0 ? Number(opts.slPct) : (Number((config as any).stopLossPct) > 0 ? Number((config as any).stopLossPct) : 2);
+    const tpMove = (tpPct / 100) / leverage;
+    const slMove = (slPct / 100) / leverage;
+    const tpPrice = side === "long" ? assetPrice * (1 + tpMove) : assetPrice * (1 - tpMove);
+    const slPrice = side === "long" ? assetPrice * (1 - slMove) : assetPrice * (1 + slMove);
+    const tpStr = tpPrice.toFixed(6);
+    const slStr = slPrice.toFixed(6);
+
+    console.log(`[Jupiter Perps CLI] OPEN ${side} ${asset}: collateral ~${amount} ${input}, ${leverage}x (notional ~$${notionalUsd.toFixed(2)}) | TP $${tpStr} / SL $${slStr}`);
     const res = await runJupCli([
       "perps", "open",
       "--asset", asset,
@@ -2796,6 +2845,8 @@ async function executeOnChainTradeServerSide(direction: "LONG" | "SHORT" | "CLOS
       "--amount", String(amount),
       "--input", input,
       "--leverage", String(leverage),
+      "--tp", tpStr,
+      "--sl", slStr,
       "--key", keyName,
     ]);
     const sig = (res && res.signature) || null;
@@ -2915,7 +2966,29 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           closeReason = `Stop Loss Pool Pump ($${slPriceLimit.toFixed(2)})`;
         }
       }
-      
+
+      // Trailing stop: ratchet a stop behind the best price reached, at the same distance as
+      // the initial (ATR-based) stop. It only fires once the stop has moved into profit (beyond
+      // entry), so the hard SL still handles losses — this just locks in gains on winners.
+      if (!shouldClose) {
+        const trailDist = Math.abs(entryPrice - slPriceLimit);
+        if (activeTrade.side === "LONG") {
+          activeTrade.trailPeak = Math.max(activeTrade.trailPeak || entryPrice, exitPrice);
+          const trailStop = activeTrade.trailPeak - trailDist;
+          if (trailStop > entryPrice && exitPrice <= trailStop) {
+            shouldClose = true;
+            closeReason = `Trailing Stop ($${trailStop.toFixed(2)}, peak $${activeTrade.trailPeak.toFixed(2)})`;
+          }
+        } else if (activeTrade.side === "SHORT") {
+          activeTrade.trailPeak = Math.min(activeTrade.trailPeak || entryPrice, exitPrice);
+          const trailStop = activeTrade.trailPeak + trailDist;
+          if (trailStop < entryPrice && exitPrice >= trailStop) {
+            shouldClose = true;
+            closeReason = `Trailing Stop ($${trailStop.toFixed(2)}, trough $${activeTrade.trailPeak.toFixed(2)})`;
+          }
+        }
+      }
+
       // Reversal trend changes
       if (!shouldClose && enterSide !== "HOLD" && enterSide !== activeTrade.side) {
         shouldClose = true;
@@ -3206,16 +3279,19 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           // collateral back from this (collateral = sizeInSol * price / leverage).
           let sizeInSol = (collateralUsd * leverage) / entryPrice;
 
-          let tpPct = 4.0;
-          let slPct = 2.0;
-          if (pred.suggestedTpPrice && Math.abs(pred.suggestedTpPrice - pred.price) > 0.0001) {
-            tpPct = (Math.abs(pred.suggestedTpPrice - pred.price) / pred.price) * 100 * leverage;
+          // Volatility-adaptive TP/SL derived directly from ATR for the ACTUAL trade side,
+          // giving a fixed reward:risk of (tpMult/slMult):1 regardless of signal direction.
+          // (Leveraged % = price-move% * leverage.) Falls back to config % if ATR is unavailable.
+          let tpPct: number;
+          let slPct: number;
+          const atrVal = Number(pred.atr) || 0;
+          if (atrVal > 0 && entryPrice > 0) {
+            const slMult = Number(pred.atrSlMult) || 1.5;
+            const tpMult = Number(pred.atrTpMult) || 3.0;
+            slPct = ((slMult * atrVal) / entryPrice) * 100 * leverage;
+            tpPct = ((tpMult * atrVal) / entryPrice) * 100 * leverage;
           } else {
             tpPct = config.takeProfitPct || 4.0;
-          }
-          if (pred.suggestedSlPrice && Math.abs(pred.suggestedSlPrice - pred.price) > 0.0001) {
-            slPct = (Math.abs(pred.suggestedSlPrice - pred.price) / pred.price) * 100 * leverage;
-          } else {
             slPct = config.stopLossPct || 2.0;
           }
 
@@ -3230,6 +3306,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             mode,
             takeProfitPct: tpPct,
             stopLossPct: slPct,
+            trailPeak: entryPrice, // best price seen — drives the trailing stop
             sentiment: pred.sentiment,
             technicalScore: pred.strategyDetails?.technicalScore,
             news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
@@ -3243,7 +3320,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             // Execute REAL on-chain open via the Jupiter Perps CLI
             if (config.privateKey && mode !== "PAPER") {
               console.log(`[Jupiter Perps] Executing REAL onchain OPEN: ${enterSide} ${config.token} (notional ${sizeInSol.toFixed(4)} units)`);
-              const signature = await executeOnChainTradeServerSide(enterSide as "LONG" | "SHORT", sizeInSol);
+              const signature = await executeOnChainTradeServerSide(enterSide as "LONG" | "SHORT", sizeInSol, { tpPct, slPct });
               if (signature) {
                 onChainSignature = signature;
               } else {

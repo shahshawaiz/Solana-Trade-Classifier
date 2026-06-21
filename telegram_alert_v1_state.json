@@ -10,7 +10,7 @@
     "liquidity": 0.9,
     "elliottWave": 0.9
   },
-  "lastAction": "Hold",
+  "lastAction": "Hold Chop Zone",
   "lastSentDirection": "HOLD",
   "frequency": 5,
   "cooldownMinutes": 30,
@@ -33,7 +33,7 @@
     {
       "id": "1q4zwhg",
       "timestamp": "2026-06-20T21:13:23.243Z",
-      "message": "Automated Close: \ud83d\udfe2 at $72.12. Take Profit Pool Hit ($71.95). PnL: \ud83d\udd35 +2.18%",
+      "message": "Automated Close: 🟢 at $72.12. Take Profit Pool Hit ($71.95). PnL: 🔵 +2.18%",
       "type": "trade"
     },
     {
@@ -41,7 +41,20 @@
       "timestamp": "2026-06-20T21:13:31.627Z",
       "message": "Automated Open: LONG at $72.13 [Size: 0.0347 SOL, Lev: 5x]",
       "type": "trade"
+    },
+    {
+      "id": "2qjgtao",
+      "timestamp": "2026-06-21T16:46:51.776Z",
+      "message": "Automated Close: 🟢 at $73.96. Take Profit Pool Hit ($72.28). PnL: 🔵 +12.67%",
+      "type": "trade"
+    },
+    {
+      "id": "xljpcg9",
+      "timestamp": "2026-06-21T17:33:27.443Z",
+      "message": "Automated Open: LONG at $74.23 [Size: 0.6736 SOL, Lev: 5x]",
+      "type": "trade"
     }
   ],
-  "newsTelegramChannel": "https://t.me/cointelegraph, https://t.me/s/cryptonews_official"
+  "newsTelegramChannel": "https://t.me/+1C0c6rUVmjo3Y2Y8",
+  "lastCheckedAt": "2026-06-21T17:47:12.186Z"
 }
