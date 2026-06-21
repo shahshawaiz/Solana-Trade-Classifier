@@ -7,6 +7,7 @@ signal and the historical backtest.
 - **Base URL (prod):** `https://solana-trade-bot.vercel.app`
 - **Base URL (local):** `http://localhost:3000` (`npm run dev`)
 - **Content type:** `application/json` on every `POST`
+- **Up & running curl tests:** see [TESTING.md](./TESTING.md)
 
 > On Vercel the Express app runs as a serverless function (`api/index.ts`) and
 > the in-process daemons are disabled; background ticks are driven by Vercel Cron
