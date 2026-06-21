@@ -185,6 +185,108 @@ export const safeJson = async (res: Response) => {
   }
 };
 
+// Animated "trade arena" — floating bubbles that come alive while a position is open.
+// Color and motion react to side (LONG/SHORT) and live PnL. Purely decorative.
+const TradeBubbles = ({ trade, livePrice }: { trade: any; livePrice?: number }) => {
+  // Stable randomized bubble field (regenerated only when the position identity changes).
+  const bubbles = useMemo(
+    () =>
+      Array.from({ length: 16 }).map((_, i) => ({
+        id: i,
+        size: 10 + Math.random() * 38,
+        left: Math.random() * 100,
+        delay: Math.random() * 5,
+        duration: 6 + Math.random() * 7,
+        drift: (Math.random() - 0.5) * 60,
+      })),
+    [trade?.entryTime, trade?.side]
+  );
+
+  if (!trade) return null;
+
+  const isLong = trade.side === "LONG";
+  const entry = trade.entryPrice || 0;
+  const lev = trade.leverage || 5;
+  const pnlPct =
+    livePrice && entry
+      ? (isLong ? (livePrice - entry) / entry : (entry - livePrice) / entry) * 100 * lev
+      : 0;
+  const isProfit = pnlPct >= 0;
+  // Bubbles tint to the position side; the core glows green/red with live PnL.
+  const sideHex = isLong ? "#22c55e" : "#ef4444";
+  const pnlHex = isProfit ? "#22c55e" : "#ef4444";
+
+  return (
+    <div
+      className="relative h-56 rounded-2xl overflow-hidden border border-border-dim"
+      style={{
+        background: `radial-gradient(120% 120% at 50% 120%, ${sideHex}1f 0%, rgba(10,10,15,0.0) 55%)`,
+      }}
+    >
+      {/* header chip */}
+      <div className="absolute top-3 left-3 z-20 flex items-center gap-2">
+        <span className="w-2 h-2 rounded-full animate-ping" style={{ background: sideHex }} />
+        <span className="text-[9px] font-mono uppercase tracking-[0.25em] text-text-dim">Live Trade Arena</span>
+      </div>
+      <div className="absolute top-3 right-3 z-20 text-[9px] font-mono uppercase tracking-widest"
+        style={{ color: trade.mode === "PAPER" ? "#f59e0b" : "#22c55e" }}>
+        {trade.mode || "REAL"}
+      </div>
+
+      {/* rising ambient bubbles */}
+      {bubbles.map((b) => (
+        <motion.div
+          key={b.id}
+          className="absolute rounded-full"
+          style={{
+            width: b.size,
+            height: b.size,
+            left: `${b.left}%`,
+            background: `radial-gradient(circle at 30% 28%, ${sideHex}66, ${sideHex}0d)`,
+            border: `1px solid ${sideHex}33`,
+            boxShadow: `0 0 18px ${sideHex}22`,
+          }}
+          initial={{ y: "120%", opacity: 0 }}
+          animate={{ y: "-30%", x: [0, b.drift, 0], opacity: [0, 0.85, 0] }}
+          transition={{ duration: b.duration, delay: b.delay, repeat: Infinity, ease: "easeInOut" }}
+        />
+      ))}
+
+      {/* central pulsing core showing the live PnL */}
+      <motion.div
+        className="absolute left-1/2 top-1/2 z-10 flex flex-col items-center justify-center rounded-full text-center"
+        style={{
+          width: 132,
+          height: 132,
+          marginLeft: -66,
+          marginTop: -66,
+          background: `radial-gradient(circle at 50% 40%, ${pnlHex}33, ${pnlHex}0a 70%)`,
+          border: `1.5px solid ${pnlHex}66`,
+          boxShadow: `0 0 50px ${pnlHex}33, inset 0 0 30px ${pnlHex}1a`,
+        }}
+        animate={{ scale: [1, 1.06, 1] }}
+        transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
+      >
+        <span className="text-[10px] font-black uppercase tracking-widest" style={{ color: sideHex }}>
+          {trade.side} · {lev}x
+        </span>
+        <span className="text-2xl font-black tabular-nums" style={{ color: pnlHex }}>
+          {isProfit ? "+" : ""}
+          {pnlPct.toFixed(2)}%
+        </span>
+        <span className="text-[10px] font-mono" style={{ color: pnlHex }}>
+          {livePrice
+            ? `${isProfit ? "+" : ""}$${((pnlPct / 100) * (trade.sizeInSol || 0) * entry).toFixed(2)}`
+            : "seeking index…"}
+        </span>
+        <span className="text-[8px] text-text-dim mt-0.5">
+          {trade.sizeInSol?.toFixed(3)} SOL @ ${entry.toFixed(2)}
+        </span>
+      </motion.div>
+    </div>
+  );
+};
+
 export default function App() {
   const [data, setData] = useState<any[]>([]);
   const [news, setNews] = useState<any[]>([]);
@@ -3423,6 +3525,20 @@ export default function App() {
 
                           </div>
                         </div>
+
+                        {/* Animated live trade arena — only while a position is running */}
+                        <AnimatePresence>
+                          {jupiterConfig.activeTrade && (
+                            <motion.div
+                              initial={{ opacity: 0, height: 0 }}
+                              animate={{ opacity: 1, height: "auto" }}
+                              exit={{ opacity: 0, height: 0 }}
+                              className="pt-2"
+                            >
+                              <TradeBubbles trade={jupiterConfig.activeTrade} livePrice={jupiterConfig.liveJupiterPrice} />
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
 
                         {/* Connected Wallet On-Chain positions */}
                         <div className="space-y-2.5 pt-2 border-t border-border-dim/50">

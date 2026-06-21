@@ -347,6 +347,23 @@ app.get("/api/price", async (req, res) => {
 
 async function fetchTelegramChannelFeed(channelUrl: string, token: string): Promise<any[]> {
   if (!channelUrl) return [];
+
+  // Support multiple channels in one config value (comma or newline separated):
+  // fetch each in parallel and merge, de-duplicating by title.
+  const channels = channelUrl.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+  if (channels.length > 1) {
+    const results = await Promise.all(channels.map((c) => fetchTelegramChannelFeed(c, token)));
+    const merged: any[] = [];
+    const seen = new Set<string>();
+    for (const arr of results) {
+      for (const a of arr) {
+        const key = (a.title || "").toLowerCase().trim();
+        if (key && !seen.has(key)) { seen.add(key); merged.push(a); }
+      }
+    }
+    return merged;
+  }
+
   try {
     const normalizedUrl = channelUrl.trim();
     const isPrivateInvite = normalizedUrl.includes("/+") || normalizedUrl.includes("/joinchat/");
