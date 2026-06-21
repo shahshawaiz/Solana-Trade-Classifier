@@ -1654,7 +1654,8 @@ export interface JupiterConfig {
   tradingMode?: "REAL" | "PAPER";
   rpcUrl?: string; // Custom RPC Node URL for reliable on-chain communication
   leverage: number; // Configurable leverage (e.g., 5x)
-  allocationPercent: number; // Size parameter in % of wallet
+  allocationPercent: number; // Size parameter in % of wallet (used when positionSizeUsd is 0)
+  positionSizeUsd?: number; // Explicit notional position size in USD; collateral = size / leverage
   takeProfitPct: number;
   stopLossPct: number;
   frequencyMinutes?: number;
@@ -1793,6 +1794,7 @@ function loadJupiterConfig(): JupiterConfig {
     tradingMode: "REAL",
     leverage: 5,
     allocationPercent: 5,
+    positionSizeUsd: 0,
     takeProfitPct: 4,
     stopLossPct: 2,
     frequencyMinutes: 5,
@@ -3167,18 +3169,42 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             entryPrice = jupPrice;
           }
 
-          // 4. Calculate proper trade size in SOL (base asset units) using collateral asset type
+          // 4. Trade sizing. Collateral (margin) is set either explicitly via positionSizeUsd
+          //    (collateral = size / leverage) or as allocationPercent of the wallet. We then
+          //    enforce Jupiter's hard $10 minimum collateral for new positions.
           const leverage = config.leverage || 5;
           const allocationFraction = Math.min(config.allocationPercent, 100) / 100;
-          let sizeInSol = 0.01;
+          const MIN_COLLATERAL_USD = 10; // Jupiter Perps minimum collateral for a new position
 
-          if (collateralAsset === "USDT" || collateralAsset === "USDC") {
-            const marginAmount = collateralBalance * allocationFraction;
-            const nominalValueInUsd = marginAmount * leverage;
-            sizeInSol = nominalValueInUsd / entryPrice;
+          let collateralUsd: number;
+          if ((config as any).positionSizeUsd && (config as any).positionSizeUsd > 0) {
+            // Explicit notional position size in USD -> required collateral.
+            collateralUsd = (config as any).positionSizeUsd / leverage;
+          } else if (collateralAsset === "USDT" || collateralAsset === "USDC") {
+            collateralUsd = collateralBalance * allocationFraction;
           } else {
-            sizeInSol = solBalance * allocationFraction * leverage;
+            // SOL collateral: approximate USD value via the traded asset price (SOL-centric).
+            collateralUsd = solBalance * allocationFraction * entryPrice;
           }
+
+          // Enforce the $10 minimum so the open isn't rejected by Jupiter.
+          if (collateralUsd < MIN_COLLATERAL_USD) {
+            console.log(`[Jupiter Daemon] Collateral $${collateralUsd.toFixed(2)} below $${MIN_COLLATERAL_USD} minimum — raising to $${MIN_COLLATERAL_USD}.`);
+            collateralUsd = MIN_COLLATERAL_USD;
+          }
+
+          // If the wallet can't cover the required collateral, fall back to PAPER (don't fail on-chain).
+          const availableCollateralUsd = (collateralAsset === "USDT" || collateralAsset === "USDC")
+            ? collateralBalance
+            : solBalance * entryPrice;
+          if (mode !== "PAPER" && collateralUsd > availableCollateralUsd) {
+            console.log(`[Jupiter Daemon] Need $${collateralUsd.toFixed(2)} collateral but only $${availableCollateralUsd.toFixed(2)} available in ${collateralAsset} — switching to PAPER.`);
+            mode = "PAPER";
+          }
+
+          // Position size in base-asset units; executeOnChainTradeServerSide derives the
+          // collateral back from this (collateral = sizeInSol * price / leverage).
+          let sizeInSol = (collateralUsd * leverage) / entryPrice;
 
           let tpPct = 4.0;
           let slPct = 2.0;
@@ -4446,8 +4472,9 @@ app.post("/api/jupiter-config", async (req, res) => {
       rpcUrl,
       enabled, 
       tradingMode,
-      leverage, 
-      allocationPercent, 
+      leverage,
+      allocationPercent,
+      positionSizeUsd,
       takeProfitPct,
       stopLossPct,
       frequencyMinutes,
@@ -4573,6 +4600,10 @@ app.post("/api/jupiter-config", async (req, res) => {
 
     if (allocationPercent !== undefined) {
       current.allocationPercent = Math.min(Number(allocationPercent) || 5, 100);
+    }
+
+    if (positionSizeUsd !== undefined) {
+      current.positionSizeUsd = Math.max(Number(positionSizeUsd) || 0, 0);
     }
 
     if (takeProfitPct !== undefined) {

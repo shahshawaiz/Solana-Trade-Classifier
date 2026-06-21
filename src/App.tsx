@@ -1475,6 +1475,7 @@ export default function App() {
           enabled: jupiterConfig.enabled,
           leverage: jupiterConfig.leverage,
           allocationPercent: Math.min(jupiterConfig.allocationPercent, 100),
+          positionSizeUsd: Number(jupiterConfig.positionSizeUsd) || 0,
           takeProfitPct: jupiterConfig.takeProfitPct,
           stopLossPct: jupiterConfig.stopLossPct,
           frequencyMinutes: jupiterConfig.frequencyMinutes,
@@ -3729,6 +3730,33 @@ export default function App() {
                             <Shield className="w-3.5 h-3.5 shrink-0" />
                             <span>Risk Limit Alert: Ensure allocation aligns with risk tolerance. High percentages + high leverage amplify exposure massively.</span>
                           </div>
+                        </div>
+
+                        {/* Explicit position size (overrides allocation % when > 0) */}
+                        <div className="space-y-2 pt-4 border-t border-border-dim/50">
+                          <div className="flex justify-between items-center mb-1">
+                            <label className="text-[10px] uppercase font-bold tracking-widest text-text-dim block">
+                              Position Size (USD) — overrides allocation
+                            </label>
+                            <span className="font-mono text-xs text-sol-green font-extrabold bg-sol-green/10 px-2 py-0.5 rounded">
+                              {Number(jupiterConfig.positionSizeUsd) > 0 ? `$${jupiterConfig.positionSizeUsd}` : "Auto (alloc %)"}
+                            </span>
+                          </div>
+                          <div className="relative">
+                            <input
+                              type="number"
+                              min="0"
+                              step="1"
+                              placeholder="0 = use allocation %"
+                              value={jupiterConfig.positionSizeUsd || ""}
+                              onChange={(e) => setJupiterConfig({ ...jupiterConfig, positionSizeUsd: Number(e.target.value) || 0 })}
+                              className="w-full bg-bg-input border border-border-dim rounded-lg px-3 py-2 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-sol-green text-text-heading"
+                            />
+                            <span className="absolute right-3 top-2 text-xs text-text-dim font-mono">USD</span>
+                          </div>
+                          <p className="text-[9px] text-text-dim font-mono leading-relaxed">
+                            Notional position size. Collateral = size ÷ leverage (e.g. ${Number(jupiterConfig.positionSizeUsd) || 50} ÷ {jupiterConfig.leverage || 5}x = ${(((Number(jupiterConfig.positionSizeUsd) || 50)) / (jupiterConfig.leverage || 5)).toFixed(2)} margin). Jupiter requires ≥ $10 collateral.
+                          </p>
                         </div>
 
                       </div>
