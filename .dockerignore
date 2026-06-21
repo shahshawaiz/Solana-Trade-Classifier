@@ -1,0 +1,15 @@
+# Never copy host (macOS) modules/artifacts into the Linux image — install fresh inside.
+node_modules
+**/node_modules
+package-lock.json
+dist
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+test-trade
+*.log
+.DS_Store
+api/index.js
+vercel.json
