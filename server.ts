@@ -1057,19 +1057,21 @@ export function performCoreAnalysis(closes: number[], headlines: string[] = [], 
   // SEMANTIC CATALYST OVERRULE: extreme sentiment (>= 0.85 / <= -0.85) is authoritative —
   // it forces Σ to fully mirror the catalyst direction and bypasses Chop Zone / confirmation downstream.
   let overrule = false;
-  if (sentimentScore >= 0.85) {
-    compositeScore = 1.0;
-    overrule = true;
-  } else if (sentimentScore <= -0.85) {
-    compositeScore = -1.0;
-    overrule = true;
+  if (sentimentW > 0) {
+    if (sentimentScore >= 0.85) {
+      compositeScore = 1.0;
+      overrule = true;
+    } else if (sentimentScore <= -0.85) {
+      compositeScore = -1.0;
+      overrule = true;
+    }
   }
 
   // CHOP ZONE (Hold preservation): when RSI floats in the neutral 40–60 band AND the
   // fast/slow MAs squeeze (low volatility), force HOLD to avoid sideways chop/fakeouts.
   // Skipped when an authoritative catalyst overrule is active.
-  const inNeutralRsi = currentRsi >= 40 && currentRsi <= 60;
-  const maSqueeze = maSpreadPct < 0.30; // fast/slow EMA within 0.3% of price
+  const inNeutralRsi = liquidityW > 0 ? (currentRsi >= 40 && currentRsi <= 60) : false;
+  const maSqueeze = technicalW > 0 ? (maSpreadPct < 0.30) : false;
   const isChop = !overrule && inNeutralRsi && maSqueeze;
 
   // Consistent signal threshold across system
@@ -5036,7 +5038,12 @@ app.get("/api/cron/tick", async (req, res) => {
 // stored in config; when it changes we reset once. Without a deploy id (e.g. local dev) we
 // preserve state. Set DEPLOYMENT_ID manually to force a reset on any host.
 function resetStatsOnFreshDeploy() {
-  const deployId = process.env.RAILWAY_DEPLOYMENT_ID || process.env.RAILWAY_GIT_COMMIT_SHA || process.env.DEPLOYMENT_ID || "";
+  const deployId = process.env.RAILWAY_DEPLOYMENT_ID || 
+                   process.env.RAILWAY_GIT_COMMIT_SHA || 
+                   process.env.VERCEL_DEPLOYMENT_ID || 
+                   process.env.VERCEL_GIT_COMMIT_SHA || 
+                   process.env.VERCEL_URL || 
+                   process.env.DEPLOYMENT_ID || "";
   if (!deployId) return;
   try {
     const j = loadJupiterConfig();
@@ -5112,8 +5119,11 @@ async function startServer() {
 // app.listen() or start setInterval daemons there. Background ticks are driven by
 // Vercel Cron hitting /api/cron/tick instead. Locally / on Railway, run normally.
 const isVercel = !!process.env.VERCEL;
-if (process.env.NODE_ENV !== "test" && process.env.CORTEX_TESTING !== "true" && !isVercel) {
-  startServer();
+if (process.env.NODE_ENV !== "test" && process.env.CORTEX_TESTING !== "true") {
+  resetStatsOnFreshDeploy();
+  if (!isVercel) {
+    startServer();
+  }
 }
 
 // Exported so Vercel's @vercel/node runtime can use the Express app as a handler.

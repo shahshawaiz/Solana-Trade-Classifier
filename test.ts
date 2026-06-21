@@ -116,6 +116,26 @@ describe("Indicator, Oscillator & Bias Calculations", () => {
     assert.strictEqual(negativeOverrule.compositeScore, -1.0);
     assert.strictEqual(negativeOverrule.action, "Short Sell");
   });
+
+  it("should bypass overrules and gates when corresponding indicator weights are zero", () => {
+    const closes = Array.from({ length: 40 }, () => 150);
+    
+    // 1. Sentiment disabled (weight 0) -> Extreme sentiment should NOT overrule composite/action
+    const weightsSentDisabled = { sentiment: 0.0, technical: 0.5, liquidity: 0.5, elliottWave: 0.5 };
+    const analysisSentDisabled = performCoreAnalysis(closes, [], weightsSentDisabled, 0.95);
+    assert.strictEqual(analysisSentDisabled.overrule, false);
+    assert.ok(analysisSentDisabled.compositeScore !== 1.0); // Normally 1.0 if overruled
+
+    // 2. All weights disabled -> Composite score should be 0.0
+    const weightsAllDisabled = { sentiment: 0.0, technical: 0.0, liquidity: 0.0, elliottWave: 0.0 };
+    const analysisAllDisabled = performCoreAnalysis(closes, [], weightsAllDisabled, 0.95);
+    assert.strictEqual(analysisAllDisabled.compositeScore, 0.0);
+
+    // 3. RSI neutral chop zone bypass when liquidity is 0
+    const weightsLiqDisabled = { sentiment: 0.5, technical: 0.5, liquidity: 0.0, elliottWave: 0.5 };
+    const analysisLiqDisabled = performCoreAnalysis(closes, [], weightsLiqDisabled, 0.0);
+    assert.strictEqual(analysisLiqDisabled.isChop, false);
+  });
 });
 
 describe("News Fetching Integration", () => {

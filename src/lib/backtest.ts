@@ -57,7 +57,7 @@ export interface BacktestResult {
 
 export function runBacktest(
   data: MarketData[],
-  weights: { sentiment: number; technical: number; liquidity: number },
+  weights: { sentiment: number; technical: number; liquidity: number; elliottWave?: number },
   threshold: number,
   cooldownMinutes: number = 30,
   tradeSize: number = 1.0,
@@ -112,15 +112,24 @@ export function runBacktest(
 
     // 5-Point Elliot Wave FIRST GATE
     const evaluateEwSig = (index: number) => {
-      // Return HOLD if not enough data
-      if (index < 33) return "HOLD";
+      const isEwEnabled = weights.elliottWave !== 0 && weights.elliottWave !== undefined;
+      const isTechEnabled = weights.technical !== 0 && weights.technical !== undefined;
+      const isLiqEnabled = weights.liquidity !== 0 && weights.liquidity !== undefined;
+
+      // Return HOLD if not enough data AND Elliott Wave is enabled
+      if (isEwEnabled && index < 33) return "HOLD";
       const currentCloses = data.slice(0, index + 1).map(x => x.close);
-      const ewData = calculateElliotWave(currentCloses);
       let ewDir = "HOLD";
-      if (ewData.phase.includes("Wave 1") || ewData.phase.includes("Wave 3") || ewData.phase.includes("Wave 4")) {
-         ewDir = "LONG";
-      } else if (ewData.phase.includes("Wave A") || ewData.phase.includes("Wave C") || ewData.phase.includes("Wave 5")) {
-         ewDir = "SHORT";
+      if (isEwEnabled) {
+        const ewData = calculateElliotWave(currentCloses);
+        if (ewData.phase.includes("Wave 1") || ewData.phase.includes("Wave 3") || ewData.phase.includes("Wave 4")) {
+           ewDir = "LONG";
+        } else if (ewData.phase.includes("Wave A") || ewData.phase.includes("Wave C") || ewData.phase.includes("Wave 5")) {
+           ewDir = "SHORT";
+        }
+      } else {
+        // If EW is disabled, bypass it and do not restrict the signal direction
+        ewDir = "BOTH";
       }
       
       let pSide = "HOLD";
@@ -130,12 +139,19 @@ export function runBacktest(
         const currentClose = data[index].close;
         const currentEma200 = ema200Arr[index];
         
-        if (sc > threshold && ewDir === "LONG" && currentClose > currentEma200) pSide = "LONG";
-        else if (sc < -threshold && ewDir === "SHORT" && currentClose < currentEma200) pSide = "SHORT";
+        const passesLongTrend = !isTechEnabled || currentClose > currentEma200;
+        const passesShortTrend = !isTechEnabled || currentClose < currentEma200;
+        const passesLongEw = ewDir === "BOTH" || ewDir === "LONG";
+        const passesShortEw = ewDir === "BOTH" || ewDir === "SHORT";
+
+        if (sc > threshold && passesLongEw && passesLongTrend) pSide = "LONG";
+        else if (sc < -threshold && passesShortEw && passesShortTrend) pSide = "SHORT";
         
-        const rVal = data[index].rsi || 50;
-        if (rVal > 70 && ewDir === "SHORT" && currentClose < currentEma200) pSide = "SHORT";
-        if (rVal < 30 && ewDir === "LONG" && currentClose > currentEma200) pSide = "LONG";
+        if (isLiqEnabled) {
+          const rVal = data[index].rsi || 50;
+          if (rVal > 70 && passesShortEw && passesShortTrend) pSide = "SHORT";
+          if (rVal < 30 && passesLongEw && passesLongTrend) pSide = "LONG";
+        }
       }
       return pSide;
     };
@@ -250,10 +266,13 @@ export function runBacktest(
       
       // 4. Overrides/Exits
       // For overrides, E.g. RSI exhaustion
-      if (d.rsi && d.rsi > 75 && signal === 0) {
+      const isEwEnabled = weights.elliottWave !== 0 && weights.elliottWave !== undefined;
+      const isLiqEnabled = weights.liquidity !== 0 && weights.liquidity !== undefined;
+
+      if (isLiqEnabled && isEwEnabled && d.rsi && d.rsi > 75 && signal === 0) {
         if (currentPosition > 0 && calculateElliotWave(data.slice(0, i+1).map(x=>x.close)).phase.includes("Wave 5")) signal = -2;
       }
-      if (d.rsi && d.rsi < 25 && signal === 0) {
+      if (isLiqEnabled && isEwEnabled && d.rsi && d.rsi < 25 && signal === 0) {
         if (currentPosition < 0 && calculateElliotWave(data.slice(0, i+1).map(x=>x.close)).phase.includes("Wave C")) signal = 2;
       }
     }

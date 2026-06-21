@@ -306,6 +306,36 @@ export default function App() {
     return { sentiment: 0.90, technical: 0.90, liquidity: 0.90, elliottWave: 0.90 };
   });
   const [threshold, setThreshold] = useState(0.1);
+  const [enabledIndicators, setEnabledIndicators] = useState<{ sentiment: boolean; technical: boolean; liquidity: boolean; elliottWave: boolean }>(() => {
+    try {
+      const saved = localStorage.getItem("cortex_enabled_indicators");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (
+          typeof parsed.sentiment === "boolean" &&
+          typeof parsed.technical === "boolean" &&
+          typeof parsed.liquidity === "boolean" &&
+          typeof parsed.elliottWave === "boolean"
+        ) {
+          return parsed;
+        }
+      }
+    } catch (_) {}
+    return { sentiment: true, technical: true, liquidity: true, elliottWave: true };
+  });
+
+  const effectiveWeights = useMemo(() => {
+    return {
+      sentiment: enabledIndicators.sentiment ? weights.sentiment : 0,
+      technical: enabledIndicators.technical ? weights.technical : 0,
+      liquidity: enabledIndicators.liquidity ? weights.liquidity : 0,
+      elliottWave: enabledIndicators.elliottWave ? weights.elliottWave : 0,
+    };
+  }, [weights, enabledIndicators]);
+
+  useEffect(() => {
+    localStorage.setItem("cortex_enabled_indicators", JSON.stringify(enabledIndicators));
+  }, [enabledIndicators]);
 
   // Define Recharts Custom Components inside App to access state
   const CustomizedSignalDot = (props: any) => {
@@ -519,7 +549,7 @@ export default function App() {
   const fetchForecast = async (
     targetToken = token, 
     targetInterval = interval,
-    customWeights = weights,
+    customWeights = effectiveWeights,
     newsKeywords = topic
   ) => {
     setForecastLoading(true);
@@ -556,7 +586,7 @@ export default function App() {
       const payload: any = {
         token: token, 
         interval: interval, 
-        weights: weights,
+        weights: effectiveWeights,
         initialCapital: backtestCapital
       };
       
@@ -602,15 +632,16 @@ export default function App() {
 
   useEffect(() => {
     if (currentView === 'forecast') {
-      fetchForecast(token, interval, weights, topic);
+      fetchForecast(token, interval, effectiveWeights, topic);
     }
   }, [
     currentView, 
     token, 
     interval, 
-    weights.sentiment, 
-    weights.technical, 
-    weights.liquidity, 
+    effectiveWeights.sentiment, 
+    effectiveWeights.technical, 
+    effectiveWeights.liquidity, 
+    effectiveWeights.elliottWave,
     topic
   ]);
 
@@ -1219,7 +1250,7 @@ export default function App() {
             token: token,
             topic: topic,
             frequency: telegramConfig?.frequency || 5,
-            weights: weights
+            weights: effectiveWeights
           })
         });
 
@@ -1241,7 +1272,7 @@ export default function App() {
               walletAddress: jupiterConfig.walletAddress || "",
               token: token,
               topic: topic,
-              weights: weights
+              weights: effectiveWeights
             })
           });
         }
@@ -1255,7 +1286,7 @@ export default function App() {
       syncConfig();
     }, 1200);
     return () => clearTimeout(debounceTimer);
-  }, [token, topic, weights, telegramConfig?.enabled, telegramConfig?.frequency, jupiterConfig?.enabled, jupiterConfig?.leverage, jupiterConfig?.allocationPercent, jupiterConfig?.takeProfitPct, jupiterConfig?.stopLossPct, jupiterConfig?.tradingMode, jupiterConfig?.privateKey, jupiterConfig?.rpcUrl, jupiterConfig?.walletAddress]);
+  }, [token, topic, effectiveWeights, telegramConfig?.enabled, telegramConfig?.frequency, jupiterConfig?.enabled, jupiterConfig?.leverage, jupiterConfig?.allocationPercent, jupiterConfig?.takeProfitPct, jupiterConfig?.stopLossPct, jupiterConfig?.tradingMode, jupiterConfig?.privateKey, jupiterConfig?.rpcUrl, jupiterConfig?.walletAddress]);
 
   useEffect(() => {
     setTimeLeft(syncInterval);
@@ -1964,7 +1995,7 @@ export default function App() {
         const predRes = await fetch("/api/predict", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token, topic, weights, interval })
+          body: JSON.stringify({ token, topic, weights: effectiveWeights, interval })
         });
         if (!predRes.headers.get("content-type")?.includes("application/json")) {
            const text = await predRes.text();
@@ -2023,8 +2054,8 @@ export default function App() {
       }
       return d;
     });
-    return runBacktest(updatedData, weights, threshold, cooldown, tradeSize, maxPosition);
-  }, [data, weights, threshold, sentiment, cooldown, tradeSize, maxPosition]);
+    return runBacktest(updatedData, effectiveWeights, threshold, cooldown, tradeSize, maxPosition);
+  }, [data, effectiveWeights, threshold, sentiment, cooldown, tradeSize, maxPosition]);
 
   if (loading && data.length === 0) {
     return (
@@ -2360,51 +2391,95 @@ export default function App() {
                   <p className="text-[8px] text-text-dim leading-tight opacity-70">Adjust sensitivity between Political Sentiment (LLM), MACD, RSI, and Elliot Wave Entry.</p>
                 </div>
                 <div>
-                  <div className="flex justify-between text-[11px] mb-3">
-                    <span className="text-text-body">Political Sentiment (LLM)</span>
-                    <span className="text-sol-purple font-mono">{(weights.sentiment * 100).toFixed(0)}%</span>
+                  <div className="flex items-center justify-between text-[11px] mb-3">
+                    <label className="flex items-center gap-2 cursor-pointer text-text-body">
+                      <input 
+                        type="checkbox" 
+                        checked={enabledIndicators.sentiment}
+                        onChange={(e) => setEnabledIndicators({ ...enabledIndicators, sentiment: e.target.checked })}
+                        className="accent-sol-purple h-3 w-3 rounded border-border-dim bg-bg-input"
+                      />
+                      <span>Political Sentiment (LLM)</span>
+                    </label>
+                    <span className="text-sol-purple font-mono">
+                      {enabledIndicators.sentiment ? `${(weights.sentiment * 100).toFixed(0)}%` : "OFF"}
+                    </span>
                   </div>
                   <input 
                     type="range" min="0" max="1" step="0.05" 
                     value={weights.sentiment}
                     onChange={(e) => setWeights({ ...weights, sentiment: Number(e.target.value) })}
-                    className="w-full accent-sol-purple"
+                    disabled={!enabledIndicators.sentiment}
+                    className="w-full accent-sol-purple disabled:opacity-40"
                   />
                 </div>
                 <div>
-                  <div className="flex justify-between text-[11px] mb-3">
-                    <span className="text-text-body">Technical Trend (MACD)</span>
-                    <span className="text-sol-purple font-mono">{(weights.technical * 100).toFixed(0)}%</span>
+                  <div className="flex items-center justify-between text-[11px] mb-3">
+                    <label className="flex items-center gap-2 cursor-pointer text-text-body">
+                      <input 
+                        type="checkbox" 
+                        checked={enabledIndicators.technical}
+                        onChange={(e) => setEnabledIndicators({ ...enabledIndicators, technical: e.target.checked })}
+                        className="accent-sol-purple h-3 w-3 rounded border-border-dim bg-bg-input"
+                      />
+                      <span>Technical Trend (MACD)</span>
+                    </label>
+                    <span className="text-sol-purple font-mono">
+                      {enabledIndicators.technical ? `${(weights.technical * 100).toFixed(0)}%` : "OFF"}
+                    </span>
                   </div>
                   <input 
                     type="range" min="0" max="1" step="0.05" 
                     value={weights.technical}
                     onChange={(e) => setWeights({ ...weights, technical: Number(e.target.value) })}
-                    className="w-full accent-sol-purple"
+                    disabled={!enabledIndicators.technical}
+                    className="w-full accent-sol-purple disabled:opacity-40"
                   />
                 </div>
                 <div>
-                  <div className="flex justify-between text-[11px] mb-3">
-                    <span className="text-text-body">Oscillator (RSI)</span>
-                    <span className="text-sol-purple font-mono">{(weights.liquidity * 100).toFixed(0)}%</span>
+                  <div className="flex items-center justify-between text-[11px] mb-3">
+                    <label className="flex items-center gap-2 cursor-pointer text-text-body">
+                      <input 
+                        type="checkbox" 
+                        checked={enabledIndicators.liquidity}
+                        onChange={(e) => setEnabledIndicators({ ...enabledIndicators, liquidity: e.target.checked })}
+                        className="accent-sol-purple h-3 w-3 rounded border-border-dim bg-bg-input"
+                      />
+                      <span>Oscillator (RSI)</span>
+                    </label>
+                    <span className="text-sol-purple font-mono">
+                      {enabledIndicators.liquidity ? `${(weights.liquidity * 100).toFixed(0)}%` : "OFF"}
+                    </span>
                   </div>
                   <input 
                     type="range" min="0" max="1" step="0.05" 
                     value={weights.liquidity}
                     onChange={(e) => setWeights({ ...weights, liquidity: Number(e.target.value) })}
-                    className="w-full accent-sol-purple"
+                    disabled={!enabledIndicators.liquidity}
+                    className="w-full accent-sol-purple disabled:opacity-40"
                   />
                 </div>
                 <div>
-                  <div className="flex justify-between text-[11px] mb-3">
-                    <span className="text-text-body">Elliot Wave Entry Point</span>
-                    <span className="text-sol-purple font-mono">{((weights.elliottWave || 0) * 100).toFixed(0)}%</span>
+                  <div className="flex items-center justify-between text-[11px] mb-3">
+                    <label className="flex items-center gap-2 cursor-pointer text-text-body">
+                      <input 
+                        type="checkbox" 
+                        checked={enabledIndicators.elliottWave}
+                        onChange={(e) => setEnabledIndicators({ ...enabledIndicators, elliottWave: e.target.checked })}
+                        className="accent-sol-purple h-3 w-3 rounded border-border-dim bg-bg-input"
+                      />
+                      <span>Elliot Wave Entry Point</span>
+                    </label>
+                    <span className="text-sol-purple font-mono">
+                      {enabledIndicators.elliottWave ? `${((weights.elliottWave || 0) * 100).toFixed(0)}%` : "OFF"}
+                    </span>
                   </div>
                   <input 
                     type="range" min="0" max="1" step="0.05" 
                     value={weights.elliottWave || 0}
                     onChange={(e) => setWeights({ ...weights, elliottWave: Number(e.target.value) })}
-                    className="w-full accent-sol-purple"
+                    disabled={!enabledIndicators.elliottWave}
+                    className="w-full accent-sol-purple disabled:opacity-40"
                   />
                 </div>
               </div>
