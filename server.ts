@@ -1711,7 +1711,15 @@ export function loadTelegramConfig(): TelegramConfig {
         parsed.topic = "crypto,war";
       }
       if (!parsed.weights || (parsed.weights.sentiment === 0.90 && parsed.weights.technical === 0.05 && parsed.weights.liquidity === 0.05)) {
-        parsed.weights = { sentiment: 0.90, technical: 0.85, liquidity: 0.85, elliottWave: 0.85 };
+        parsed.weights = { sentiment: 0, technical: 0.9, liquidity: 0.85, elliottWave: 0, supertrend: 0.9, fvg: 0, dca: 0 };
+      } else {
+        if (parsed.weights.sentiment === undefined) parsed.weights.sentiment = 0;
+        if (parsed.weights.technical === undefined) parsed.weights.technical = 0.9;
+        if (parsed.weights.liquidity === undefined) parsed.weights.liquidity = 0.85;
+        if (parsed.weights.elliottWave === undefined) parsed.weights.elliottWave = 0;
+        if (parsed.weights.supertrend === undefined) parsed.weights.supertrend = 0.9;
+        if (parsed.weights.fvg === undefined) parsed.weights.fvg = 0;
+        if (parsed.weights.dca === undefined) parsed.weights.dca = 0;
       }
       return parsed;
     }
@@ -1858,7 +1866,17 @@ function loadJupiterConfig(): JupiterConfig {
       if (parsed.lastTradeAddedAt === undefined) parsed.lastTradeAddedAt = "";
       if (parsed.token === undefined) parsed.token = "SOL";
       if (parsed.topic === undefined || parsed.topic === "market" || parsed.topic === "Crypto") parsed.topic = "crypto,war";
-      if (!parsed.weights) parsed.weights = { sentiment: 0.90, technical: 0.85, liquidity: 0.85, elliottWave: 0.85 };
+      if (!parsed.weights) {
+        parsed.weights = { sentiment: 0, technical: 0.9, liquidity: 0.85, elliottWave: 0, supertrend: 0.9, fvg: 0, dca: 0 };
+      } else {
+        if (parsed.weights.sentiment === undefined) parsed.weights.sentiment = 0;
+        if (parsed.weights.technical === undefined) parsed.weights.technical = 0.9;
+        if (parsed.weights.liquidity === undefined) parsed.weights.liquidity = 0.85;
+        if (parsed.weights.elliottWave === undefined) parsed.weights.elliottWave = 0;
+        if (parsed.weights.supertrend === undefined) parsed.weights.supertrend = 0.9;
+        if (parsed.weights.fvg === undefined) parsed.weights.fvg = 0;
+        if (parsed.weights.dca === undefined) parsed.weights.dca = 0;
+      }
       
       if (parsed.disconnected) {
         parsed.walletAddress = "";
