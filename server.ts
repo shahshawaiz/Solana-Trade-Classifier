@@ -2856,11 +2856,42 @@ async function getPerpMarketPrice(asset: string): Promise<number> {
   return m && Number(m.priceUsd) > 0 ? Number(m.priceUsd) : 0;
 }
 
+// Select margin collateral token based on available balances (USDC -> USDT -> SOL)
+async function determineCollateralAsset(walletAddress: string, mode: "REAL" | "PAPER"): Promise<{ collateralAsset: "USDC" | "USDT" | "SOL"; collateralBalance: number }> {
+  if (mode === "PAPER") {
+    return { collateralAsset: "USDC", collateralBalance: 1000.0 };
+  }
+  try {
+    const solBalance = await getSolanaWalletBalance(walletAddress);
+    const usdtBalance = await getSplTokenBalance(walletAddress, "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB");
+    const usdcBalance = await getSplTokenBalance(walletAddress, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+
+    if (usdcBalance >= 10.0) {
+      return { collateralAsset: "USDC", collateralBalance: usdcBalance };
+    } else if (usdtBalance >= 10.0) {
+      return { collateralAsset: "USDT", collateralBalance: usdtBalance };
+    } else {
+      return { collateralAsset: "SOL", collateralBalance: solBalance };
+    }
+  } catch (e) {
+    try {
+      const solBalance = await getSolanaWalletBalance(walletAddress);
+      return { collateralAsset: "SOL", collateralBalance: solBalance };
+    } catch {
+      return { collateralAsset: "SOL", collateralBalance: 0 };
+    }
+  }
+}
+
 // Background auto-execution helper. Signature kept backward-compatible with all
 // existing call sites: (direction, executeSizeSol) -> signature string | null.
 // `executeSizeSol` is the strategy's notional position size in base-asset units
 // (e.g. SOL units); we convert it to a collateral amount for the CLI.
-async function executeOnChainTradeServerSide(direction: "LONG" | "SHORT" | "CLOSE", executeSizeSol = 0.05, opts: { tpPct?: number; slPct?: number } = {}): Promise<string | null> {
+async function executeOnChainTradeServerSide(
+  direction: "LONG" | "SHORT" | "CLOSE", 
+  executeSizeSol = 0.05, 
+  opts: { tpPct?: number; slPct?: number; collateralAsset?: string } = {}
+): Promise<string | null> {
   const config = loadJupiterConfig();
   const keyName = jupCliKeyName(config);
   const asset = String(config.token || "SOL").toUpperCase();
@@ -2897,11 +2928,30 @@ async function executeOnChainTradeServerSide(direction: "LONG" | "SHORT" | "CLOS
       collateralUsd = MIN_COLLATERAL_USD;
     }
 
-    // Use the position's NATIVE collateral token as --input to avoid an embedded swap that
-    // would push the open past Solana's max transaction size. Jupiter Perps collateralizes
-    // longs in the traded asset (e.g. SOL) and shorts in USDC — feeding any other token makes
-    // the CLI bundle a swap into the open instruction.
-    const input = direction === "SHORT" ? "USDC" : asset;
+    // Resolve the input token using the requested collateralAsset (if provided),
+    // otherwise auto-select based on wallet balance availability (USDC -> USDT -> SOL).
+    let input: string;
+    if (opts.collateralAsset) {
+      input = opts.collateralAsset.toUpperCase();
+    } else {
+      let executionAddress = config.walletAddress;
+      if (config.privateKey) {
+        try {
+          const keypair = getKeypairFromPrivateKey(config.privateKey);
+          executionAddress = keypair.publicKey.toBase58();
+        } catch (e) {}
+      }
+      try {
+        const cliKeys = await runJupCli(["keys", "list"]);
+        const k = Array.isArray(cliKeys) ? cliKeys.find((x: any) => x.name === jupCliKeyName(config)) : null;
+        if (k && k.address) executionAddress = k.address;
+      } catch (e) {}
+
+      const mode = config.tradingMode || "REAL";
+      const det = await determineCollateralAsset(executionAddress, mode);
+      input = det.collateralAsset;
+    }
+
     let amount: number;
     if (input === "USDC" || input === "USDT") {
       amount = collateralUsd; // ~1 USD each
@@ -3290,18 +3340,20 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           }
         }
 
-        // 2. Native collateral by side (matches on-chain custody, avoids tx-bloating swaps):
-        //    longs collateralize in the traded asset (SOL), shorts in USDC.
-        let collateralAsset: string;
+        // 2. Select margin collateral token based on available balances:
+        //    Priority: USDC -> USDT -> SOL
+        let collateralAsset: "USDC" | "USDT" | "SOL";
         let collateralBalance: number;
-        if (enterSide === "SHORT") {
+        if (usdcBalance >= 10.0) {
           collateralAsset = "USDC";
           collateralBalance = usdcBalance;
+        } else if (usdtBalance >= 10.0) {
+          collateralAsset = "USDT";
+          collateralBalance = usdtBalance;
         } else {
           collateralAsset = "SOL";
           collateralBalance = solBalance;
         }
-        void usdtBalance;
 
         if (mode === "PAPER") {
           solBalance = 10.0;
@@ -3317,7 +3369,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             mode = "PAPER";
             solBalance = 10.0;
             collateralBalance = 10.0;
-          } else if (collateralAsset === "USDC" && collateralBalance < 1.0) {
+          } else if ((collateralAsset === "USDC" || collateralAsset === "USDT") && collateralBalance < 1.0) {
             console.log(`[Jupiter Daemon] Wallet ${executionAddress} has insufficient ${collateralAsset} margin collateral (${collateralBalance.toFixed(4)}). Seamlessly falling back to PAPER (Simulated) trading.`);
             mode = "PAPER";
             solBalance = 10.0;
@@ -3421,7 +3473,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             // Execute REAL on-chain open via the Jupiter Perps CLI
             if (config.privateKey && mode !== "PAPER") {
               console.log(`[Jupiter Perps] Executing REAL onchain OPEN: ${enterSide} ${config.token} (notional ${sizeInSol.toFixed(4)} units)`);
-              const signature = await executeOnChainTradeServerSide(enterSide as "LONG" | "SHORT", sizeInSol, { tpPct, slPct });
+              const signature = await executeOnChainTradeServerSide(enterSide as "LONG" | "SHORT", sizeInSol, { tpPct, slPct, collateralAsset });
               if (signature) {
                 onChainSignature = signature;
               } else {
