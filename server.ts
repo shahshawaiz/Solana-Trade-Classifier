@@ -4771,6 +4771,23 @@ app.post("/api/sentiment", async (req, res) => {
   }
 });
 
+// Cron-driven daemon tick for serverless hosts (Vercel) where setInterval can't run.
+// Vercel Cron calls this on a schedule; it runs ONE tick of each daemon. Protect with
+// the CRON_SECRET env var (Vercel automatically sends it as a Bearer token).
+app.get("/api/cron/tick", async (req, res) => {
+  if (process.env.CRON_SECRET && req.headers["authorization"] !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const ranAt = new Date().toISOString();
+  try {
+    await checkPredictionAndAlert().catch((e: any) => console.error("[Cron] alert tick failed:", e.message));
+    await checkJupiterTradingAndState().catch((e: any) => console.error("[Cron] jupiter tick failed:", e.message));
+    res.json({ ok: true, ranAt });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e.message, ranAt });
+  }
+});
+
 async function startServer() {
   setTimeout(() => {
     try {
@@ -4814,6 +4831,13 @@ async function startServer() {
   });
 }
 
-if (process.env.NODE_ENV !== "test" && process.env.CORTEX_TESTING !== "true") {
+// On Vercel the app runs as a serverless function (api/index.ts) — we must NOT call
+// app.listen() or start setInterval daemons there. Background ticks are driven by
+// Vercel Cron hitting /api/cron/tick instead. Locally / on Railway, run normally.
+const isVercel = !!process.env.VERCEL;
+if (process.env.NODE_ENV !== "test" && process.env.CORTEX_TESTING !== "true" && !isVercel) {
   startServer();
 }
+
+// Exported so Vercel's @vercel/node runtime can use the Express app as a handler.
+export default app;
