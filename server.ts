@@ -1598,6 +1598,9 @@ interface TelegramConfig {
     technical: number;
     liquidity: number;
     elliottWave?: number;
+    supertrend?: number;
+    fvg?: number;
+    dca?: number;
   };
   lastAction: string;
   lastCheckedAt?: string;
@@ -2886,7 +2889,13 @@ async function executeOnChainTradeServerSide(direction: "LONG" | "SHORT" | "CLOS
     const assetPrice = await getPerpMarketPrice(asset);
     if (!assetPrice) throw new Error(`Could not resolve ${asset} market price`);
     const notionalUsd = executeSizeSol * assetPrice;
-    const collateralUsd = notionalUsd / leverage;
+    let collateralUsd = notionalUsd / leverage;
+
+    const MIN_COLLATERAL_USD = 10.5; // Jupiter Perps minimum collateral requirement (+ buffer for fees/slippage)
+    if (collateralUsd < MIN_COLLATERAL_USD) {
+      console.log(`[Jupiter Perps CLI] Collateral $${collateralUsd.toFixed(2)} is below $${MIN_COLLATERAL_USD} minimum. Raising to $${MIN_COLLATERAL_USD}.`);
+      collateralUsd = MIN_COLLATERAL_USD;
+    }
 
     // Use the position's NATIVE collateral token as --input to avoid an embedded swap that
     // would push the open past Solana's max transaction size. Jupiter Perps collateralizes
