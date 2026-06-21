@@ -2970,6 +2970,26 @@ async function executeOnChainTradeServerSide(
       input = det.collateralAsset;
     }
 
+    // If selected input is USDT, perform a spot swap to USDC first as Jupiter Perps CLI does not support USDT input directly
+    if (input === "USDT") {
+      try {
+        const swapAmount = Number((collateralUsd * 1.02).toFixed(6));
+        console.log(`[Jupiter Perps] Detected USDT collateral. Executing spot swap of ${swapAmount} USDT -> USDC...`);
+        const swapRes = await runJupCli([
+          "spot", "swap",
+          "--from", "USDT",
+          "--to", "USDC",
+          "--amount", String(swapAmount),
+          "--key", keyName
+        ]);
+        console.log(`[Jupiter Perps] Spot swap USDT -> USDC completed successfully.`, swapRes);
+        input = "USDC";
+      } catch (swapErr: any) {
+        console.warn(`[Jupiter Perps] USDT -> USDC spot swap failed: ${swapErr.message}. Falling back to SOL collateral.`);
+        input = "SOL";
+      }
+    }
+
     let amount: number;
     if (input === "USDC" || input === "USDT") {
       amount = collateralUsd; // ~1 USD each
@@ -3789,7 +3809,7 @@ app.post("/api/backtest", async (req, res) => {
       const pMomentum = (pPrice - pPrevMomPrice) / (pPrevMomPrice || 1);
       const pSentiment = Math.min(Math.max(pMomentum * 30, -1), 1);
       
-      const pStrategy = performCoreAnalysis(closes.slice(0, pIdx + 1), [], weights, pSentiment);
+      const pStrategy = performCoreAnalysis(closes.slice(0, pIdx + 1), [], weights, pSentiment, quotes.slice(0, pIdx + 1));
       const pFinalScore = pStrategy.compositeScore;
       
       const predictedPrice = pPrice * (1 + pFinalScore * 0.008);

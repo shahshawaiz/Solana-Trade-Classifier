@@ -12,10 +12,13 @@
   "token": "SOL",
   "topic": "crypto,war",
   "weights": {
-    "sentiment": 0.9,
-    "technical": 0.85,
+    "sentiment": 0,
+    "technical": 0.9,
     "liquidity": 0.85,
-    "elliottWave": 0.85
+    "elliottWave": 0,
+    "supertrend": 0.9,
+    "fvg": 0,
+    "dca": 0
   },
   "lastTradePnL": 0,
   "cumulativePnL": 0,
