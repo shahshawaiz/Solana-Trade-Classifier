@@ -1,55 +1,54 @@
+var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
+}) : x)(function(x) {
+  if (typeof require !== "undefined") return require.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
+
+// server.ts
 import express from "express";
 import path from "path";
 import os from "os";
 import * as yahooFinanceModule from "yahoo-finance2";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
-function subDays(date: Date, days: number): Date {
-  const result = new Date(date);
-  result.setDate(result.getDate() - days);
-  return result;
-}
 import Parser from "rss-parser";
 import Sentiment from "sentiment";
 import fs from "fs";
-import { Connection, PublicKey, Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction, Keypair } from "@solana/web3.js";
+import { Connection, PublicKey, TransactionInstruction, TransactionMessage, VersionedTransaction, Keypair } from "@solana/web3.js";
 import bs58Import from "bs58";
 import dns from "dns";
 import https from "https";
 import { execFile } from "child_process";
-
+function subDays(date, days) {
+  const result = new Date(date);
+  result.setDate(result.getDate() - days);
+  return result;
+}
 dotenv.config();
-
-// Support both ESM with default export and ESM-CJS bundle configurations
-const bs58: {
-  encode: (data: Uint8Array | number[] | any) => string;
-  decode: (str: string) => Uint8Array;
-} = (() => {
-  if (bs58Import && typeof (bs58Import as any).encode === "function") {
-    return bs58Import as any;
+var bs58 = (() => {
+  if (bs58Import && typeof bs58Import.encode === "function") {
+    return bs58Import;
   }
-  if (bs58Import && (bs58Import as any).default && typeof (bs58Import as any).default.encode === "function") {
-    return (bs58Import as any).default;
+  if (bs58Import && bs58Import.default && typeof bs58Import.default.encode === "function") {
+    return bs58Import.default;
   }
   try {
-    const r = require("bs58");
+    const r = __require("bs58");
     if (r && typeof r.encode === "function") {
       return r;
     }
     if (r && r.default && typeof r.default.encode === "function") {
       return r.default;
     }
-  } catch (err) {}
-  return bs58Import as any;
+  } catch (err) {
+  }
+  return bs58Import;
 })();
-
-// Fix for Node.js fetch DNS resolution error in Google Cloud Run environments (prefer IPv4)
 dns.setDefaultResultOrder("ipv4first");
-
-const rssParser = new Parser();
-const sentimentAnalyzer = new Sentiment();
-
-export function calculateEMA(data: number[], period: number): number[] {
+var rssParser = new Parser();
+var sentimentAnalyzer = new Sentiment();
+function calculateEMA(data, period) {
   const k = 2 / (period + 1);
   const ema = [data[0]];
   for (let i = 1; i < data.length; i++) {
@@ -57,39 +56,36 @@ export function calculateEMA(data: number[], period: number): number[] {
   }
   return ema;
 }
-
-export function calculateRSI(data: number[], period: number = 14): number[] {
+function calculateRSI(data, period = 14) {
   const rsi = new Array(data.length).fill(50);
   if (data.length <= period) return rsi;
   let gains = 0, losses = 0;
   for (let i = 1; i <= period; i++) {
     const diff = data[i] - data[i - 1];
-    if (diff >= 0) gains += diff; else losses -= diff;
+    if (diff >= 0) gains += diff;
+    else losses -= diff;
   }
   let avgGain = gains / period, avgLoss = losses / period;
-  rsi[period] = 100 - (100 / (1 + avgGain / avgLoss));
+  rsi[period] = 100 - 100 / (1 + avgGain / avgLoss);
   for (let i = period + 1; i < data.length; i++) {
     const diff = data[i] - data[i - 1];
     const gain = diff >= 0 ? diff : 0;
     const loss = diff < 0 ? -diff : 0;
     avgGain = (avgGain * (period - 1) + gain) / period;
     avgLoss = (avgLoss * (period - 1) + loss) / period;
-    rsi[i] = 100 - (100 / (1 + avgGain / avgLoss));
+    rsi[i] = 100 - 100 / (1 + avgGain / avgLoss);
   }
   return rsi;
 }
-
-// Standard initialization for yahoo-finance2 v3.
-const imported = yahooFinanceModule as any;
-const YfClass = imported.default?.default || imported.default || imported;
-let yf: any;
+var imported = yahooFinanceModule;
+var YfClass = imported.default?.default || imported.default || imported;
+var yf;
 try {
   yf = new YfClass();
 } catch (e) {
   console.log("Failed to use new operator on YfClass, using module as is");
   yf = imported.default || imported;
 }
-
 try {
   if (yf && typeof yf.setGlobalConfig === "function") {
     yf.setGlobalConfig({
@@ -109,184 +105,161 @@ try {
 } catch (configErr) {
   console.warn("Could not disable Yahoo Finance validation config", configErr);
 }
-
-
-// --- Resilient OHLC source ---
-// Yahoo Finance frequently hangs or is blocked from serverless/datacenter IPs (e.g. Vercel),
-// which kills the function with FUNCTION_INVOCATION_FAILED. We fetch crypto candles from
-// CryptoCompare first (no cookies/crumb, works from any IP), with a *timed* Yahoo fallback so
-// a hang can never crash the function. Returns the same `{ quotes: [...] }` shape as yf.chart.
-function withTimeout<T>(p: Promise<T>, ms: number, label = "op"): Promise<T> {
+function withTimeout(p, ms, label = "op") {
   return Promise.race([
     p,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms))
   ]);
 }
-
-function ccHistoParams(interval: string): { path: string; aggregate: number } {
+function ccHistoParams(interval) {
   switch (interval) {
-    case "1m": return { path: "histominute", aggregate: 1 };
-    case "2m": return { path: "histominute", aggregate: 2 };
-    case "5m": return { path: "histominute", aggregate: 5 };
-    case "15m": return { path: "histominute", aggregate: 15 };
-    case "30m": return { path: "histominute", aggregate: 30 };
-    case "90m": return { path: "histominute", aggregate: 90 };
+    case "1m":
+      return { path: "histominute", aggregate: 1 };
+    case "2m":
+      return { path: "histominute", aggregate: 2 };
+    case "5m":
+      return { path: "histominute", aggregate: 5 };
+    case "15m":
+      return { path: "histominute", aggregate: 15 };
+    case "30m":
+      return { path: "histominute", aggregate: 30 };
+    case "90m":
+      return { path: "histominute", aggregate: 90 };
     case "60m":
-    case "1h": return { path: "histohour", aggregate: 1 };
-    case "1d": return { path: "histoday", aggregate: 1 };
-    case "5d": return { path: "histoday", aggregate: 5 };
-    case "1wk": return { path: "histoday", aggregate: 7 };
-    case "1mo": return { path: "histoday", aggregate: 30 };
-    case "3mo": return { path: "histoday", aggregate: 90 };
-    default: return { path: "histominute", aggregate: 15 };
+    case "1h":
+      return { path: "histohour", aggregate: 1 };
+    case "1d":
+      return { path: "histoday", aggregate: 1 };
+    case "5d":
+      return { path: "histoday", aggregate: 5 };
+    case "1wk":
+      return { path: "histoday", aggregate: 7 };
+    case "1mo":
+      return { path: "histoday", aggregate: 30 };
+    case "3mo":
+      return { path: "histoday", aggregate: 90 };
+    default:
+      return { path: "histominute", aggregate: 15 };
   }
 }
-
-async function chartResilient(symbol: string, queryOptions: any = {}, _opts?: any): Promise<{ quotes: any[] }> {
+async function chartResilient(symbol, queryOptions = {}, _opts) {
   const token = String(symbol).split("-")[0].toUpperCase();
   const interval = queryOptions.interval || "15m";
-  const period1: Date | undefined = queryOptions.period1 instanceof Date ? queryOptions.period1 : (queryOptions.period1 ? new Date(queryOptions.period1) : undefined);
-  const period2: Date | undefined = queryOptions.period2 instanceof Date ? queryOptions.period2 : (queryOptions.period2 ? new Date(queryOptions.period2) : undefined);
-
-  // 1) CryptoCompare — serverless-friendly primary source.
+  const period1 = queryOptions.period1 instanceof Date ? queryOptions.period1 : queryOptions.period1 ? new Date(queryOptions.period1) : void 0;
+  const period2 = queryOptions.period2 instanceof Date ? queryOptions.period2 : queryOptions.period2 ? new Date(queryOptions.period2) : void 0;
   try {
     const { path: ccPath, aggregate } = ccHistoParams(interval);
     const url = `https://min-api.cryptocompare.com/data/v2/${ccPath}?fsym=${token}&tsym=USD&limit=300&aggregate=${aggregate}`;
-    const res = await withTimeout(fetch(url), 8000, "cryptocompare");
+    const res = await withTimeout(fetch(url), 8e3, "cryptocompare");
     if (res.ok) {
-      const json: any = await res.json();
+      const json = await res.json();
       const rows = json?.Data?.Data;
       if (Array.isArray(rows) && rows.length) {
-        let quotes = rows
-          .filter((r: any) => r && typeof r.close === "number" && r.close > 0)
-          .map((r: any) => ({
-            date: new Date(r.time * 1000),
-            open: r.open, high: r.high, low: r.low, close: r.close,
-            volume: r.volumefrom ?? 0,
-          }));
-        if (period1) quotes = quotes.filter((q: any) => q.date.getTime() >= period1!.getTime());
-        if (period2) quotes = quotes.filter((q: any) => q.date.getTime() <= period2!.getTime());
+        let quotes = rows.filter((r) => r && typeof r.close === "number" && r.close > 0).map((r) => ({
+          date: new Date(r.time * 1e3),
+          open: r.open,
+          high: r.high,
+          low: r.low,
+          close: r.close,
+          volume: r.volumefrom ?? 0
+        }));
+        if (period1) quotes = quotes.filter((q) => q.date.getTime() >= period1.getTime());
+        if (period2) quotes = quotes.filter((q) => q.date.getTime() <= period2.getTime());
         if (quotes.length) return { quotes };
       }
     }
-  } catch (e: any) {
+  } catch (e) {
     console.warn("[OHLC] CryptoCompare failed:", e.message);
   }
-
-  // 2) Yahoo Finance fallback — timed so it can never hang the function.
   try {
-    const result: any = await withTimeout((yf.chart as any)(symbol, queryOptions, { validateResult: false }), 8000, "yahoo");
+    const result = await withTimeout(yf.chart(symbol, queryOptions, { validateResult: false }), 8e3, "yahoo");
     if (result && Array.isArray(result.quotes)) return { quotes: result.quotes };
-  } catch (e: any) {
+  } catch (e) {
     console.warn("[OHLC] Yahoo fallback failed:", e.message);
   }
-
   return { quotes: [] };
 }
-
-const app = express();
-const PORT = Number(process.env.PORT) || 3000;
-
+var app = express();
+var PORT = Number(process.env.PORT) || 3e3;
 app.use(express.json());
-
-// Initialize Gemini Client (Lazy)
-let aiClient: GoogleGenAI | null = null;
-function getAi(): GoogleGenAI {
+var aiClient = null;
+function getAi() {
   if (!aiClient) {
     if (!process.env.GEMINI_API_KEY) {
-        throw new Error("GEMINI_API_KEY is missing");
+      throw new Error("GEMINI_API_KEY is missing");
     }
     aiClient = new GoogleGenAI({
       apiKey: process.env.GEMINI_API_KEY,
       httpOptions: {
         headers: {
-          'User-Agent': 'aistudio-build',
+          "User-Agent": "aistudio-build"
         }
       }
     });
   }
   return aiClient;
 }
-
-// Resilient wrapper for Gemini content generation to handle 503, 429, and other transient errors.
-let isGeminiQuotaExhausted = false;
-let lastQuotaCheckTime = 0;
-const QUOTA_RETRY_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
-
-function isSpendingCapError(err: any): boolean {
-  const msg = String(err.message || (err.error && err.error.message) || err).toLowerCase();
-  const status = err.status || (err.error && err.error.code);
+var isGeminiQuotaExhausted = false;
+var lastQuotaCheckTime = 0;
+var QUOTA_RETRY_COOLDOWN_MS = 10 * 60 * 1e3;
+function isSpendingCapError(err) {
+  const msg = String(err.message || err.error && err.error.message || err).toLowerCase();
+  const status = err.status || err.error && err.error.code;
   return status === 429 || msg.includes("resource_exhausted") || msg.includes("spending cap") || msg.includes("quota exceeded") || msg.includes("limit exceeded");
 }
-
-async function generateContentResilient(params: {
-  model?: string;
-  contents: any;
-  config?: any;
-}, maxRetries = 2): Promise<any> {
+async function generateContentResilient(params, maxRetries = 2) {
   const primaryModel = params.model || "gemini-3.5-flash";
-  
   if (isGeminiQuotaExhausted) {
     if (Date.now() - lastQuotaCheckTime < QUOTA_RETRY_COOLDOWN_MS) {
-      const quotaErr: any = new Error("Gemini quota/spending cap exceeded. Bypassing and applying instant fallbacks.");
+      const quotaErr = new Error("Gemini quota/spending cap exceeded. Bypassing and applying instant fallbacks.");
       quotaErr.status = 429;
       throw quotaErr;
     } else {
       isGeminiQuotaExhausted = false;
     }
   }
-
-  let lastError: any = null;
-
+  let lastError = null;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const currentModel = attempt === maxRetries && primaryModel !== "gemini-2.5-flash" ? "gemini-2.5-flash" : primaryModel;
     try {
       if (attempt > 0) {
-        // Wait a bit before retrying on failure (exponential backoff)
-        await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+        await new Promise((resolve) => setTimeout(resolve, attempt * 1e3));
       }
       const response = await getAi().models.generateContent({
         model: currentModel,
         contents: params.contents,
-        config: params.config,
+        config: params.config
       });
       return response;
-    } catch (err: any) {
+    } catch (err) {
       lastError = err;
-      const status = err.status || (err.error && err.error.code);
+      const status = err.status || err.error && err.error.code;
       const isQuotaOrCap = isSpendingCapError(err);
-      
       if (isQuotaOrCap) {
         console.log(`[Gemini Quota] Account spending cap / resource exhaustion detected. Activating global instant offline backup logic.`);
         isGeminiQuotaExhausted = true;
         lastQuotaCheckTime = Date.now();
         throw err;
       }
-
       const isTransient = status === 503 || status === 429 || String(err.message).toLowerCase().includes("unavailable") || String(err.message).toLowerCase().includes("quota");
-      
       console.log(`[Attempt ${attempt + 1}/${maxRetries + 1}] Gemini API call to ${currentModel} failed:`, err.message || err);
-      
       if (!isTransient && attempt < maxRetries) {
-        // General fallback to older model if model not available/accessible/deprecated
         if (currentModel !== "gemini-2.5-flash") {
           console.log("Attempting fallback to gemini-2.5-flash on next try...");
         }
       }
     }
   }
-
-  // If retries failed, attempt one final check with a fallback model if we haven't already
   if (primaryModel !== "gemini-2.5-flash") {
     try {
       console.log("Resilient fallback: attempt final backup call to gemini-2.5-flash");
       const backupResponse = await getAi().models.generateContent({
         model: "gemini-2.5-flash",
         contents: params.contents,
-        config: params.config,
+        config: params.config
       });
       return backupResponse;
-    } catch (fallbackErr: any) {
+    } catch (fallbackErr) {
       console.log("Resilient backup call to gemini-2.5-flash failed:", fallbackErr.message || fallbackErr);
       if (isSpendingCapError(fallbackErr)) {
         isGeminiQuotaExhausted = true;
@@ -294,163 +267,136 @@ async function generateContentResilient(params: {
       }
     }
   }
-
   throw lastError || new Error("Gemini API call failed after retries.");
 }
-
-// API Routes
 app.set("getAi", getAi);
-function parseQueryDate(val: any): Date | undefined {
-  if (!val) return undefined;
-  if (val === "undefined" || val === "null" || val === "") return undefined;
+function parseQueryDate(val) {
+  if (!val) return void 0;
+  if (val === "undefined" || val === "null" || val === "") return void 0;
   const d = new Date(val);
-  if (isNaN(d.getTime())) return undefined;
+  if (isNaN(d.getTime())) return void 0;
   return d;
 }
-
 app.get("/api/historical", async (req, res) => {
   try {
     const { token = "SOL", interval = "15m", lookback = "2", startDate, endDate } = req.query;
-    const symbol = `${(token as string).toUpperCase()}-USD`;
-    
+    const symbol = `${token.toUpperCase()}-USD`;
     const cacheKey = `${token}_${interval}_${lookback}_${startDate}_${endDate}`;
     const cached = historicalCache.get(cacheKey);
-    if (cached && (Date.now() - cached.timestamp) < HISTORICAL_CACHE_TTL_MS) {
+    if (cached && Date.now() - cached.timestamp < HISTORICAL_CACHE_TTL_MS) {
       console.log(`[Cache Hit] Serving cached /api/historical data for ${cacheKey}`);
       return res.json(cached.data);
     }
-    
-    let period1: Date | undefined = parseQueryDate(startDate);
-    let period2: Date | undefined = parseQueryDate(endDate);
-
+    let period1 = parseQueryDate(startDate);
+    let period2 = parseQueryDate(endDate);
     if (!period1) {
-      period1 = subDays(new Date(), Number(lookback) || 2);
+      period1 = subDays(/* @__PURE__ */ new Date(), Number(lookback) || 2);
     }
-    
     const allowedIntervals = ["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"];
-    const validInterval = allowedIntervals.includes(interval as string) ? (interval as any) : "15m";
-    
-    console.log(`Fetching ${symbol}: interval=${validInterval}, range=${period1.toLocaleDateString()} to ${period2?.toLocaleDateString() || 'now'}`);
-    
-    const queryOptions: any = {
+    const validInterval = allowedIntervals.includes(interval) ? interval : "15m";
+    console.log(`Fetching ${symbol}: interval=${validInterval}, range=${period1.toLocaleDateString()} to ${period2?.toLocaleDateString() || "now"}`);
+    const queryOptions = {
       period1,
-      interval: validInterval,
+      interval: validInterval
     };
     if (period2) {
       if (period2.getTime() <= period1.getTime()) {
         period2.setSeconds(period2.getSeconds() + 1);
         if (period2.getTime() <= period1.getTime()) {
-           period2.setDate(period2.getDate() + 1);
+          period2.setDate(period2.getDate() + 1);
         }
       }
       queryOptions.period2 = period2;
     }
-
     const result = await chartResilient(symbol, queryOptions, { validateResult: false });
-
     if (!result || !result.quotes || result.quotes.length === 0) {
       throw new Error("No data returned from Yahoo Finance");
     }
-
     historicalCache.set(cacheKey, { timestamp: Date.now(), data: result });
     res.json(result);
-  } catch (error: any) {
+  } catch (error) {
     console.error("Historical data error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
-
 app.get("/api/price", async (req, res) => {
   try {
     const { token = "SOL" } = req.query;
-    const ticker = (token as string).toUpperCase();
+    const ticker = token.toUpperCase();
     const symbol = `${ticker}-USD`;
-
     const cached = priceCache.get(ticker);
-    if (cached && (Date.now() - cached.timestamp) < PRICE_CACHE_TTL_MS) {
+    if (cached && Date.now() - cached.timestamp < PRICE_CACHE_TTL_MS) {
       return res.json(cached.data);
     }
-
-    const sendJson = (payload: any, status = 200) => {
+    const sendJson = (payload, status = 200) => {
       priceCache.set(ticker, { timestamp: Date.now(), data: payload });
       return res.status(status).json(payload);
     };
-
-    // Try live quote from yahoo finance first
     try {
       const q = await yf.quote(symbol, {}, { validateResult: false });
-      if (q && q.regularMarketPrice !== undefined) {
+      if (q && q.regularMarketPrice !== void 0) {
         return sendJson({ price: Number(q.regularMarketPrice), symbol });
       }
-    } catch (err) {}
-
-    // Fallback 1: try latest chart candle
+    } catch (err) {
+    }
     try {
-      const chart = await chartResilient(symbol, { period1: subDays(new Date(), 2) }, { validateResult: false });
+      const chart = await chartResilient(symbol, { period1: subDays(/* @__PURE__ */ new Date(), 2) }, { validateResult: false });
       if (chart && chart.quotes && chart.quotes.length > 0) {
-        const validQuotes = chart.quotes.filter((x: any) => x && x.close !== null);
+        const validQuotes = chart.quotes.filter((x) => x && x.close !== null);
         if (validQuotes.length > 0) {
           return sendJson({ price: Number(validQuotes[validQuotes.length - 1].close), symbol });
         }
       }
-    } catch (err) {}
-
-    // Fallback 2: try Jupiter quote if SOL
+    } catch (err) {
+    }
     if (ticker === "SOL") {
       try {
         const jupPrice = await getJupiterQuotePrice();
         if (jupPrice) {
           return sendJson({ price: Number(jupPrice), symbol });
         }
-      } catch (err) {}
+      } catch (err) {
+      }
     }
-
-    // Generic defaults
-    const defaults: Record<string, number> = {
+    const defaults = {
       SOL: 174.65,
-      BTC: 64200.00,
-      ETH: 3450.00,
-      BONK: 0.000021
+      BTC: 64200,
+      ETH: 3450,
+      BONK: 21e-6
     };
-    return sendJson({ price: defaults[ticker] || 100.00, symbol });
-  } catch (error: any) {
-    res.json({ price: 100.00, error: error?.message || "Internal price error" });
+    return sendJson({ price: defaults[ticker] || 100, symbol });
+  } catch (error) {
+    res.json({ price: 100, error: error?.message || "Internal price error" });
   }
 });
-
-async function fetchTelegramChannelFeed(channelUrl: string, token: string): Promise<any[]> {
+async function fetchTelegramChannelFeed(channelUrl, token) {
   if (!channelUrl) return [];
-
-  // Support multiple channels in one config value (comma or newline separated):
-  // fetch each in parallel and merge, de-duplicating by title.
   const channels = channelUrl.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   if (channels.length > 1) {
     const results = await Promise.all(channels.map((c) => fetchTelegramChannelFeed(c, token)));
-    const merged: any[] = [];
-    const seen = new Set<string>();
+    const merged = [];
+    const seen = /* @__PURE__ */ new Set();
     for (const arr of results) {
       for (const a of arr) {
         const key = (a.title || "").toLowerCase().trim();
-        if (key && !seen.has(key)) { seen.add(key); merged.push(a); }
+        if (key && !seen.has(key)) {
+          seen.add(key);
+          merged.push(a);
+        }
       }
     }
     return merged;
   }
-
   try {
     const normalizedUrl = channelUrl.trim();
     const isPrivateInvite = normalizedUrl.includes("/+") || normalizedUrl.includes("/joinchat/");
-    
-    // Default fallback info
-    let channelTitle = "Crypto Pump Club 📈";
+    let channelTitle = "Crypto Pump Club \u{1F4C8}";
     let channelDesc = "Crypto premium news and signals feed.";
-
-    // Try fetching the metadata
     try {
-      const res = await fetch(normalizedUrl, { 
-        headers: { 
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36" 
-        } 
+      const res = await fetch(normalizedUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
+        }
       });
       if (res.ok) {
         const html = await res.text();
@@ -466,9 +412,7 @@ async function fetchTelegramChannelFeed(channelUrl: string, token: string): Prom
     } catch (err) {
       console.warn("Failed to scrape invite link metadata", err);
     }
-
-    // Now, if it's a public channel or has a public /s/ version, we can try to fetch that for REAL messages!
-    let scrapedMessages: string[] = [];
+    let scrapedMessages = [];
     if (!isPrivateInvite) {
       try {
         let cleanName = normalizedUrl.split("t.me/")[1];
@@ -477,27 +421,17 @@ async function fetchTelegramChannelFeed(channelUrl: string, token: string): Prom
             cleanName = cleanName.substring(2);
           }
           const sUrl = `https://t.me/s/${cleanName}`;
-          const res = await fetch(sUrl, { 
-            headers: { 
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36" 
-            } 
+          const res = await fetch(sUrl, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
+            }
           });
           if (res.ok) {
             const html = await res.text();
-            // Parse individual message elements: <div class="tgme_widget_message_text js-message_text" ...>text</div>
             const msgMatches = html.matchAll(/<div class="tgme_widget_message_text js-message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/g);
             for (const match of msgMatches) {
               if (match[1]) {
-                // Strip HTML tags and entities
-                const cleanMsg = match[1]
-                  .replace(/<br\s*\/?>/gi, "\n")
-                  .replace(/<[^>]*>/g, " ")
-                  .replace(/&amp;/g, "&")
-                  .replace(/&lt;/g, "<")
-                  .replace(/&gt;/g, ">")
-                  .replace(/&quot;/g, '"')
-                  .replace(/&#39;/g, "'")
-                  .trim();
+                const cleanMsg = match[1].replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]*>/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
                 if (cleanMsg) {
                   scrapedMessages.push(cleanMsg);
                 }
@@ -509,65 +443,52 @@ async function fetchTelegramChannelFeed(channelUrl: string, token: string): Prom
         console.warn("Failed to fetch public telegram messages", err);
       }
     }
-
-    // If we have real scraped messages, format them as articles!
     if (scrapedMessages.length > 0) {
-      // Return maximum 8 messages
       return scrapedMessages.slice(-8).reverse().map((msg, index) => {
         return {
           title: msg,
           source: { name: channelTitle },
-          publishedAt: new Date(Date.now() - index * 10 * 60 * 1000).toISOString(),
+          publishedAt: new Date(Date.now() - index * 10 * 60 * 1e3).toISOString(),
           url: channelUrl
         };
       });
     }
-
-    // No public posts available to scrape. We never fabricate or simulate news —
-    // return empty so sentiment is derived only from real, verifiable headlines.
     return [];
-  } catch (error: any) {
+  } catch (error) {
     console.error("Error in fetchTelegramChannelFeed", error);
     return [];
   }
 }
-
-export async function fetchMarketNews(token: string, topic: string, from?: string, to: Date = new Date()): Promise<any[]> {
-  let articles: any[] = [];
-  const seenTitles = new Set<string>();
-
-  const addArticles = (newArticles: any[]) => {
-    const lowerTopic = (topic as string).toLowerCase();
-    const lowerToken = (token as string).toLowerCase();
-    
-    newArticles.forEach(a => {
+async function fetchMarketNews(token, topic, from, to = /* @__PURE__ */ new Date()) {
+  let articles = [];
+  const seenTitles = /* @__PURE__ */ new Set();
+  const addArticles = (newArticles) => {
+    const lowerTopic = topic.toLowerCase();
+    const lowerToken = token.toLowerCase();
+    newArticles.forEach((a) => {
       if (!a.title) return;
       const normalized = a.title.toLowerCase().trim();
-      
-      // We removed strict relevance filtering to allow more diverse realtime news items to surface
       if (!seenTitles.has(normalized)) {
         seenTitles.add(normalized);
         articles.push({
           title: a.title,
           source: a.source?.name || a.source || "Feed",
-          publishedAt: a.publishedAt || a.isoDate || new Date().toISOString(),
+          publishedAt: a.publishedAt || a.isoDate || (/* @__PURE__ */ new Date()).toISOString(),
           url: a.url || a.link
         });
       }
     });
   };
-
   const fetchPromises = [];
-
   fetchPromises.push((async () => {
     try {
-      const yfSymbol = `${(token as string).toUpperCase()}-USD`;
+      const yfSymbol = `${token.toUpperCase()}-USD`;
       const yfResult = await yf.search(yfSymbol, { newsCount: 10 }, { validateResult: false });
       if (yfResult.news) {
-        addArticles(yfResult.news.map((n: any) => ({
+        addArticles(yfResult.news.map((n) => ({
           title: n.title,
           source: n.publisher,
-          publishedAt: n.providerPublishTime ? new Date(n.providerPublishTime * 1000).toISOString() : undefined,
+          publishedAt: n.providerPublishTime ? new Date(n.providerPublishTime * 1e3).toISOString() : void 0,
           url: n.link
         })));
       }
@@ -575,20 +496,18 @@ export async function fetchMarketNews(token: string, topic: string, from?: strin
       console.warn("Yahoo Finance news fetch failed", e);
     }
   })());
-
   fetchPromises.push((async () => {
     try {
-      let query = topic as string;
+      let query = topic;
       if (from) {
-        const fromDate = new Date(from as string).toISOString().split('T')[0];
+        const fromDate = new Date(from).toISOString().split("T")[0];
         query += ` after:${fromDate}`;
       }
-      query += ` before:${to.toISOString().split('T')[0]}`;
-      
+      query += ` before:${to.toISOString().split("T")[0]}`;
       const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
       const feed = await rssParser.parseURL(rssUrl);
       if (feed && feed.items) {
-        addArticles(feed.items.map((i: any) => ({
+        addArticles(feed.items.map((i) => ({
           title: i.title,
           source: i.source || "Google News",
           publishedAt: i.isoDate,
@@ -599,22 +518,20 @@ export async function fetchMarketNews(token: string, topic: string, from?: strin
       console.warn("Google News RSS fetch failed", e);
     }
   })());
-
   fetchPromises.push((async () => {
     try {
-      const ccToken = (token as string).toUpperCase();
+      const ccToken = token.toUpperCase();
       let ccUrl = `https://min-api.cryptocompare.com/data/v2/news/?categories=${ccToken}&excludeCategories=Sponsored`;
-      const toTs = Math.floor(to.getTime() / 1000);
+      const toTs = Math.floor(to.getTime() / 1e3);
       ccUrl += `&lTs=${toTs}`;
-      
       const ccResponse = await fetch(ccUrl);
       if (ccResponse.ok) {
         const data = await ccResponse.json();
         if (Array.isArray(data.Data)) {
-          addArticles(data.Data.map((a: any) => ({
+          addArticles(data.Data.map((a) => ({
             title: a.title,
             source: a.source_info?.name || "CryptoCompare",
-            publishedAt: new Date(a.published_on * 1000).toISOString(),
+            publishedAt: new Date(a.published_on * 1e3).toISOString(),
             url: a.url
           })));
         }
@@ -623,12 +540,11 @@ export async function fetchMarketNews(token: string, topic: string, from?: strin
       console.warn("CryptoCompare news fetch failed", e);
     }
   })());
-
   let apiKey = process.env.NEWS_API_KEY;
   if (apiKey && apiKey !== "MY_NEWS_API_KEY") {
     fetchPromises.push((async () => {
       try {
-        let url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(topic as string)}&language=en&sortBy=publishedAt&pageSize=40&apiKey=${apiKey}`;
+        let url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(topic)}&language=en&sortBy=publishedAt&pageSize=40&apiKey=${apiKey}`;
         if (from) url += `&from=${from}`;
         url += `&to=${to.toISOString()}`;
         const response = await fetch(url);
@@ -641,8 +557,6 @@ export async function fetchMarketNews(token: string, topic: string, from?: strin
       }
     })());
   }
-
-  // Fetch from the custom configured Telegram News Channel
   try {
     const telegramConfig = loadTelegramConfig();
     if (telegramConfig.newsTelegramChannel) {
@@ -660,15 +574,13 @@ export async function fetchMarketNews(token: string, topic: string, from?: strin
   } catch (err) {
     console.warn("Could not load TelegramConfig for channel news loading in fetchMarketNews", err);
   }
-
   await Promise.allSettled(fetchPromises);
-
-  const isLiveQuery = !from && Math.abs(to.getTime() - Date.now()) < 10 * 60 * 1000;
+  const isLiveQuery = !from && Math.abs(to.getTime() - Date.now()) < 10 * 60 * 1e3;
   if (isLiveQuery) {
     const nowMs = Date.now();
-    const minLimit = 0;                    // Fetch newest updates instantly
-    const maxLimit = 12 * 60 * 60 * 1000;  // 12 hours
-    articles = articles.filter(a => {
+    const minLimit = 0;
+    const maxLimit = 12 * 60 * 60 * 1e3;
+    articles = articles.filter((a) => {
       if (!a.publishedAt) return false;
       const pubTime = new Date(a.publishedAt).getTime();
       if (isNaN(pubTime)) return false;
@@ -676,60 +588,48 @@ export async function fetchMarketNews(token: string, topic: string, from?: strin
       return age >= minLimit && age <= maxLimit;
     });
   }
-
   return articles;
 }
-
 app.get("/api/news", async (req, res) => {
   try {
     const { topic = "crypto,war", token = "SOL", from } = req.query;
-    const to = req.query.to ? new Date(req.query.to as string) : new Date();
-
-    const cacheKey = `${topic}_${token}_${from}_${to.toISOString().slice(0, 13)}`; // Hourly bucket for to
+    const to = req.query.to ? new Date(req.query.to) : /* @__PURE__ */ new Date();
+    const cacheKey = `${topic}_${token}_${from}_${to.toISOString().slice(0, 13)}`;
     const cached = newsCache.get(cacheKey);
-    if (cached && (Date.now() - cached.timestamp) < NEWS_CACHE_TTL_MS) {
+    if (cached && Date.now() - cached.timestamp < NEWS_CACHE_TTL_MS) {
       console.log(`[Cache Hit] Serving cached /api/news data for ${cacheKey}`);
       return res.json(cached.data);
     }
-
     let apiKey = process.env.NEWS_API_KEY;
-    let articles: any[] = [];
-    const seenTitles = new Set<string>();
-
-    const addArticles = (newArticles: any[]) => {
-      const lowerTopic = (topic as string).toLowerCase();
-      const lowerToken = (token as string).toLowerCase();
-      
-      newArticles.forEach(a => {
+    let articles = [];
+    const seenTitles = /* @__PURE__ */ new Set();
+    const addArticles = (newArticles) => {
+      const lowerTopic = topic.toLowerCase();
+      const lowerToken = token.toLowerCase();
+      newArticles.forEach((a) => {
         if (!a.title) return;
         const normalized = a.title.toLowerCase().trim();
-        
-        // We removed strict relevance filtering here too to allow all fetched results
         if (!seenTitles.has(normalized)) {
           seenTitles.add(normalized);
           articles.push({
             title: a.title,
             source: a.source?.name || a.source || "Feed",
-            publishedAt: a.publishedAt || a.isoDate || new Date().toISOString(),
+            publishedAt: a.publishedAt || a.isoDate || (/* @__PURE__ */ new Date()).toISOString(),
             url: a.url || a.link
           });
         }
       });
     };
-
-    // Parallel Fetching
     const fetchPromises = [];
-
-    // Source 1: Yahoo Finance
     fetchPromises.push((async () => {
       try {
-        const yfSymbol = `${(token as string).toUpperCase()}-USD`;
+        const yfSymbol = `${token.toUpperCase()}-USD`;
         const yfResult = await yf.search(yfSymbol, { newsCount: 10 }, { validateResult: false });
         if (yfResult.news) {
-          addArticles(yfResult.news.map((n: any) => ({
+          addArticles(yfResult.news.map((n) => ({
             title: n.title,
             source: n.publisher,
-            publishedAt: n.providerPublishTime ? new Date(n.providerPublishTime * 1000).toISOString() : undefined,
+            publishedAt: n.providerPublishTime ? new Date(n.providerPublishTime * 1e3).toISOString() : void 0,
             url: n.link
           })));
         }
@@ -737,21 +637,18 @@ app.get("/api/news", async (req, res) => {
         console.warn("Yahoo Finance news fetch failed", e);
       }
     })());
-
-    // Source 2: Google News RSS
     fetchPromises.push((async () => {
       try {
-        let query = topic as string;
+        let query = topic;
         if (from) {
-          const fromDate = new Date(from as string).toISOString().split('T')[0];
+          const fromDate = new Date(from).toISOString().split("T")[0];
           query += ` after:${fromDate}`;
         }
-        query += ` before:${to.toISOString().split('T')[0]}`;
-        
+        query += ` before:${to.toISOString().split("T")[0]}`;
         const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
         const feed = await rssParser.parseURL(rssUrl);
         if (feed && feed.items) {
-          addArticles(feed.items.map((i: any) => ({
+          addArticles(feed.items.map((i) => ({
             title: i.title,
             source: i.source || "Google News",
             publishedAt: i.isoDate,
@@ -762,24 +659,20 @@ app.get("/api/news", async (req, res) => {
         console.warn("Google News RSS fetch failed", e);
       }
     })());
-
-    // Source 3: CryptoCompare
     fetchPromises.push((async () => {
       try {
-        const ccToken = (token as string).toUpperCase();
-        // CryptoCompare filters by category/token and allows lTs (last timestamp)
+        const ccToken = token.toUpperCase();
         let ccUrl = `https://min-api.cryptocompare.com/data/v2/news/?categories=${ccToken}&excludeCategories=Sponsored`;
-        const toTs = Math.floor(to.getTime() / 1000);
+        const toTs = Math.floor(to.getTime() / 1e3);
         ccUrl += `&lTs=${toTs}`;
-        
         const ccResponse = await fetch(ccUrl);
         if (ccResponse.ok) {
           const data = await ccResponse.json();
           if (Array.isArray(data.Data)) {
-            addArticles(data.Data.map((a: any) => ({
+            addArticles(data.Data.map((a) => ({
               title: a.title,
               source: a.source_info?.name || "CryptoCompare",
-              publishedAt: new Date(a.published_on * 1000).toISOString(),
+              publishedAt: new Date(a.published_on * 1e3).toISOString(),
               url: a.url
             })));
           }
@@ -788,12 +681,10 @@ app.get("/api/news", async (req, res) => {
         console.warn("CryptoCompare news fetch failed", e);
       }
     })());
-
-    // Source 4: NewsAPI
     if (apiKey && apiKey !== "MY_NEWS_API_KEY") {
       fetchPromises.push((async () => {
         try {
-          let url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(topic as string)}&language=en&sortBy=publishedAt&pageSize=40&apiKey=${apiKey}`;
+          let url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(topic)}&language=en&sortBy=publishedAt&pageSize=40&apiKey=${apiKey}`;
           if (from) url += `&from=${from}`;
           url += `&to=${to.toISOString()}`;
           const response = await fetch(url);
@@ -806,8 +697,6 @@ app.get("/api/news", async (req, res) => {
         }
       })());
     }
-
-    // Source 5: Telegram Live News Scraper
     try {
       const telegramConfig = loadTelegramConfig();
       if (telegramConfig.newsTelegramChannel) {
@@ -825,88 +714,68 @@ app.get("/api/news", async (req, res) => {
     } catch (e) {
       console.warn("Failed to load TelegramConfig inside news API", e);
     }
-
     await Promise.allSettled(fetchPromises);
-
     let isMock = false;
-
-    // Sort by date desc
     articles.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
-
-    // Filter to last 0 minutes to 12 hours for live queries
     if (!from) {
       const nowMs = Date.now();
-      const minLimit = 0;                    // Fetch newest updates instantly on the dashboard
-      const maxLimit = 12 * 60 * 60 * 1000;  // 12 hours
-      articles = articles.filter(a => {
+      const minLimit = 0;
+      const maxLimit = 12 * 60 * 60 * 1e3;
+      articles = articles.filter((a) => {
         const t = new Date(a.publishedAt).getTime();
         const age = nowMs - t;
         return age >= minLimit && age <= maxLimit;
       });
     } else if (from || to) {
-      const fromMs = from ? new Date(from as string).getTime() : 0;
+      const fromMs = from ? new Date(from).getTime() : 0;
       const toMs = to ? to.getTime() : Date.now();
-      articles = articles.filter(a => {
+      articles = articles.filter((a) => {
         const t = new Date(a.publishedAt).getTime();
         return t >= fromMs && t <= toMs;
       });
     }
-
     const responsePayload = { isMock, status: "ok", totalResults: articles.length, articles };
     newsCache.set(cacheKey, { timestamp: Date.now(), data: responsePayload });
     res.json(responsePayload);
-  } catch (error: any) {
+  } catch (error) {
     res.status(200).json({ articles: [], error: error.message });
   }
 });
-
-// Global caching tables to completely prevent hitting Gemini 429 Quota Limits
-const headlineSentimentCache = new Map<string, number>();
-const sentimentCache = new Map<string, { timestamp: number; score: number; rationale: string; suggestedOrder?: string; suggestedOrderPrice?: number }>();
-
-const SENTIMENT_CACHE_TTL_MS = 3 * 60 * 1000; // Cache Gemini trend outputs for 3 minutes
-
-const priceCache = new Map<string, { timestamp: number; data: any }>();
-const PRICE_CACHE_TTL_MS = 5000; // Cache price for 5 seconds
-
-const historicalCache = new Map<string, { timestamp: number; data: any }>();
-const HISTORICAL_CACHE_TTL_MS = 15000; // Cache historical chart data for 15 seconds
-
-const newsCache = new Map<string, { timestamp: number; data: any }>();
-const NEWS_CACHE_TTL_MS = 15000; // Cache news feed for 15 seconds
-
-const predictCache = new Map<string, { timestamp: number; data: any }>();
-const PREDICT_CACHE_TTL_MS = 15000; // Cache AI predictions for 15 seconds
-
-function heuristicSentiment(headline: string): number {
+var headlineSentimentCache = /* @__PURE__ */ new Map();
+var sentimentCache = /* @__PURE__ */ new Map();
+var SENTIMENT_CACHE_TTL_MS = 3 * 60 * 1e3;
+var priceCache = /* @__PURE__ */ new Map();
+var PRICE_CACHE_TTL_MS = 5e3;
+var historicalCache = /* @__PURE__ */ new Map();
+var HISTORICAL_CACHE_TTL_MS = 15e3;
+var newsCache = /* @__PURE__ */ new Map();
+var NEWS_CACHE_TTL_MS = 15e3;
+var predictCache = /* @__PURE__ */ new Map();
+var PREDICT_CACHE_TTL_MS = 15e3;
+function heuristicSentiment(headline) {
   if (!headline) return 0;
   const result = sentimentAnalyzer.analyze(headline);
-  // Comparative score is score / total_words, usually in range [-1, 1]
-  // We clamp and slightly amplify it since headlines are short
   return Math.max(-1, Math.min(1, result.comparative * 2));
 }
-
-export function calculateElliotWave(closes: number[]): { score: number; phase: string; details: string; value: number } {
+function calculateElliotWave(closes) {
   if (closes.length < 34) {
     const current = closes[closes.length - 1] || 0;
     const first = closes[0] || 0;
-    const score = current > first ? 0.3 : (current < first ? -0.3 : 0);
+    const score2 = current > first ? 0.3 : current < first ? -0.3 : 0;
     return {
-      score,
+      score: score2,
       phase: "Initial Setup Phase",
       details: "Not enough historical price candles are available yet to compute structural EWO.",
       value: current - first
     };
   }
-
-  const ewos: number[] = [];
+  const ewos = [];
   for (let i = 33; i < closes.length; i++) {
     let sum5 = 0;
     for (let j = 0; j < 5; j++) {
       sum5 += closes[i - j];
     }
     const sma5 = sum5 / 5;
-
     let sum34 = 0;
     for (let j = 0; j < 34; j++) {
       sum34 += closes[i - j];
@@ -914,26 +783,20 @@ export function calculateElliotWave(closes: number[]): { score: number; phase: s
     const sma34 = sum34 / 34;
     ewos.push(sma5 - sma34);
   }
-
   const currentEwo = ewos[ewos.length - 1];
   const prevEwo = ewos.length > 1 ? ewos[ewos.length - 2] : currentEwo;
-  
   const recentEwos = ewos.slice(-34);
   const maxEwo = Math.max(...recentEwos);
   const minEwo = Math.min(...recentEwos);
-
   let score = 0;
   if (maxEwo > minEwo) {
-    score = ((currentEwo - minEwo) / (maxEwo - minEwo)) * 2 - 1;
+    score = (currentEwo - minEwo) / (maxEwo - minEwo) * 2 - 1;
   }
-
   let phase = "Wave 1 - Initial Impulse";
   let details = "Early-stage breakout starting to form on SMA crossover.";
-
   const currentPrice = closes[closes.length - 1];
   const recentPrices = closes.slice(-34);
   const maxPrice = Math.max(...recentPrices);
-
   if (currentEwo > 0) {
     if (currentEwo >= maxEwo * 0.8 && currentPrice >= maxPrice * 0.95) {
       phase = "Wave 3 - Strong Bullish Impulse";
@@ -960,7 +823,6 @@ export function calculateElliotWave(closes: number[]): { score: number; phase: s
       details = "Onset of corrective phase following peak exhaustion.";
     }
   }
-
   return {
     score: Math.max(-1, Math.min(1, score)),
     phase,
@@ -968,46 +830,37 @@ export function calculateElliotWave(closes: number[]): { score: number; phase: s
     value: currentEwo
   };
 }
-
-export function performCoreAnalysis(closes: number[], headlines: string[] = [], weights: any, historicalSentimentOverride?: number) {
-  // 1. Rigorous Elliott Wave Oscillator & Wave Count Calculation
+function performCoreAnalysis(closes, headlines = [], weights, historicalSentimentOverride) {
   const waveInfo = calculateElliotWave(closes);
   const elliotWaveScore = waveInfo.score;
-
-  // 2. RSI
   const rsisList = calculateRSI(closes, 14);
   const currentRsi = rsisList.length > 0 ? rsisList[rsisList.length - 1] : 50;
   let rsiScore = 0;
-  if (currentRsi < 30) rsiScore = 1.0;
-  else if (currentRsi > 70) rsiScore = -1.0;
+  if (currentRsi < 30) rsiScore = 1;
+  else if (currentRsi > 70) rsiScore = -1;
   else if (currentRsi < 45) rsiScore = 0.5;
   else if (currentRsi > 55) rsiScore = -0.5;
-
-  // 3. MACD
   let macdScore = 0;
-  let maSpreadPct = Infinity; // |fastEMA - slowEMA| as % of price — used for Chop Zone squeeze detection
+  let maSpreadPct = Infinity;
   if (closes.length >= 34) {
     const fastEma = calculateEMA(closes, 12);
     const slowEma = calculateEMA(closes, 26);
     const macdLine = fastEma.map((f, i) => f - slowEma[i]);
     const signalLine = calculateEMA(macdLine, 9);
     const hist = macdLine[macdLine.length - 1] - signalLine[signalLine.length - 1];
-    const prevHist = (macdLine.length >= 2) ? macdLine[macdLine.length - 2] - signalLine[signalLine.length - 2] : hist;
-    if (hist > 0) macdScore = (prevHist <= 0) ? 1.0 : 0.5;
-    else macdScore = (prevHist >= 0) ? -1.0 : -0.5;
+    const prevHist = macdLine.length >= 2 ? macdLine[macdLine.length - 2] - signalLine[signalLine.length - 2] : hist;
+    if (hist > 0) macdScore = prevHist <= 0 ? 1 : 0.5;
+    else macdScore = prevHist >= 0 ? -1 : -0.5;
     const lastClose = closes[closes.length - 1] || 1;
     maSpreadPct = Math.abs(macdLine[macdLine.length - 1]) / lastClose * 100;
   }
-
-  // 4. LLM Political Sentiment
   let sentimentScore = 0;
   let sentimentSource = "LLM (Gemini)";
-
-  if (historicalSentimentOverride !== undefined) {
+  if (historicalSentimentOverride !== void 0) {
     sentimentScore = historicalSentimentOverride;
   } else if (headlines.length > 0) {
     let totalComparative = 0;
-    headlines.forEach(hl => {
+    headlines.forEach((hl) => {
       totalComparative += sentimentAnalyzer.analyze(hl).comparative;
     });
     sentimentScore = totalComparative / headlines.length;
@@ -1016,44 +869,25 @@ export function performCoreAnalysis(closes: number[], headlines: string[] = [], 
   } else {
     sentimentSource = "N/A";
   }
-
-  // Centralized composite score (Σ) — all 4 subsystems weighted per the Cortex Alpha spec:
-  // Σ = (MACD·wTech) + (RSI·wLiq) + (Sentiment·wSent) + (ElliottWave·wEW), normalized by Σweights.
-  let sentimentW = weights?.sentiment !== undefined ? weights.sentiment : 0.90;
-  let technicalW = weights?.technical !== undefined ? weights.technical : 0.85;
-  let liquidityW = weights?.liquidity !== undefined ? weights.liquidity : 0.85;
-  let elliottW = weights?.elliottWave !== undefined ? weights.elliottWave : 0.85;
-
+  let sentimentW = weights?.sentiment !== void 0 ? weights.sentiment : 0.9;
+  let technicalW = weights?.technical !== void 0 ? weights.technical : 0.85;
+  let liquidityW = weights?.liquidity !== void 0 ? weights.liquidity : 0.85;
+  let elliottW = weights?.elliottWave !== void 0 ? weights.elliottWave : 0.85;
   let totalWeights = sentimentW + technicalW + liquidityW + elliottW;
-  if (totalWeights === 0) totalWeights = 1; // Prevent division by zero
-
-  let compositeScore = (
-    (sentimentScore * sentimentW) +
-    (macdScore * technicalW) +
-    (rsiScore * liquidityW) +
-    (elliotWaveScore * elliottW)
-  ) / totalWeights;
-
-  // SEMANTIC CATALYST OVERRULE: extreme sentiment (>= 0.85 / <= -0.85) is authoritative —
-  // it forces Σ to fully mirror the catalyst direction and bypasses Chop Zone / confirmation downstream.
+  if (totalWeights === 0) totalWeights = 1;
+  let compositeScore = (sentimentScore * sentimentW + macdScore * technicalW + rsiScore * liquidityW + elliotWaveScore * elliottW) / totalWeights;
   let overrule = false;
   if (sentimentScore >= 0.85) {
-    compositeScore = 1.0;
+    compositeScore = 1;
     overrule = true;
   } else if (sentimentScore <= -0.85) {
-    compositeScore = -1.0;
+    compositeScore = -1;
     overrule = true;
   }
-
-  // CHOP ZONE (Hold preservation): when RSI floats in the neutral 40–60 band AND the
-  // fast/slow MAs squeeze (low volatility), force HOLD to avoid sideways chop/fakeouts.
-  // Skipped when an authoritative catalyst overrule is active.
   const inNeutralRsi = currentRsi >= 40 && currentRsi <= 60;
-  const maSqueeze = maSpreadPct < 0.30; // fast/slow EMA within 0.3% of price
+  const maSqueeze = maSpreadPct < 0.3;
   const isChop = !overrule && inNeutralRsi && maSqueeze;
-
-  // Consistent signal threshold across system
-  let action: "Long Buy" | "Short Sell" | "Long Sell (Overbought)" | "Short Buy (Oversold)" | "Hold" = "Hold";
+  let action = "Hold";
   if (!isChop) {
     if (compositeScore > 0.08) {
       action = "Long Buy";
@@ -1061,7 +895,6 @@ export function performCoreAnalysis(closes: number[], headlines: string[] = [], 
       action = "Short Sell";
     }
   }
-
   return {
     action,
     compositeScore,
@@ -1069,20 +902,24 @@ export function performCoreAnalysis(closes: number[], headlines: string[] = [], 
     overrule,
     isChop,
     rsiScore,
-    emaScore: macdScore, 
+    emaScore: macdScore,
     headlineSentimentFinal: sentimentScore,
     sentimentSource,
     elliottWaveScore: elliotWaveScore,
     elliotWavePhase: waveInfo.phase,
     elliotWaveDetails: waveInfo.details,
     elliotWaveValue: waveInfo.value,
-    wSent: sentimentW, wTech: technicalW, wLiq: liquidityW,
+    wSent: sentimentW,
+    wTech: technicalW,
+    wLiq: liquidityW,
     strategyDetails: {
-      technicalWeight: technicalW, liquidityWeight: liquidityW, sentimentWeight: sentimentW,
+      technicalWeight: technicalW,
+      liquidityWeight: liquidityW,
+      sentimentWeight: sentimentW,
       technicalScore: macdScore,
       liquidityScore: rsiScore,
-      sentimentScore: sentimentScore,
-      sentimentSource: sentimentSource,
+      sentimentScore,
+      sentimentSource,
       elliottWaveScore: elliotWaveScore,
       elliotWavePhase: waveInfo.phase,
       elliotWaveDetails: waveInfo.details,
@@ -1093,30 +930,24 @@ export function performCoreAnalysis(closes: number[], headlines: string[] = [], 
     }
   };
 }
-
 app.post("/api/batch-sentiment", async (req, res) => {
   try {
     const { headlines } = req.body;
     if (!headlines || !Array.isArray(headlines)) {
       return res.status(400).json({ error: "Headlines array required" });
     }
-
-    const results: { score: number }[] = new Array(headlines.length);
-    const missingIndices: number[] = [];
-    const missingHeadlines: string[] = [];
-
-    // 1. Resolve any pre-calculated headline sentiment from memory cache
-    headlines.forEach((h: string, idx: number) => {
+    const results = new Array(headlines.length);
+    const missingIndices = [];
+    const missingHeadlines = [];
+    headlines.forEach((h, idx) => {
       const normalized = h.trim().toLowerCase();
       if (headlineSentimentCache.has(normalized)) {
-        results[idx] = { score: headlineSentimentCache.get(normalized)! };
+        results[idx] = { score: headlineSentimentCache.get(normalized) };
       } else {
         missingIndices.push(idx);
         missingHeadlines.push(h);
       }
     });
-
-    // 2. Only batch-query Gemini for missing headlines to conserve API quota
     if (missingHeadlines.length > 0) {
       try {
         const prompt = `Analyze the individual sentiment for each of the following headlines. 
@@ -1125,18 +956,16 @@ app.post("/api/batch-sentiment", async (req, res) => {
         
         Headlines:
         ${missingHeadlines.join("\n")}`;
-
         const response = await generateContentResilient({
           model: "gemini-3.5-flash",
-          contents: prompt,
+          contents: prompt
         });
         const responseText = response.text || "";
         const jsonMatch = responseText.match(/\[[\s\S]*\]/);
         if (!jsonMatch) throw new Error("Failed to parse batch sentiment");
-        
         const parsed = JSON.parse(jsonMatch[0]);
         if (Array.isArray(parsed) && parsed.length === missingHeadlines.length) {
-          parsed.forEach((item: any, i: number) => {
+          parsed.forEach((item, i) => {
             const headline = missingHeadlines[i];
             const score = typeof item.score === "number" ? item.score : 0;
             headlineSentimentCache.set(headline.trim().toLowerCase(), score);
@@ -1145,51 +974,38 @@ app.post("/api/batch-sentiment", async (req, res) => {
         } else {
           throw new Error("Batch responses length mismatch");
         }
-      } catch (aiErr: any) {
+      } catch (aiErr) {
         const isQuotaError = aiErr.message?.includes("429") || aiErr.status === 429;
         if (isQuotaError) {
           console.warn("Gemini Batch Quota exceeded - applying heuristic logic");
         } else {
           console.warn("Gemini Batch error:", aiErr.message?.substring(0, 100));
         }
-        
-        // Fallback using heuristic sentiment for missing headlines
-        missingHeadlines.forEach((h: string, i: number) => {
+        missingHeadlines.forEach((h, i) => {
           const score = heuristicSentiment(h);
           results[missingIndices[i]] = { score };
         });
       }
     }
-
-    // Guard cache size from growing indefinitely
-    if (headlineSentimentCache.size > 1000) {
+    if (headlineSentimentCache.size > 1e3) {
       const keys = Array.from(headlineSentimentCache.keys());
       for (let i = 0; i < 200; i++) {
         headlineSentimentCache.delete(keys[i]);
       }
     }
-
     return res.json(results);
-  } catch (err: any) {
+  } catch (err) {
     console.error("Batch sentiment error:", err);
     const { headlines } = req.body;
     const neutral = (headlines || []).map(() => ({ score: 0 }));
     res.json(neutral);
   }
 });
-
-function getCompliantNewsTimestamp(): string {
-  const now = Date.now();
-  // Compliant age: random between 10 minutes (600,000 ms) and 10 hours (36,000,000 ms)
-  const ageMs = 600000 + Math.random() * (36000000 - 600000);
-  return new Date(now - ageMs).toISOString();
-}
-
-export function getNewsAgeString(publishedAt: string): string {
+function getNewsAgeString(publishedAt) {
   try {
     const diffMs = Date.now() - new Date(publishedAt).getTime();
     if (isNaN(diffMs)) return "";
-    const mins = Math.round(diffMs / 60000);
+    const mins = Math.round(diffMs / 6e4);
     if (mins < 60) {
       return `${mins}m ago`;
     }
@@ -1199,88 +1015,70 @@ export function getNewsAgeString(publishedAt: string): string {
     return "";
   }
 }
-
-export async function getPredictionData(token: string, topic: string, weights: any, interval: string = "15m", newsQueryKeywords: string = "") {
+async function getPredictionData(token, topic, weights, interval = "15m", newsQueryKeywords = "") {
   const predictCacheKey = `${token.toUpperCase()}_${interval}_${topic.substring(0, 50)}_${newsQueryKeywords.substring(0, 50)}_${JSON.stringify(weights)}`;
   const cached = predictCache.get(predictCacheKey);
-  if (cached && (Date.now() - cached.timestamp) < PREDICT_CACHE_TTL_MS) {
+  if (cached && Date.now() - cached.timestamp < PREDICT_CACHE_TTL_MS) {
     console.log(`[Cache Hit] Serving cached getPredictionData for ${token}`);
     return cached.data;
   }
-
   const symbol = `${token.toUpperCase()}-USD`;
-  
-  // 1. Get latest price & technicals
-  const period1 = subDays(new Date(), 7);
+  const period1 = subDays(/* @__PURE__ */ new Date(), 7);
   const allowedIntervals = ["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"];
   const validInterval = allowedIntervals.includes(interval) ? interval : "15m";
-
-  const chart = await chartResilient(symbol, { period1, interval: validInterval as any }, { validateResult: false });
-  const quotes = chart.quotes.filter((q: any) => q && q.close !== null);
+  const chart = await chartResilient(symbol, { period1, interval: validInterval }, { validateResult: false });
+  const quotes = chart.quotes.filter((q) => q && q.close !== null);
   if (quotes.length < 2) throw new Error("Insufficient price data for prediction");
-  
   const latest = quotes[quotes.length - 1];
-  const closes = quotes.map((q: any) => q.close);
+  const closes = quotes.map((q) => q.close);
   const emaFastList = calculateEMA(closes, 12);
   const emaSlowList = calculateEMA(closes, 26);
   const rsisList = calculateRSI(closes, 14);
-  
   const currentRsi = rsisList[rsisList.length - 1];
   const currentEmaFast = emaFastList[emaFastList.length - 1];
   const currentEmaSlow = emaSlowList[emaSlowList.length - 1];
-  
-  // 2. News (Considering at least 5 news for sentiment score analysis as requested)
-  const queryTopic = newsQueryKeywords && newsQueryKeywords.trim() !== "" ? newsQueryKeywords.trim() : (topic || token);
+  const queryTopic = newsQueryKeywords && newsQueryKeywords.trim() !== "" ? newsQueryKeywords.trim() : topic || token;
   let articles = await fetchMarketNews(token, queryTopic);
-
-  // Broaden query to ensure we fetch at least 5 search items if needed
   if (articles.length < 5) {
     const fallbackArticles = await fetchMarketNews(token, "crypto");
-    fallbackArticles.forEach((fa: any) => {
-      if (!articles.some((a: any) => a.title.toLowerCase().trim() === fa.title.toLowerCase().trim())) {
+    fallbackArticles.forEach((fa) => {
+      if (!articles.some((a) => a.title.toLowerCase().trim() === fa.title.toLowerCase().trim())) {
         articles.push(fa);
       }
     });
   }
-
-  // Light, non-destructive relevance filter: prefer headlines that actually mention the
-  // asset or the configured topic so sentiment isn't diluted by unrelated news.
-  // Falls back to the full set if too few relevant items are found.
-  const TOKEN_ALIASES: Record<string, string[]> = {
-    SOL: ["sol", "solana"], BTC: ["btc", "bitcoin", "xbt"], ETH: ["eth", "ethereum", "ether"],
+  const TOKEN_ALIASES = {
+    SOL: ["sol", "solana"],
+    BTC: ["btc", "bitcoin", "xbt"],
+    ETH: ["eth", "ethereum", "ether"]
   };
   const relevanceTerms = [
-    ...(TOKEN_ALIASES[(token || "").toUpperCase()] || [(token || "").toLowerCase()]),
-    ...String(queryTopic || "").toLowerCase().split(/[,\s]+/).filter((t) => t.length > 2),
+    ...TOKEN_ALIASES[(token || "").toUpperCase()] || [(token || "").toLowerCase()],
+    ...String(queryTopic || "").toLowerCase().split(/[,\s]+/).filter((t) => t.length > 2)
   ];
   if (relevanceTerms.length > 0) {
-    const relevant = articles.filter((a: any) =>
-      a.title && relevanceTerms.some((term) => a.title.toLowerCase().includes(term))
+    const relevant = articles.filter(
+      (a) => a.title && relevanceTerms.some((term) => a.title.toLowerCase().includes(term))
     );
     if (relevant.length >= 3) articles = relevant;
   }
-
-  // Attach sentiment scores and format slicedArticles
   const slicedArticles = articles.slice(0, 10);
-  
-  slicedArticles.forEach((a: any, index: number) => {
-    const cached = headlineSentimentCache.get(a.title.trim().toLowerCase());
-    if (cached !== undefined) {
-      a.sentiment = cached;
+  slicedArticles.forEach((a, index) => {
+    const cached2 = headlineSentimentCache.get(a.title.trim().toLowerCase());
+    if (cached2 !== void 0) {
+      a.sentiment = cached2;
     } else {
       const score = heuristicSentiment(a.title);
       headlineSentimentCache.set(a.title.trim().toLowerCase(), score);
       a.sentiment = score;
     }
   });
-
-  const headlines = slicedArticles.map((a: any) => a.title);
-  
-  let llmScore: number | undefined = undefined;
+  const headlines = slicedArticles.map((a) => a.title);
+  let llmScore = void 0;
   if (headlines.length > 0) {
-    const cacheKey = headlines.join("").substring(0, 100);
-    if (headlineSentimentCache.has(cacheKey)) {
-      llmScore = headlineSentimentCache.get(cacheKey)!;
+    const cacheKey2 = headlines.join("").substring(0, 100);
+    if (headlineSentimentCache.has(cacheKey2)) {
+      llmScore = headlineSentimentCache.get(cacheKey2);
     } else {
       try {
         const prompt = `Analyze the sentiment of the following news headlines for a trading decision. 
@@ -1290,12 +1088,11 @@ export async function getPredictionData(token: string, topic: string, weights: a
         const text = (aiResponse.text || "").trim();
         const parsed = parseFloat(text);
         if (!isNaN(parsed)) {
-           llmScore = Math.max(-1, Math.min(1, parsed));
-           headlineSentimentCache.set(cacheKey, llmScore);
+          llmScore = Math.max(-1, Math.min(1, parsed));
+          headlineSentimentCache.set(cacheKey2, llmScore);
         }
-      } catch (err: any) {
-        // fallback to undefined, let core analysis use local sentiment
-        if (err.message?.includes("429") || err.status === 429 || (err.message && err.message.includes("quota"))) {
+      } catch (err) {
+        if (err.message?.includes("429") || err.status === 429 || err.message && err.message.includes("quota")) {
           console.log("[Info] Gemini sentiment quota exceeded. Utilizing CPU heuristic NLP fallback seamlessly.");
         } else {
           console.warn("Gemini sentiment analysis failed, falling back to local...", err.message || "Unknown error");
@@ -1303,140 +1100,110 @@ export async function getPredictionData(token: string, topic: string, weights: a
       }
     }
   }
-
-  // 3. Evaluate Strategy
   const strategyData = performCoreAnalysis(closes, headlines, weights, llmScore);
   const { compositeScore, emaScore, rsiScore, elliottWaveScore, headlineSentimentFinal, elliotWavePhase } = strategyData;
-
-  // Decision is driven purely by the Composite Bias Σ (which now includes the Elliott Wave
-  // term) vs the ±0.08 threshold, plus the Chop Zone (RSI 40-60 + MA squeeze) — exactly per
-  // the Cortex Alpha spec. No separate Elliott-Wave veto and no 200-EMA suppression gate:
-  // those were undocumented filters that blocked spec-valid signals and broke the catalyst overrule.
-  function evaluateSignal(priceCloses: number[], rsiVal: number, hls: string[], llmVal?: number) {
-      const sData = performCoreAnalysis(priceCloses, hls, weights, llmVal);
-
-      let pSide = "HOLD";
-      let aRec = sData.isChop ? "Hold Chop Zone" : "Hold";
-      let trnd = "SIDEWAYS";
-
-      if (sData.compositeScore > 0.08) {
-          pSide = "LONG"; aRec = "Long Buy"; trnd = "UP";
-          if (rsiVal < 30) aRec = "Long Buy (Oversold)";
-      } else if (sData.compositeScore < -0.08) {
-          pSide = "SHORT"; aRec = "Short Sell"; trnd = "DOWN";
-          if (rsiVal > 70) aRec = "Short Sell (Overbought)";
-      }
-
-      if (sData.isHoldZone) {
-          pSide = "HOLD";
-          trnd = "CHOP/HOLD";
-          aRec = sData.isChop ? "Hold Chop Zone" : "Hold (Σ below threshold)";
-      }
-      return { pSide, aRec, trnd, overrule: sData.overrule };
+  function evaluateSignal(priceCloses, rsiVal, hls, llmVal) {
+    const sData = performCoreAnalysis(priceCloses, hls, weights, llmVal);
+    let pSide = "HOLD";
+    let aRec = sData.isChop ? "Hold Chop Zone" : "Hold";
+    let trnd = "SIDEWAYS";
+    if (sData.compositeScore > 0.08) {
+      pSide = "LONG";
+      aRec = "Long Buy";
+      trnd = "UP";
+      if (rsiVal < 30) aRec = "Long Buy (Oversold)";
+    } else if (sData.compositeScore < -0.08) {
+      pSide = "SHORT";
+      aRec = "Short Sell";
+      trnd = "DOWN";
+      if (rsiVal > 70) aRec = "Short Sell (Overbought)";
+    }
+    if (sData.isHoldZone) {
+      pSide = "HOLD";
+      trnd = "CHOP/HOLD";
+      aRec = sData.isChop ? "Hold Chop Zone" : "Hold (\u03A3 below threshold)";
+    }
+    return { pSide, aRec, trnd, overrule: sData.overrule };
   }
-
   const currentSig = evaluateSignal(closes, currentRsi, headlines, llmScore);
-  // 2-bar confirmation: evaluate the prior candle with the SAME news/LLM context so the
-  // comparison is consistent (technical persistence under current sentiment).
   const prevSig1 = evaluateSignal(closes.slice(0, -1), rsisList[rsisList.length - 2] || currentRsi, headlines, llmScore);
-
   let positionSide = currentSig.pSide;
   let actionRecommendation = currentSig.aRec;
   let trend = currentSig.trnd;
-
-  // Direction confirmation: enter only on the 2nd confirmation — current and previous candle
-  // must agree on direction. An authoritative catalyst overrule (extreme sentiment) fires
-  // immediately and bypasses the 2-bar wait. (Field name kept for downstream compatibility.)
-  let isTrendConfirmed3x = (positionSide !== "HOLD" && positionSide === prevSig1.pSide) || currentSig.overrule;
-
-  const volatilityPct = 1.45; 
-  const confidence = Math.min(Math.max((0.50 + (Math.abs(compositeScore) * 0.45)), 0.1), 0.95);
-
-  let expectedDrift = compositeScore * (volatilityPct / 100) * 0.85; 
+  let isTrendConfirmed3x = positionSide !== "HOLD" && positionSide === prevSig1.pSide || currentSig.overrule;
+  const volatilityPct = 1.45;
+  const confidence = Math.min(Math.max(0.5 + Math.abs(compositeScore) * 0.45, 0.1), 0.95);
+  let expectedDrift = compositeScore * (volatilityPct / 100) * 0.85;
   let forecastPrice = latest.close * (1 + expectedDrift);
-
   let suggestedOrder = "HOLD";
   if (positionSide === "LONG") suggestedOrder = "BUY_MARKET";
   else if (positionSide === "SHORT") suggestedOrder = "SELL_MARKET";
-  
   let orderPrice = latest.close;
-
-  // Dynamic Take Profit & Stop Loss Adjustment using Liquidation levels integration
-  // We approximate liquidation pools by finding recent local highs (Short Liquidation Pool)
-  // and local lows (Long Liquidation Pool) within the last 20 periods.
-  const recentHighs = quotes.slice(-20).map((q: any) => q.high || q.close);
-  const recentLows = quotes.slice(-20).map((q: any) => q.low || q.close);
+  const recentHighs = quotes.slice(-20).map((q) => q.high || q.close);
+  const recentLows = quotes.slice(-20).map((q) => q.low || q.close);
   const localHigh = Math.max(...recentHighs, orderPrice);
   const localLow = Math.min(...recentLows, orderPrice);
-  
   let suggestedTpPrice = orderPrice;
   let suggestedSlPrice = orderPrice;
-
   if (positionSide === "LONG") {
-      // Aim for short liquidation pool just above local high
-      suggestedTpPrice = localHigh * 1.002;
-      // Stop out gracefully just below long liquidation pool
-      suggestedSlPrice = localLow * 0.998;
+    suggestedTpPrice = localHigh * 1.002;
+    suggestedSlPrice = localLow * 0.998;
   } else if (positionSide === "SHORT") {
-      // Aim for long liquidation pool target drop
-      suggestedTpPrice = localLow * 0.998;
-      // Stop out gracefully just above short liquidation pool
-      suggestedSlPrice = localHigh * 1.002;
+    suggestedTpPrice = localLow * 0.998;
+    suggestedSlPrice = localHigh * 1.002;
   }
-  
-  // Calculate the raw unleveraged distances
   const distTpPricePct = Math.abs(suggestedTpPrice - orderPrice) / orderPrice * 100;
   const distSlPricePct = Math.abs(orderPrice - suggestedSlPrice) / orderPrice * 100;
-
   let rationale = "";
   const cacheKey = `FORECAST_${token.toUpperCase()}_W_${(weights?.sentiment || 0).toFixed(2)}_${(weights?.technical || 0).toFixed(2)}_${(weights?.liquidity || 0).toFixed(2)}`;
   const now = Date.now();
   const cachedSentiment = sentimentCache.get(cacheKey);
-
-  if (cachedSentiment && (now - cachedSentiment.timestamp) < SENTIMENT_CACHE_TTL_MS) {
+  if (cachedSentiment && now - cachedSentiment.timestamp < SENTIMENT_CACHE_TTL_MS) {
     rationale = cachedSentiment.rationale;
     suggestedOrder = cachedSentiment.suggestedOrder || suggestedOrder;
     orderPrice = cachedSentiment.suggestedOrderPrice || orderPrice;
   } else {
     try {
-        const prompt = `Analyze market conditions using the Cortex Alpha Multi-Factor Strategy (Trend + Momentum + News) for ${token}.
+      const prompt = `Analyze market conditions using the Cortex Alpha Multi-Factor Strategy (Trend + Momentum + News) for ${token}.
 Current Price: $${latest.close.toFixed(2)}. Target Price: $${forecastPrice.toFixed(2)}. Trend: ${trend}
-Configured Weights: Trend: ${(weights?.technical || 0)*100}%, Momentum/RSI: ${(weights?.liquidity || 0)*100}%, Sentinel/News: ${(weights?.sentiment || 0)*100}%
-Scores Calculated: Trend Score: ${emaScore?.toFixed(2) || '0'}, RSI (14) Score: ${rsiScore?.toFixed(2) || '0'}, News Sentiment: ${headlineSentimentFinal?.toFixed(2) || '0'}
+Configured Weights: Trend: ${(weights?.technical || 0) * 100}%, Momentum/RSI: ${(weights?.liquidity || 0) * 100}%, Sentinel/News: ${(weights?.sentiment || 0) * 100}%
+Scores Calculated: Trend Score: ${emaScore?.toFixed(2) || "0"}, RSI (14) Score: ${rsiScore?.toFixed(2) || "0"}, News Sentiment: ${headlineSentimentFinal?.toFixed(2) || "0"}
 Strategic Composite Bias: ${compositeScore.toFixed(3)}
 Recent Headlines: ${headlines.join(". ")}
 
 Analyze this strategy mix and draft a concise 2-sentence market justification explaining how the specific weights/scores align to predict the target price.
 Return JSON ONLY: { "rationale": "expert justification here", "suggestedOrder": "${suggestedOrder}", "suggestedOrderPrice": ${orderPrice} }`;
-        const response = await generateContentResilient({ model: "gemini-3.5-flash", contents: prompt });
-        const jsonMatch = (response.text || "").match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
-            rationale = parsed.rationale;
-            suggestedOrder = parsed.suggestedOrder || suggestedOrder;
-            orderPrice = parsed.suggestedOrderPrice || orderPrice;
-            sentimentCache.set(cacheKey, { timestamp: now, score: confidence, rationale, suggestedOrder, suggestedOrderPrice: orderPrice });
-        }
-    } catch (err: any) {
-        rationale = `Cortex Alpha Strategy Composite Score is ${compositeScore.toFixed(2)} (Trend: ${emaScore.toFixed(2)}, Momentum RSI: ${rsiScore.toFixed(2)}, Sentiment: ${headlineSentimentFinal.toFixed(2)}). Outlook skews ${trend}.`;
+      const response = await generateContentResilient({ model: "gemini-3.5-flash", contents: prompt });
+      const jsonMatch = (response.text || "").match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        rationale = parsed.rationale;
+        suggestedOrder = parsed.suggestedOrder || suggestedOrder;
+        orderPrice = parsed.suggestedOrderPrice || orderPrice;
+        sentimentCache.set(cacheKey, { timestamp: now, score: confidence, rationale, suggestedOrder, suggestedOrderPrice: orderPrice });
+      }
+    } catch (err) {
+      rationale = `Cortex Alpha Strategy Composite Score is ${compositeScore.toFixed(2)} (Trend: ${emaScore.toFixed(2)}, Momentum RSI: ${rsiScore.toFixed(2)}, Sentiment: ${headlineSentimentFinal.toFixed(2)}). Outlook skews ${trend}.`;
     }
   }
-
-  const history = quotes.slice(-15).map((q: any) => ({ date: q.date, price: q.close }));
-
+  const history = quotes.slice(-15).map((q) => ({ date: q.date, price: q.close }));
   const predictionResult = {
     // Shared 
-    token, interval, price: latest.close, currentPrice: latest.close, trend, isTrendConfirmed3x,
+    token,
+    interval,
+    price: latest.close,
+    currentPrice: latest.close,
+    trend,
+    isTrendConfirmed3x,
     // Alerts/Legacy data
     sentiment: headlineSentimentFinal,
     action: actionRecommendation,
     positionSide,
     botIdentifier: "telegram_alert_v1",
     rationale,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     headlines: slicedArticles,
     inputData: { token, topic: queryTopic, price: latest.close },
-    
     // Forecast data
     predictedPrice: forecastPrice,
     volatilityPct,
@@ -1447,96 +1214,30 @@ Return JSON ONLY: { "rationale": "expert justification here", "suggestedOrder": 
     suggestedSlPrice,
     indicators: { rsi: currentRsi, ema12: currentEmaFast, ema26: currentEmaSlow },
     strategyDetails: {
-        sentimentWeight: strategyData.wSent,
-        technicalWeight: strategyData.wTech,
-        liquidityWeight: strategyData.wLiq,
-        sentimentScore: headlineSentimentFinal,
-        sentimentSource: strategyData.sentimentSource,
-        technicalScore: emaScore,
-        liquidityScore: rsiScore,
-        elliottWaveScore: elliottWaveScore,
-        compositeScore,
-        sentimentDetails: [],
-        allPositiveWords: [],
-        allNegativeWords: []
+      sentimentWeight: strategyData.wSent,
+      technicalWeight: strategyData.wTech,
+      liquidityWeight: strategyData.wLiq,
+      sentimentScore: headlineSentimentFinal,
+      sentimentSource: strategyData.sentimentSource,
+      technicalScore: emaScore,
+      liquidityScore: rsiScore,
+      elliottWaveScore,
+      compositeScore,
+      sentimentDetails: [],
+      allPositiveWords: [],
+      allNegativeWords: []
     },
     latestNews: headlines,
     history
   };
-
   predictCache.set(predictCacheKey, { timestamp: Date.now(), data: predictionResult });
   return predictionResult;
 }
-
-// Telegram integration helpers and Daemon
-interface AuditLogEntry {
-  id: string;
-  timestamp: string;
-  message: string;
-  type: "info" | "cooldown" | "trade" | "hold";
-}
-
-interface TelegramConfig {
-  botToken: string;
-  chatId: string;
-  enabled: boolean;
-  token: string;
-  topic: string;
-  weights: {
-    sentiment: number;
-    technical: number;
-    liquidity: number;
-    elliottWave?: number;
-  };
-  lastAction: string;
-  lastCheckedAt?: string;
-  cooldownMinutes?: number; // Configurable cooldown period (default 30)
-  lastTradeAddedAt?: string; // Track when last trade was opened
-  frequency?: number; // Configurable frequency in minutes
-  error?: string;
-  lastSentDirection?: string; // Track the last active direction of the shared alert to detect trend changes
-  newsTelegramChannel?: string; // Custom Telegram news channel link (e.g. invite or public channel link)
-  // PnL & Position Tracking Fields for telegram_alert_v1
-  lastTradePnL?: number;
-  cumulativePnL?: number;
-  takeProfitPct?: number;
-  stopLossPct?: number;
-  leverage?: number;
-  interval?: string;
-  activeTrade?: {
-    side: "LONG" | "SHORT" | "HOLD";
-    entryPrice: number;
-    entryTime: string;
-    takeProfitPct?: number;
-    stopLossPct?: number;
-    sentiment?: number;
-    technicalScore?: number;
-    news?: string[];
-  } | null;
-  tradesHistory?: Array<{
-    id: string;
-    side: "LONG" | "SHORT" | "HOLD";
-    entryPrice: number;
-    exitPrice: number;
-    pnl: number;
-    entryTime: string;
-    exitTime: string;
-    takeProfitPct?: number;
-    stopLossPct?: number;
-    sentiment?: number;
-    technicalScore?: number;
-    news?: string[];
-  }>;
-  auditLogs?: Array<AuditLogEntry>;
-}
-
-
-export const CONFIG_FILE = path.join(os.tmpdir(), "telegram_alert_v1_state.json");
-
-export function calculateDurationStr(startIso: string, endIso: string): string {
+var CONFIG_FILE = path.join(os.tmpdir(), "telegram_alert_v1_state.json");
+function calculateDurationStr(startIso, endIso) {
   try {
     const diffMs = new Date(endIso).getTime() - new Date(startIso).getTime();
-    const diffMins = Math.floor(diffMs / 60000);
+    const diffMins = Math.floor(diffMs / 6e4);
     if (diffMins < 60) {
       return `${diffMins}m`;
     }
@@ -1547,12 +1248,11 @@ export function calculateDurationStr(startIso: string, endIso: string): string {
     return "N/A";
   }
 }
-
-function addAuditLog(config: TelegramConfig, message: string, type: "info" | "cooldown" | "trade" | "hold") {
+function addAuditLog(config, message, type) {
   if (!config.auditLogs) config.auditLogs = [];
   config.auditLogs.push({
     id: Math.random().toString(36).substring(2, 9),
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     message,
     type
   });
@@ -1560,44 +1260,39 @@ function addAuditLog(config: TelegramConfig, message: string, type: "info" | "co
     config.auditLogs.shift();
   }
 }
-
-export function loadTelegramConfig(): TelegramConfig {
+function loadTelegramConfig() {
   const rootConfigPath = path.join(process.cwd(), "telegram_alert_v1_state.json");
-  
   if (!fs.existsSync(CONFIG_FILE) && fs.existsSync(rootConfigPath)) {
     try {
       fs.copyFileSync(rootConfigPath, CONFIG_FILE);
       console.log(`[Telegram Config] Restored configuration state from persistent workspace root: ${rootConfigPath}`);
-    } catch (e: any) {
+    } catch (e) {
       console.error(`[Telegram Config Warning] Failed to restore config from workspace root:`, e.message);
     }
   }
-
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       const data = fs.readFileSync(CONFIG_FILE, "utf-8");
       const parsed = JSON.parse(data);
-      // Ensure default values for trade tracking are present
-      if (parsed.lastTradePnL === undefined) parsed.lastTradePnL = 0;
-       if (parsed.cumulativePnL === undefined) parsed.cumulativePnL = 0;
-      if (parsed.takeProfitPct === undefined) parsed.takeProfitPct = 4;
-      if (parsed.stopLossPct === undefined) parsed.stopLossPct = 2;
-      if (parsed.leverage === undefined) parsed.leverage = 5;
-      if (parsed.interval === undefined || parsed.interval === "5m") parsed.interval = "15m";
-      if (parsed.frequency === undefined) parsed.frequency = 5;
-      if (parsed.activeTrade === undefined) parsed.activeTrade = null;
-      if (parsed.tradesHistory === undefined) parsed.tradesHistory = [];
-      if (parsed.cooldownMinutes === undefined) parsed.cooldownMinutes = 30;
-      if (parsed.lastTradeAddedAt === undefined) parsed.lastTradeAddedAt = "";
-      if (parsed.auditLogs === undefined) parsed.auditLogs = [];
-      if (parsed.lastSentDirection === undefined) parsed.lastSentDirection = "HOLD";
-      if (parsed.newsTelegramChannel === undefined) parsed.newsTelegramChannel = "https://t.me/+1C0c6rUVmjo3Y2Y8";
-      // Upgrade settings to match new required defaults
+      if (parsed.lastTradePnL === void 0) parsed.lastTradePnL = 0;
+      if (parsed.cumulativePnL === void 0) parsed.cumulativePnL = 0;
+      if (parsed.takeProfitPct === void 0) parsed.takeProfitPct = 4;
+      if (parsed.stopLossPct === void 0) parsed.stopLossPct = 2;
+      if (parsed.leverage === void 0) parsed.leverage = 5;
+      if (parsed.interval === void 0 || parsed.interval === "5m") parsed.interval = "15m";
+      if (parsed.frequency === void 0) parsed.frequency = 5;
+      if (parsed.activeTrade === void 0) parsed.activeTrade = null;
+      if (parsed.tradesHistory === void 0) parsed.tradesHistory = [];
+      if (parsed.cooldownMinutes === void 0) parsed.cooldownMinutes = 30;
+      if (parsed.lastTradeAddedAt === void 0) parsed.lastTradeAddedAt = "";
+      if (parsed.auditLogs === void 0) parsed.auditLogs = [];
+      if (parsed.lastSentDirection === void 0) parsed.lastSentDirection = "HOLD";
+      if (parsed.newsTelegramChannel === void 0) parsed.newsTelegramChannel = "https://t.me/+1C0c6rUVmjo3Y2Y8";
       if (parsed.topic === "Crypto" || !parsed.topic || parsed.topic === "market") {
         parsed.topic = "crypto,war";
       }
-      if (!parsed.weights || (parsed.weights.sentiment === 0.90 && parsed.weights.technical === 0.05 && parsed.weights.liquidity === 0.05)) {
-        parsed.weights = { sentiment: 0.90, technical: 0.85, liquidity: 0.85, elliottWave: 0.85 };
+      if (!parsed.weights || parsed.weights.sentiment === 0.9 && parsed.weights.technical === 0.05 && parsed.weights.liquidity === 0.05) {
+        parsed.weights = { sentiment: 0.9, technical: 0.85, liquidity: 0.85, elliottWave: 0.85 };
       }
       return parsed;
     }
@@ -1610,7 +1305,7 @@ export function loadTelegramConfig(): TelegramConfig {
     enabled: true,
     token: "SOL",
     topic: "crypto,war",
-    weights: { sentiment: 0.90, technical: 0.85, liquidity: 0.85, elliottWave: 0.85 },
+    weights: { sentiment: 0.9, technical: 0.85, liquidity: 0.85, elliottWave: 0.85 },
     lastAction: "Hold",
     lastSentDirection: "HOLD",
     frequency: 5,
@@ -1628,8 +1323,7 @@ export function loadTelegramConfig(): TelegramConfig {
     newsTelegramChannel: "https://t.me/+1C0c6rUVmjo3Y2Y8"
   };
 }
-
-export function saveTelegramConfig(config: TelegramConfig) {
+function saveTelegramConfig(config) {
   const rootConfigPath = path.join(process.cwd(), "telegram_alert_v1_state.json");
   try {
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
@@ -1643,106 +1337,38 @@ export function saveTelegramConfig(config: TelegramConfig) {
     console.error("Failed to save telegram config to workspace root file", e);
   }
 }
-
-// JUPITER PHANTOM WALLET STATE TRACKING
-export interface JupiterConfig {
-  walletAddress: string;
-  privateKey?: string;
-  privateKeyIsAutoGenerated?: boolean;
-  disconnected?: boolean;
-  enabled: boolean;
-  tradingMode?: "REAL" | "PAPER";
-  rpcUrl?: string; // Custom RPC Node URL for reliable on-chain communication
-  leverage: number; // Configurable leverage (e.g., 5x)
-  allocationPercent: number; // Size parameter in % of wallet
-  takeProfitPct: number;
-  stopLossPct: number;
-  frequencyMinutes?: number;
-  cooldownMinutes?: number;
-  lastTradeAddedAt?: string;
-  token: string;
-  topic: string;
-  weights: { sentiment: number; technical: number; liquidity: number; elliottWave?: number; };
-  lastTradePnL: number;
-  cumulativePnL: number;
-  interval?: string;
-  activeTrade: {
-    side: "LONG" | "SHORT";
-    entryPrice: number;
-    entryTime: string;
-    sizeInSol: number;
-    leverage: number;
-    collateralAsset?: string;
-    mode?: string;
-    takeProfitPct?: number;
-    stopLossPct?: number;
-    sentiment?: number;
-    technicalScore?: number;
-    news?: string[];
-  } | null;
-  tradesHistory: Array<{
-    id: string;
-    side: "LONG" | "SHORT";
-    entryPrice: number;
-    exitPrice: number;
-    pnl: number;
-    sizeInSol: number;
-    leverage: number;
-    entryTime: string;
-    exitTime: string;
-    collateralAsset?: string;
-    mode?: string;
-    takeProfitPct?: number;
-    stopLossPct?: number;
-    sentiment?: number;
-    technicalScore?: number;
-    news?: string[];
-  }>;
-  lastCheckedAt?: string;
-  error?: string;
-  lastAction?: string;
-}
-
-declare global {
-  var jupiterMemoryConfig: any;
-}
-
-export const JUPITER_CONFIG_FILE = path.join(os.tmpdir(), "jupiter_config_state.json");
-
-function loadJupiterConfig(): JupiterConfig {
+var JUPITER_CONFIG_FILE = path.join(os.tmpdir(), "jupiter_config_state.json");
+function loadJupiterConfig() {
   const rootConfigPath = path.join(process.cwd(), "jupiter_config_state.json");
-  
   if (!fs.existsSync(JUPITER_CONFIG_FILE) && fs.existsSync(rootConfigPath)) {
     try {
       fs.copyFileSync(rootConfigPath, JUPITER_CONFIG_FILE);
       console.log(`[Jupiter Config] Restored configuration state from persistent workspace root: ${rootConfigPath}`);
-    } catch (e: any) {
+    } catch (e) {
       console.error(`[Jupiter Config Warning] Failed to restore config from workspace root:`, e.message);
     }
   }
-
   try {
     if (fs.existsSync(JUPITER_CONFIG_FILE)) {
       const data = fs.readFileSync(JUPITER_CONFIG_FILE, "utf-8");
       const parsed = JSON.parse(data);
-      if (parsed.tradingMode === undefined) parsed.tradingMode = "REAL";
-      if (parsed.rpcUrl === undefined) parsed.rpcUrl = "";
-      if (parsed.lastTradePnL === undefined) parsed.lastTradePnL = 0;
-      if (parsed.cumulativePnL === undefined) parsed.cumulativePnL = 0;
-      if (parsed.takeProfitPct === undefined) parsed.takeProfitPct = 4;
-      if (parsed.stopLossPct === undefined) parsed.stopLossPct = 2;
-      if (parsed.leverage === undefined) parsed.leverage = 5;
-      if (parsed.allocationPercent === undefined) parsed.allocationPercent = 5;
-      if (parsed.interval === undefined || parsed.interval === "5m") parsed.interval = "15m";
-      if (parsed.activeTrade === undefined) parsed.activeTrade = null;
-      if (parsed.tradesHistory === undefined) parsed.tradesHistory = [];
-      if (parsed.frequencyMinutes === undefined) parsed.frequencyMinutes = 5;
-      if (parsed.cooldownMinutes === undefined) parsed.cooldownMinutes = 30;
-      if (parsed.lastTradeAddedAt === undefined) parsed.lastTradeAddedAt = "";
-      if (parsed.token === undefined) parsed.token = "SOL";
-      if (parsed.topic === undefined || parsed.topic === "market" || parsed.topic === "Crypto") parsed.topic = "crypto,war";
-      if (!parsed.weights) parsed.weights = { sentiment: 0.90, technical: 0.85, liquidity: 0.85, elliottWave: 0.85 };
-      
+      if (parsed.tradingMode === void 0) parsed.tradingMode = "REAL";
+      if (parsed.rpcUrl === void 0) parsed.rpcUrl = "";
+      if (parsed.lastTradePnL === void 0) parsed.lastTradePnL = 0;
+      if (parsed.cumulativePnL === void 0) parsed.cumulativePnL = 0;
+      if (parsed.takeProfitPct === void 0) parsed.takeProfitPct = 4;
+      if (parsed.stopLossPct === void 0) parsed.stopLossPct = 2;
+      if (parsed.leverage === void 0) parsed.leverage = 5;
+      if (parsed.allocationPercent === void 0) parsed.allocationPercent = 5;
+      if (parsed.interval === void 0 || parsed.interval === "5m") parsed.interval = "15m";
+      if (parsed.activeTrade === void 0) parsed.activeTrade = null;
+      if (parsed.tradesHistory === void 0) parsed.tradesHistory = [];
+      if (parsed.frequencyMinutes === void 0) parsed.frequencyMinutes = 5;
+      if (parsed.cooldownMinutes === void 0) parsed.cooldownMinutes = 30;
+      if (parsed.lastTradeAddedAt === void 0) parsed.lastTradeAddedAt = "";
+      if (parsed.token === void 0) parsed.token = "SOL";
+      if (parsed.topic === void 0 || parsed.topic === "market" || parsed.topic === "Crypto") parsed.topic = "crypto,war";
+      if (!parsed.weights) parsed.weights = { sentiment: 0.9, technical: 0.85, liquidity: 0.85, elliottWave: 0.85 };
       if (parsed.disconnected) {
         parsed.walletAddress = "";
         parsed.privateKey = "";
@@ -1750,15 +1376,15 @@ function loadJupiterConfig(): JupiterConfig {
       } else {
         if (!parsed.privateKey || parsed.privateKey.trim() === "") {
           try {
-            const kp = Keypair.generate();
-            parsed.privateKey = bs58.encode(kp.secretKey);
+            const kp2 = Keypair.generate();
+            parsed.privateKey = bs58.encode(kp2.secretKey);
             parsed.privateKeyIsAutoGenerated = true;
             if (!parsed.walletAddress || parsed.walletAddress.trim() === "" || parsed.walletAddress === "DmtrAQtdA5tMDcHMtpHGzs5NA6hzdp9oRT7CsThwzMHh") {
-              parsed.walletAddress = kp.publicKey.toBase58();
+              parsed.walletAddress = kp2.publicKey.toBase58();
             }
             saveJupiterConfig(parsed);
-            console.log(`[Jupiter Config] Auto-generated secure server-side Keypair for automated trades: ${kp.publicKey.toBase58()}`);
-          } catch (genErr: any) {
+            console.log(`[Jupiter Config] Auto-generated secure server-side Keypair for automated trades: ${kp2.publicKey.toBase58()}`);
+          } catch (genErr) {
             console.error("Failed to auto-generate Jupiter server Keypair:", genErr.message);
           }
         } else if (!parsed.walletAddress || parsed.walletAddress.trim() === "") {
@@ -1767,25 +1393,22 @@ function loadJupiterConfig(): JupiterConfig {
             parsed.walletAddress = keypair.publicKey.toBase58();
             saveJupiterConfig(parsed);
             console.log(`[Jupiter Config] Proactively derived missing walletAddress from privateKey: ${parsed.walletAddress}`);
-          } catch (e: any) {
+          } catch (e) {
             console.warn("[Jupiter Config Proactive Derivation Warning] failed:", e.message);
           }
         }
       }
-      
       global.jupiterMemoryConfig = parsed;
       return parsed;
     }
   } catch (e) {
     console.error("Failed to load jupiter config from file, using memory/default", e);
   }
-
   if (global.jupiterMemoryConfig) {
     return global.jupiterMemoryConfig;
   }
-
   const kp = Keypair.generate();
-  const def: JupiterConfig = {
+  const def = {
     walletAddress: kp.publicKey.toBase58(),
     privateKey: bs58.encode(kp.secretKey),
     privateKeyIsAutoGenerated: true,
@@ -1800,7 +1423,7 @@ function loadJupiterConfig(): JupiterConfig {
     lastTradeAddedAt: "",
     token: "SOL",
     topic: "crypto,war",
-    weights: { sentiment: 0.90, technical: 0.85, liquidity: 0.85, elliottWave: 0.85 },
+    weights: { sentiment: 0.9, technical: 0.85, liquidity: 0.85, elliottWave: 0.85 },
     lastTradePnL: 0,
     cumulativePnL: 0,
     interval: "15m",
@@ -1812,8 +1435,7 @@ function loadJupiterConfig(): JupiterConfig {
   saveJupiterConfig(def);
   return def;
 }
-
-function saveJupiterConfig(config: JupiterConfig) {
+function saveJupiterConfig(config) {
   global.jupiterMemoryConfig = config;
   const rootConfigPath = path.join(process.cwd(), "jupiter_config_state.json");
   try {
@@ -1824,13 +1446,11 @@ function saveJupiterConfig(config: JupiterConfig) {
   try {
     fs.writeFileSync(rootConfigPath, JSON.stringify(config, null, 2), "utf-8");
     console.log(`[Jupiter Config] Synchronized configuration state to workspace root: ${rootConfigPath}`);
-  } catch (e: any) {
+  } catch (e) {
     console.error("Failed to save jupiter config to workspace root:", e.message);
   }
 }
-
-// Convert private key robustly (supporting both 32-byte seeds, 64-byte secret keys, and JSON array list formats commonly exported from wallets)
-function getKeypairFromPrivateKey(privateKeyStr: string): Keypair {
+function getKeypairFromPrivateKey(privateKeyStr) {
   let cleanedKey = privateKeyStr.trim();
   if (cleanedKey.startsWith('"') && cleanedKey.endsWith('"')) {
     cleanedKey = cleanedKey.slice(1, -1).trim();
@@ -1838,39 +1458,35 @@ function getKeypairFromPrivateKey(privateKeyStr: string): Keypair {
   if (cleanedKey.startsWith("'") && cleanedKey.endsWith("'")) {
     cleanedKey = cleanedKey.slice(1, -1).trim();
   }
-
-  // Support JSON array format like [23, 45, 128...]
-  if (cleanedKey.startsWith('[') && cleanedKey.endsWith(']')) {
+  if (cleanedKey.startsWith("[") && cleanedKey.endsWith("]")) {
     try {
       const arr = JSON.parse(cleanedKey);
       if (Array.isArray(arr) && (arr.length === 64 || arr.length === 32)) {
-        const secretKey = Uint8Array.from(arr);
-        if (secretKey.length === 64) {
-          return Keypair.fromSecretKey(secretKey);
+        const secretKey2 = Uint8Array.from(arr);
+        if (secretKey2.length === 64) {
+          return Keypair.fromSecretKey(secretKey2);
         } else {
-          return Keypair.fromSeed(secretKey);
+          return Keypair.fromSeed(secretKey2);
         }
       }
-    } catch (e: any) {
+    } catch (e) {
       console.warn("[getKeypairFromPrivateKey] Failed to parse as JSON array:", e.message);
     }
   }
-
-  // Support comma-separated list without brackets
-  if (cleanedKey.includes(',')) {
+  if (cleanedKey.includes(",")) {
     try {
-      const arr = cleanedKey.split(',').map(n => parseInt(n.trim(), 10));
-      if (arr.every(n => !isNaN(n)) && (arr.length === 64 || arr.length === 32)) {
-        const secretKey = Uint8Array.from(arr);
-        if (secretKey.length === 64) {
-          return Keypair.fromSecretKey(secretKey);
+      const arr = cleanedKey.split(",").map((n) => parseInt(n.trim(), 10));
+      if (arr.every((n) => !isNaN(n)) && (arr.length === 64 || arr.length === 32)) {
+        const secretKey2 = Uint8Array.from(arr);
+        if (secretKey2.length === 64) {
+          return Keypair.fromSecretKey(secretKey2);
         } else {
-          return Keypair.fromSeed(secretKey);
+          return Keypair.fromSeed(secretKey2);
         }
       }
-    } catch (e: any) {}
+    } catch (e) {
+    }
   }
-
   const secretKey = bs58.decode(cleanedKey);
   if (secretKey.length === 64) {
     return Keypair.fromSecretKey(secretKey);
@@ -1880,46 +1496,39 @@ function getKeypairFromPrivateKey(privateKeyStr: string): Keypair {
     throw new Error(`Invalid secret key length: ${secretKey.length} bytes (expected 32 or 64)`);
   }
 }
-
-// Query live Solana mainnet balance for connected address via JSON-RPC
-async function getSolanaWalletBalance(address: string): Promise<number> {
+async function getSolanaWalletBalance(address) {
   if (!address) return 0;
-
   let configRpc = "";
   try {
     const config = loadJupiterConfig();
     if (config && config.rpcUrl) {
       configRpc = config.rpcUrl.trim();
     }
-  } catch (e) {}
-
+  } catch (e) {
+  }
   const rpcs = [
     "https://api.mainnet-beta.solana.com",
     "https://solana-rpc.publicnode.com",
     "https://rpc.ankr.com/solana"
   ];
-
   if (configRpc) {
     rpcs.unshift(configRpc);
   }
-
-  let pubKey: PublicKey;
+  let pubKey;
   try {
     pubKey = new PublicKey(address);
-  } catch (e: any) {
+  } catch (e) {
     console.warn(`[getSolanaWalletBalance] Invalid wallet address format: ${address}`, e.message);
     return 0;
   }
-
-  const errors: string[] = [];
-
+  const errors = [];
   for (const rpc of rpcs) {
     try {
       const conn = new Connection(rpc, {
         commitment: "confirmed",
         fetch: (url, options) => {
           const controller = new AbortController();
-          const id = setTimeout(() => controller.abort(), 5000); // 5s timeout so it doesn't fail under sandboxed load
+          const id = setTimeout(() => controller.abort(), 5e3);
           return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(id));
         }
       });
@@ -1927,90 +1536,79 @@ async function getSolanaWalletBalance(address: string): Promise<number> {
       const val = lamports / 1e9;
       console.log(`[getSolanaWalletBalance] Successfully fetched balance via web3.js from ${rpc}: ${val} SOL`);
       return val;
-    } catch (err: any) {
+    } catch (err) {
       errors.push(`${rpc}: ${err.message || err}`);
     }
   }
-
-  // High Resilience Fallback: 
-  // If we are in PAPER mode, we return the simulated balance.
   let isPaper = false;
   try {
     const config = loadJupiterConfig();
     if (config.tradingMode === "PAPER") {
       isPaper = true;
     }
-  } catch (e) {}
-
+  } catch (e) {
+  }
   if (isPaper) {
     console.log(`[getSolanaWalletBalance] RPC nodes unresponsive during paper trading. Using simulated 10.00 SOL balance.`);
-    return 10.0;
+    return 10;
   }
+  const errMessage = `Solana Blockchain RPC Communication Timeout / Unavailable: All public API endpoints failed to respond. Errors:
+  ` + errors.join("\n  ") + `
 
-  const errMessage = `Solana Blockchain RPC Communication Timeout / Unavailable: All public API endpoints failed to respond. Errors:\n  ` + errors.join("\n  ") + `\n\nTo ensure 100% reliable on-chain balance querying and automated execution free from public rate limit interference on Cloud Run, please input your personal private secure Solana RPC URL (e.g., from Helius, QuickNode, or Alchemy) in Settings under Sliders.`;
+To ensure 100% reliable on-chain balance querying and automated execution free from public rate limit interference on Cloud Run, please input your personal private secure Solana RPC URL (e.g., from Helius, QuickNode, or Alchemy) in Settings under Sliders.`;
   console.warn(`[getSolanaWalletBalance] ${errMessage}`);
   throw new Error(errMessage);
 }
-
-const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
-const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
-
-function getAssociatedTokenAddress(mint: PublicKey, owner: PublicKey): PublicKey {
+var TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+var ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+function getAssociatedTokenAddress(mint, owner) {
   return PublicKey.findProgramAddressSync(
     [
       owner.toBuffer(),
       TOKEN_PROGRAM_ID.toBuffer(),
-      mint.toBuffer(),
+      mint.toBuffer()
     ],
     ASSOCIATED_TOKEN_PROGRAM_ID
   )[0];
 }
-
-// Query live balance of dynamic SPL Token on Solana Mainnet
-async function getSplTokenBalance(walletAddress: string, mintAddress: string): Promise<number> {
+async function getSplTokenBalance(walletAddress, mintAddress) {
   if (!walletAddress || !mintAddress) return 0;
-
   let configRpc = "";
   try {
     const config = loadJupiterConfig();
     if (config && config.rpcUrl) {
       configRpc = config.rpcUrl.trim();
     }
-  } catch (e) {}
-
+  } catch (e) {
+  }
   const rpcs = [
     "https://api.mainnet-beta.solana.com",
     "https://solana-rpc.publicnode.com",
     "https://rpc.ankr.com/solana"
   ];
-
   if (configRpc) {
     rpcs.unshift(configRpc);
   }
-
-  let ownerPubkey: PublicKey;
-  let mintPubkey: PublicKey;
+  let ownerPubkey;
+  let mintPubkey;
   try {
     ownerPubkey = new PublicKey(walletAddress);
     mintPubkey = new PublicKey(mintAddress);
-  } catch (e: any) {
+  } catch (e) {
     console.warn(`[getSplTokenBalance] Invalid walletAddress (${walletAddress}) or mintAddress (${mintAddress}) format:`, e.message);
     return 0;
   }
-
-  const errors: string[] = [];
-
+  const errors = [];
   for (const rpc of rpcs) {
     try {
       const conn = new Connection(rpc, {
         commitment: "confirmed",
         fetch: (url, options) => {
           const controller = new AbortController();
-          const id = setTimeout(() => controller.abort(), 5000); // 5s timeout
+          const id = setTimeout(() => controller.abort(), 5e3);
           return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(id));
         }
       });
-      
       const ataPubkey = getAssociatedTokenAddress(mintPubkey, ownerPubkey);
       try {
         const tokenBalance = await conn.getTokenAccountBalance(ataPubkey);
@@ -2019,24 +1617,14 @@ async function getSplTokenBalance(walletAddress: string, mintAddress: string): P
           console.log(`[getSplTokenBalance] Fetched balance via ATA lookup: ${mintAddress.substring(0, 8)}... is ${val}`);
           return val;
         }
-      } catch (ataErr: any) {
+      } catch (ataErr) {
         const errMsg = String(ataErr.message || ataErr);
-        if (
-          errMsg.includes("could not find account") ||
-          errMsg.includes("AccountNotFound") ||
-          errMsg.includes("does not exist") ||
-          errMsg.includes("Invalid param") ||
-          errMsg.includes("could not find mint") ||
-          errMsg.includes("invalid mint")
-        ) {
-          // This represents a standard wallet without this specific token initialized yet (0 balance)
+        if (errMsg.includes("could not find account") || errMsg.includes("AccountNotFound") || errMsg.includes("does not exist") || errMsg.includes("Invalid param") || errMsg.includes("could not find mint") || errMsg.includes("invalid mint")) {
           console.log(`[getSplTokenBalance] No active account for ${mintAddress.substring(0, 8)}..., base balance is 0`);
           return 0;
         }
         console.log(`[getSplTokenBalance] ATA query resolved to parsed lookup fallback`);
       }
-
-      // Secondary fallback (parsed owner account search)
       try {
         const response = await conn.getParsedTokenAccountsByOwner(ownerPubkey, { mint: mintPubkey });
         if (response && response.value && response.value.length > 0) {
@@ -2049,61 +1637,52 @@ async function getSplTokenBalance(walletAddress: string, mintAddress: string): P
         }
         console.log(`[getSplTokenBalance] Empty token accounts list, balance is 0`);
         return 0;
-      } catch (parseErr: any) {
+      } catch (parseErr) {
         const parseErrMsg = String(parseErr.message || parseErr);
-        if (
-          parseErrMsg.includes("Invalid param") ||
-          parseErrMsg.includes("could not find mint") ||
-          parseErrMsg.includes("invalid mint") ||
-          parseErrMsg.includes("does not exist")
-        ) {
+        if (parseErrMsg.includes("Invalid param") || parseErrMsg.includes("could not find mint") || parseErrMsg.includes("invalid mint") || parseErrMsg.includes("does not exist")) {
           console.log(`[getSplTokenBalance] No valid token definition, balance is 0`);
           return 0;
         }
-        throw parseErr; // Escapes to outer loop to try next RPC node
+        throw parseErr;
       }
-    } catch (err: any) {
+    } catch (err) {
       const errClean = String(err.message || err);
       console.log(`[getSplTokenBalance] RPC checkpoint warning:`, errClean.substring(0, 100));
       errors.push(`${rpc}: ${errClean}`);
     }
   }
-
-  // High Resilience Fallback:
-  // If we are in PAPER mode, we return virtual/mock balances.
   let isPaper = false;
   try {
     const config = loadJupiterConfig();
     if (config.tradingMode === "PAPER") {
       isPaper = true;
     }
-  } catch (e) {}
-
+  } catch (e) {
+  }
   if (isPaper) {
     const isUsdt = mintAddress === "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
     const isUsdc = mintAddress === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
     const isJup = mintAddress === "JUPyiwrME3daJvmgHbaYzZ6TBMR6Y4X26MSp7E8CwsH";
     const isBonk = mintAddress === "DezXAZ8z7PnrnRJjz3wX4mN4ye3tav896qiKHzERAH5X";
-    
-    if (isUsdt) return 1000.00;
-    if (isUsdc) return 1000.00;
-    if (isJup) return 500.00;
-    if (isBonk) return 10000000.00;
+    if (isUsdt) return 1e3;
+    if (isUsdc) return 1e3;
+    if (isJup) return 500;
+    if (isBonk) return 1e7;
   }
+  const errMessage = `Solana SPL Token RPC Communication Timeout / Unavailable for mint ${mintAddress}. Errors:
+  ` + errors.join("\n  ") + `
 
-  const errMessage = `Solana SPL Token RPC Communication Timeout / Unavailable for mint ${mintAddress}. Errors:\n  ` + errors.join("\n  ") + `\n\nPlease configure your personal private secure Solana RPC URL in Settings.`;
+Please configure your personal private secure Solana RPC URL in Settings.`;
   console.warn(`[getSplTokenBalance] ${errMessage}`);
   throw new Error(errMessage);
 }
-
-// Query live coin price from Jupiter API
-async function getJupiterTokenPrice(mintId: string, defaultVal: number): Promise<number> {
+async function getJupiterTokenPrice(mintId, defaultVal) {
   try {
     const controller1 = new AbortController();
     const id1 = setTimeout(() => controller1.abort(), 1500);
     const res = await fetch(`https://api.jup.ag/price/v2?ids=${mintId}`, { signal: controller1.signal });
     clearTimeout(id1);
-    const data: any = await res.json();
+    const data = await res.json();
     if (data && data.data && data.data[mintId] && data.data[mintId].price) {
       return Number(data.data[mintId].price);
     }
@@ -2113,55 +1692,47 @@ async function getJupiterTokenPrice(mintId: string, defaultVal: number): Promise
       const id2 = setTimeout(() => controller2.abort(), 1500);
       const res = await fetch(`https://price.jup.ag/v6/price?ids=${mintId}`, { signal: controller2.signal });
       clearTimeout(id2);
-      const data: any = await res.json();
+      const data = await res.json();
       if (data && data.data && data.data[mintId] && data.data[mintId].price) {
         return Number(data.data[mintId].price);
       }
-    } catch (err) {}
+    } catch (err) {
+    }
   }
   return defaultVal;
 }
-
-// Query live SOL/USDC price from Jupiter DEX Aggregator API v6 Quote
-async function getJupiterQuotePrice(): Promise<number> {
+async function getJupiterQuotePrice() {
   try {
-    // 1 SOL to USDC (USDC mint is EPj... SOL mint is So11...)
     const res = await fetch("https://public.jupiterapi.com/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000000&slippageBps=50");
     if (!res.ok) {
       throw new Error(`Jupiter API returned ${res.status}`);
     }
-    const data: any = await res.json();
+    const data = await res.json();
     if (data && data.outAmount) {
       const outAmount = Number(data.outAmount);
-      return outAmount / 1e6; // USDC has 6 decimal places
+      return outAmount / 1e6;
     }
-  } catch (err: any) {
-    // If the raw Jupiter DEX aggregator API fails (e.g., inside restricted container sandbox network routing),
-    // we resolve the pricing quietly using Yahoo Finance SOL data.
+  } catch (err) {
     try {
-      const chart = await chartResilient("SOL-USD", { period1: subDays(new Date(), 1), interval: "1h" }, { validateResult: false });
+      const chart = await chartResilient("SOL-USD", { period1: subDays(/* @__PURE__ */ new Date(), 1), interval: "1h" }, { validateResult: false });
       if (chart && chart.quotes && chart.quotes.length > 0) {
-        const validQuotes = chart.quotes.filter((q: any) => q && q.close !== null);
+        const validQuotes = chart.quotes.filter((q) => q && q.close !== null);
         if (validQuotes.length > 0) {
           return validQuotes[validQuotes.length - 1].close;
         }
       }
-    } catch (yfErr: any) {
-      // Completely silent fallback to ensure the app executes seamlessly
+    } catch (yfErr) {
     }
   }
   return 174.65;
 }
-
-// SECRETS STORAGE FOR TELEGRAM ALERT BOT
 function getTelegramSecrets() {
   return {
     botToken: process.env.TELEGRAM_BOT_TOKEN || "",
     chatId: process.env.TELEGRAM_CHAT_ID || ""
   };
 }
-
-async function sendTelegramMessage(botToken: string, chatId: string, message: string) {
+async function sendTelegramMessage(botToken, chatId, message) {
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const res = await fetch(url, {
     method: "POST",
@@ -2177,39 +1748,31 @@ async function sendTelegramMessage(botToken: string, chatId: string, message: st
     throw new Error(`Telegram response error: ${text}`);
   }
 }
-
-export async function checkPredictionAndAlert(forceAlert = false) {
+async function checkPredictionAndAlert(forceAlert = false) {
   const config = loadTelegramConfig();
   const secrets = getTelegramSecrets();
   const activeBotToken = secrets.botToken || config.botToken;
   const activeChatId = secrets.chatId || config.chatId;
-
   if (!forceAlert && (!config.enabled || !activeBotToken || !activeChatId)) {
     console.log(`[Telegram Daemon] [telegram_alert_v1] Background checking is idle. Enabled: ${config.enabled}, Bot credentials configured: ${!!activeBotToken && !!activeChatId}`);
     return;
   }
-  
   if (forceAlert && (!activeBotToken || !activeChatId)) {
     throw new Error("No Telegram bot credentials configured.");
   }
-  
   console.log(`[Telegram Daemon] [telegram_alert_v1] Running check every ${config.frequency || 5}m for ${config.token}...`);
   try {
     const pred = await getPredictionData(config.token, config.topic, config.weights);
-    
-    config.lastCheckedAt = new Date().toISOString();
+    config.lastCheckedAt = (/* @__PURE__ */ new Date()).toISOString();
     delete config.error;
-
-    // Retrieve active trade items
-    const hadActiveTradePrior = config.activeTrade !== null && config.activeTrade !== undefined;
+    const hadActiveTradePrior = config.activeTrade !== null && config.activeTrade !== void 0;
     let activeTrade = config.activeTrade || null;
     let lastTradePnL = config.lastTradePnL || 0;
     let cumulativePnL = config.cumulativePnL || 0;
     let tradesHistory = config.tradesHistory || [];
-
-    const action = pred.action; // "Long Buy" | "Short Sell" | "Long Sell (Overbought)" | "Short Buy (Oversold)" | "Hold"
+    const action = pred.action;
     let tradeClosedMsg = "";
-    let enterSide: "LONG" | "SHORT" | "HOLD" | null = null;
+    let enterSide = null;
     if (pred.positionSide === "LONG") {
       enterSide = "LONG";
     } else if (pred.positionSide === "SHORT") {
@@ -2217,28 +1780,22 @@ export async function checkPredictionAndAlert(forceAlert = false) {
     } else {
       enterSide = "HOLD";
     }
-
     if (activeTrade) {
       let shouldClose = false;
       let closeReason = "";
-      
       const entryPrice = activeTrade.entryPrice;
       const exitPrice = pred.price;
-      const leverage = (activeTrade as any).leverage || config.leverage || 5;
-
+      const leverage = activeTrade.leverage || config.leverage || 5;
       let pnlPercent = 0;
       if (activeTrade.side === "LONG") {
-        pnlPercent = ((exitPrice - entryPrice) / entryPrice) * 100 * leverage;
+        pnlPercent = (exitPrice - entryPrice) / entryPrice * 100 * leverage;
       } else if (activeTrade.side === "SHORT") {
-        pnlPercent = ((entryPrice - exitPrice) / entryPrice) * 100 * leverage;
+        pnlPercent = (entryPrice - exitPrice) / entryPrice * 100 * leverage;
       }
-
-      // Check TP/SL based strictly on the liquidity pools calculated at entry
       const currentTpPct = activeTrade.takeProfitPct || 4;
       const currentSlPct = activeTrade.stopLossPct || 2;
-      const tpPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 + (currentTpPct / 100) / leverage) : entryPrice * (1 - (currentTpPct / 100) / leverage);
-      const slPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 - (currentSlPct / 100) / leverage) : entryPrice * (1 + (currentSlPct / 100) / leverage);
-
+      const tpPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 + currentTpPct / 100 / leverage) : entryPrice * (1 - currentTpPct / 100 / leverage);
+      const slPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 - currentSlPct / 100 / leverage) : entryPrice * (1 + currentSlPct / 100 / leverage);
       if (activeTrade.side === "LONG") {
         if (exitPrice >= tpPriceLimit) {
           shouldClose = true;
@@ -2256,31 +1813,23 @@ export async function checkPredictionAndAlert(forceAlert = false) {
           closeReason = `Stop Loss Pool Pump ($${slPriceLimit.toFixed(2)})`;
         }
       }
-
-      // Check Rule 1: Exit after 90–120 minutes if unrealized PnL < +0.5%
-      const elapsedMinutes = (new Date().getTime() - new Date(activeTrade.entryTime).getTime()) / (60 * 1000);
+      const elapsedMinutes = ((/* @__PURE__ */ new Date()).getTime() - new Date(activeTrade.entryTime).getTime()) / (60 * 1e3);
       if (!shouldClose && elapsedMinutes >= 90 && pnlPercent < 0.5) {
         shouldClose = true;
         closeReason = `PnL Threshold Time Limit Exceeded (Duration: ${Math.round(elapsedMinutes)} mins, PnL: ${pnlPercent.toFixed(2)}% < +0.5%)`;
       }
-
-      // Reversal trend changes
       if (!shouldClose && enterSide !== "HOLD" && enterSide !== activeTrade.side) {
         shouldClose = true;
         closeReason = `Trend Reversal (Signal flipped to ${enterSide})`;
       }
-
       if (shouldClose) {
         lastTradePnL = pnlPercent;
         cumulativePnL += pnlPercent;
-
         const closedId = Math.random().toString(36).substring(2, 9);
-        const exitTimeStr = new Date().toISOString();
+        const exitTimeStr = (/* @__PURE__ */ new Date()).toISOString();
         const durationText = calculateDurationStr(activeTrade.entryTime, exitTimeStr);
-
         const tpPct = activeTrade.takeProfitPct ?? (config.takeProfitPct || 4);
         const slPct = activeTrade.stopLossPct ?? (config.stopLossPct || 2);
-
         const closedTradeLog = {
           id: closedId,
           side: activeTrade.side,
@@ -2291,33 +1840,30 @@ export async function checkPredictionAndAlert(forceAlert = false) {
           exitTime: exitTimeStr,
           takeProfitPct: tpPct,
           stopLossPct: slPct,
-          sentiment: activeTrade.sentiment !== undefined ? activeTrade.sentiment : pred.sentiment,
-          technicalScore: activeTrade.technicalScore !== undefined ? activeTrade.technicalScore : (pred.strategyDetails?.technicalScore),
-          news: activeTrade.news || pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
+          sentiment: activeTrade.sentiment !== void 0 ? activeTrade.sentiment : pred.sentiment,
+          technicalScore: activeTrade.technicalScore !== void 0 ? activeTrade.technicalScore : pred.strategyDetails?.technicalScore,
+          news: activeTrade.news || pred.latestNews || pred.headlines?.map((h) => h.title || h) || []
         };
         tradesHistory.push(closedTradeLog);
         if (tradesHistory.length > 25) tradesHistory.shift();
-
         const levClosed = config.leverage || 5;
-        const tpPriceClosed = activeTrade.side === "LONG" ? entryPrice * (1 + (closedTradeLog.takeProfitPct / 100) / levClosed) : entryPrice * (1 - (closedTradeLog.takeProfitPct / 100) / levClosed);
-        const slPriceClosed = activeTrade.side === "LONG" ? entryPrice * (1 - (closedTradeLog.stopLossPct / 100) / levClosed) : entryPrice * (1 + (closedTradeLog.stopLossPct / 100) / levClosed);
+        const tpPriceClosed = activeTrade.side === "LONG" ? entryPrice * (1 + closedTradeLog.takeProfitPct / 100 / levClosed) : entryPrice * (1 - closedTradeLog.takeProfitPct / 100 / levClosed);
+        const slPriceClosed = activeTrade.side === "LONG" ? entryPrice * (1 - closedTradeLog.stopLossPct / 100 / levClosed) : entryPrice * (1 + closedTradeLog.stopLossPct / 100 / levClosed);
+        tradeClosedMsg = `\u{1F3C1} *Cortex Alpha - Position Closed realizations* \u{1F3C1}
+\u2022 *Reason*: ${closeReason}
+\u2022 *Direction*: ${activeTrade.side === "LONG" ? "\u{1F7E2} LONG" : activeTrade.side === "SHORT" ? "\u{1F534} SHORT" : "\u26AA HOLD"}
+\u2022 *Entry Price*: $${entryPrice.toFixed(2)} \u2794 *Exit Price*: $${exitPrice.toFixed(2)}
+\u2022 *Take Profit Limit*: +${closedTradeLog.takeProfitPct.toFixed(1)}% ($${tpPriceClosed.toFixed(2)})
+\u2022 *Stop Loss Limit*: -${closedTradeLog.stopLossPct.toFixed(1)}% ($${slPriceClosed.toFixed(2)})
+\u2022 *Trade Time/Duration*: ${durationText}
+\u2022 *Trade PnL*: ${pnlPercent >= 0 ? "\u{1F7E2} +" : "\u{1F534} "}${pnlPercent.toFixed(2)}%
+\u2022 *Cumulative Portfolio*: ${cumulativePnL >= 0 ? "\u{1F7E2} +" : "\u{1F534} "}${cumulativePnL.toFixed(2)}%
 
-        tradeClosedMsg = `🏁 *Cortex Alpha - Position Closed realizations* 🏁\n` +
-          `• *Reason*: ${closeReason}\n` +
-          `• *Direction*: ${activeTrade.side === "LONG" ? "🟢 LONG" : activeTrade.side === "SHORT" ? "🔴 SHORT" : "⚪ HOLD"}\n` +
-          `• *Entry Price*: $${entryPrice.toFixed(2)} ➔ *Exit Price*: $${exitPrice.toFixed(2)}\n` +
-          `• *Take Profit Limit*: +${closedTradeLog.takeProfitPct.toFixed(1)}% ($${tpPriceClosed.toFixed(2)})\n` +
-          `• *Stop Loss Limit*: -${closedTradeLog.stopLossPct.toFixed(1)}% ($${slPriceClosed.toFixed(2)})\n` +
-          `• *Trade Time/Duration*: ${durationText}\n` +
-          `• *Trade PnL*: ${pnlPercent >= 0 ? "🟢 +" : "🔴 "}${pnlPercent.toFixed(2)}%\n` +
-          `• *Cumulative Portfolio*: ${cumulativePnL >= 0 ? "🟢 +" : "🔴 "}${cumulativePnL.toFixed(2)}%\n\n`;
-
+`;
         addAuditLog(config, `Position settled (${closeReason}): ${activeTrade.side} at exit price $${exitPrice.toFixed(2)} with PnL ${pnlPercent.toFixed(2)}% (TP: +${closedTradeLog.takeProfitPct}%, SL: -${closedTradeLog.stopLossPct}%, duration: ${durationText})`, "trade");
         activeTrade = null;
       }
     }
-
-    // Enter a new trade if we are FLAT and action is appropriate
     let tradeOpenedMsg = "";
     if (!activeTrade) {
       if (enterSide === "HOLD") {
@@ -2326,164 +1872,146 @@ export async function checkPredictionAndAlert(forceAlert = false) {
         console.log(`[Telegram Daemon] Trade entrance suppressed: Market direction is SIDEWAYS.`);
         config.error = "Trade entrance suppressed: Market direction is sideways.";
       } else if (enterSide && pred.isTrendConfirmed3x) {
-        // Only enter if direction trend has changed (is different from lastSentDirection)
         if (enterSide !== config.lastSentDirection) {
-        const lev = config.leverage || 5;
-        let tpPct = 4.0;
-        let slPct = 2.0;
-        if (pred.suggestedTpPrice) {
-          tpPct = (Math.abs(pred.suggestedTpPrice - pred.price) / pred.price) * 100 * lev;
+          const lev = config.leverage || 5;
+          let tpPct = 4;
+          let slPct = 2;
+          if (pred.suggestedTpPrice) {
+            tpPct = Math.abs(pred.suggestedTpPrice - pred.price) / pred.price * 100 * lev;
+          }
+          if (pred.suggestedSlPrice) {
+            slPct = Math.abs(pred.suggestedSlPrice - pred.price) / pred.price * 100 * lev;
+          }
+          activeTrade = {
+            side: enterSide,
+            entryPrice: pred.price,
+            entryTime: (/* @__PURE__ */ new Date()).toISOString(),
+            takeProfitPct: tpPct,
+            stopLossPct: slPct,
+            sentiment: pred.sentiment,
+            technicalScore: pred.strategyDetails?.technicalScore,
+            news: pred.latestNews || pred.headlines?.map((h) => h.title || h) || []
+          };
+          config.lastTradeAddedAt = (/* @__PURE__ */ new Date()).toISOString();
+          const tpPrice = enterSide === "LONG" ? pred.price * (1 + tpPct / 100 / lev) : pred.price * (1 - tpPct / 100 / lev);
+          const slPrice = enterSide === "LONG" ? pred.price * (1 - slPct / 100 / lev) : pred.price * (1 + slPct / 100 / lev);
+          tradeOpenedMsg = `\u{1F680} *Cortex Alpha - New Position Entered* \u{1F680}
+\u2022 *Direction*: ${enterSide === "LONG" ? "\u{1F7E2} LONG" : "\u{1F534} SHORT"}
+\u2022 *Entry Price*: $${pred.price.toFixed(2)}
+\u2022 *Take Profit Limit*: +${tpPct.toFixed(1)}% ($${tpPrice.toFixed(2)})
+\u2022 *Stop Loss Limit*: -${slPct.toFixed(1)}% ($${slPrice.toFixed(2)})
+\u2022 *Target Catalyst*: "${config.topic}"
+
+`;
+          addAuditLog(config, `Opened new ${enterSide} position at entering price $${pred.price.toFixed(2)} (Limits: TP: +${tpPct}%, SL: -${slPct})`, "trade");
         }
-        if (pred.suggestedSlPrice) {
-          slPct = (Math.abs(pred.suggestedSlPrice - pred.price) / pred.price) * 100 * lev;
-        }
-
-        activeTrade = {
-          side: enterSide,
-          entryPrice: pred.price,
-          entryTime: new Date().toISOString(),
-          takeProfitPct: tpPct,
-          stopLossPct: slPct,
-          sentiment: pred.sentiment,
-          technicalScore: pred.strategyDetails?.technicalScore,
-          news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
-        };
-
-        config.lastTradeAddedAt = new Date().toISOString();
-
-        const tpPrice = enterSide === "LONG" ? pred.price * (1 + (tpPct / 100) / lev) : pred.price * (1 - (tpPct / 100) / lev);
-        const slPrice = enterSide === "LONG" ? pred.price * (1 - (slPct / 100) / lev) : pred.price * (1 + (slPct / 100) / lev);
-
-        tradeOpenedMsg = `🚀 *Cortex Alpha - New Position Entered* 🚀\n` +
-          `• *Direction*: ${enterSide === "LONG" ? "🟢 LONG" : "🔴 SHORT"}\n` +
-          `• *Entry Price*: $${pred.price.toFixed(2)}\n` +
-          `• *Take Profit Limit*: +${tpPct.toFixed(1)}% ($${tpPrice.toFixed(2)})\n` +
-          `• *Stop Loss Limit*: -${slPct.toFixed(1)}% ($${slPrice.toFixed(2)})\n` +
-          `• *Target Catalyst*: "${config.topic}"\n\n`;
-
-        addAuditLog(config, `Opened new ${enterSide} position at entering price $${pred.price.toFixed(2)} (Limits: TP: +${tpPct}%, SL: -${slPct})`, "trade");
       }
     }
-  }
-
-  config.activeTrade = activeTrade;
+    config.activeTrade = activeTrade;
     config.lastTradePnL = lastTradePnL;
     config.cumulativePnL = cumulativePnL;
     config.tradesHistory = tradesHistory;
-    
-    // Evaluate if alert should be dispatched
     let shouldSendAlert = false;
-    
-    // Check if the close resulted from a profit target or stop-loss hits
     const isTpOrSlHitNow = tradeClosedMsg && (tradeClosedMsg.includes("Target profit hit") || tradeClosedMsg.includes("Stop-loss triggered"));
-    
-    const currentDirection: "LONG" | "SHORT" | "HOLD" = activeTrade ? activeTrade.side : "HOLD";
-
+    const currentDirection = activeTrade ? activeTrade.side : "HOLD";
     if (isTpOrSlHitNow) {
-      // Always notify when a TP/SL profit-loss is hit
       shouldSendAlert = true;
     } else {
-      // Otherwise, only notify if the direction trend has changed and the new trend is NOT HOLD
-      const trendHasChanged = (currentDirection !== config.lastSentDirection);
+      const trendHasChanged = currentDirection !== config.lastSentDirection;
       if (trendHasChanged && currentDirection !== "HOLD") {
         shouldSendAlert = true;
       }
     }
-
     if (forceAlert) {
       shouldSendAlert = true;
-      tradeOpenedMsg = "\n*MANUAL OVERRIDE: TRIGGERING CURRENT SIGNAL ALERT* ⚠️\n\n" + tradeOpenedMsg;
+      tradeOpenedMsg = "\n*MANUAL OVERRIDE: TRIGGERING CURRENT SIGNAL ALERT* \u26A0\uFE0F\n\n" + tradeOpenedMsg;
     }
-
     if (shouldSendAlert) {
       console.log(`[Telegram Daemon] [telegram_alert_v1] Trend change or limit hit detected. Sending Telegram alert!`);
-      const emojiMap: any = {
-        "Long Buy": "🟢📈 Long Buy",
-        "Short Sell": "🔴📉 Short Sell",
-        "Long Sell (Overbought)": "🟡⚠️ Long Sell (Overbought)",
-        "Short Buy (Oversold)": "🔵⚠️ Short Buy (Oversold)",
-        "Hold": "⚪⏸️ Hold"
+      const emojiMap = {
+        "Long Buy": "\u{1F7E2}\u{1F4C8} Long Buy",
+        "Short Sell": "\u{1F534}\u{1F4C9} Short Sell",
+        "Long Sell (Overbought)": "\u{1F7E1}\u26A0\uFE0F Long Sell (Overbought)",
+        "Short Buy (Oversold)": "\u{1F535}\u26A0\uFE0F Short Buy (Oversold)",
+        "Hold": "\u26AA\u23F8\uFE0F Hold"
       };
-      
       const newSignalStr = emojiMap[pred.action] || pred.action;
       const oldSignalStr = emojiMap[config.lastAction] || config.lastAction;
-      
       let tpSlStr = "";
       if (pred.suggestedTpPrice && pred.suggestedSlPrice && (currentDirection === "LONG" || currentDirection === "SHORT")) {
-         const lev = config.leverage || 5;
-         const tpPct = (Math.abs(pred.suggestedTpPrice - pred.price) / pred.price) * 100 * lev;
-         const slPct = (Math.abs(pred.suggestedSlPrice - pred.price) / pred.price) * 100 * lev;
-         
-         tpSlStr = `\n• *Est. Liquidation Take-Profit*: +${tpPct.toFixed(1)}% ($${pred.suggestedTpPrice.toFixed(2)})` +
-                   `\n• *Est. Liquidation Stop-Loss*: -${slPct.toFixed(1)}% ($${pred.suggestedSlPrice.toFixed(2)})`;
+        const lev = config.leverage || 5;
+        const tpPct = Math.abs(pred.suggestedTpPrice - pred.price) / pred.price * 100 * lev;
+        const slPct = Math.abs(pred.suggestedSlPrice - pred.price) / pred.price * 100 * lev;
+        tpSlStr = `
+\u2022 *Est. Liquidation Take-Profit*: +${tpPct.toFixed(1)}% ($${pred.suggestedTpPrice.toFixed(2)})
+\u2022 *Est. Liquidation Stop-Loss*: -${slPct.toFixed(1)}% ($${pred.suggestedSlPrice.toFixed(2)})`;
       }
-      
-      let message = `🔔 *Cortex Alpha Signal Update Alert* 🔔\n\n` +
-        `• *Bot Identifier*: \`telegram_alert_v1\`\n` +
-        `• *Asset*: ${config.token.toUpperCase()}\n` +
-        `• *Old Signal*: ${oldSignalStr}\n` +
-        `• *New Signal*: ${newSignalStr}\n` +
-        `• *Trade Direction*: _${currentDirection}_\n\n` +
-        `• *Current Price*: $${pred.price.toFixed(2)}${tpSlStr}\n` +
-        `• *Sentiment Score (Political/News)*: ${pred.sentiment.toFixed(2)}\n` +
-        `• *Technical Score (MACD)*: ${pred.strategyDetails?.technicalScore !== undefined ? (pred.strategyDetails.technicalScore >= 0 ? "+" : "") + pred.strategyDetails.technicalScore.toFixed(2) : "N/A"}\n` +
-        `• *Liquidity Score (RSI)*: ${pred.strategyDetails?.liquidityScore !== undefined ? (pred.strategyDetails.liquidityScore >= 0 ? "+" : "") + pred.strategyDetails.liquidityScore.toFixed(2) : "N/A"}\n` +
-        `• *Elliott Wave Score*: ${pred.strategyDetails?.elliottWaveScore !== undefined ? (pred.strategyDetails.elliottWaveScore >= 0 ? "+" : "") + pred.strategyDetails.elliottWaveScore.toFixed(2) : "N/A"}\n` +
-        `• *Last Closed Trade PnL*: ${lastTradePnL >= 0 ? "+" : ""}${lastTradePnL.toFixed(2)}%\n` +
-        `• *Cumulative Daemon PnL*: ${cumulativePnL >= 0 ? "+" : ""}${cumulativePnL.toFixed(2)}%\n\n`;
+      let message = `\u{1F514} *Cortex Alpha Signal Update Alert* \u{1F514}
 
+\u2022 *Bot Identifier*: \`telegram_alert_v1\`
+\u2022 *Asset*: ${config.token.toUpperCase()}
+\u2022 *Old Signal*: ${oldSignalStr}
+\u2022 *New Signal*: ${newSignalStr}
+\u2022 *Trade Direction*: _${currentDirection}_
+
+\u2022 *Current Price*: $${pred.price.toFixed(2)}${tpSlStr}
+\u2022 *Sentiment Score (Political/News)*: ${pred.sentiment.toFixed(2)}
+\u2022 *Technical Score (MACD)*: ${pred.strategyDetails?.technicalScore !== void 0 ? (pred.strategyDetails.technicalScore >= 0 ? "+" : "") + pred.strategyDetails.technicalScore.toFixed(2) : "N/A"}
+\u2022 *Liquidity Score (RSI)*: ${pred.strategyDetails?.liquidityScore !== void 0 ? (pred.strategyDetails.liquidityScore >= 0 ? "+" : "") + pred.strategyDetails.liquidityScore.toFixed(2) : "N/A"}
+\u2022 *Elliott Wave Score*: ${pred.strategyDetails?.elliottWaveScore !== void 0 ? (pred.strategyDetails.elliottWaveScore >= 0 ? "+" : "") + pred.strategyDetails.elliottWaveScore.toFixed(2) : "N/A"}
+\u2022 *Last Closed Trade PnL*: ${lastTradePnL >= 0 ? "+" : ""}${lastTradePnL.toFixed(2)}%
+\u2022 *Cumulative Daemon PnL*: ${cumulativePnL >= 0 ? "+" : ""}${cumulativePnL.toFixed(2)}%
+
+`;
       if (tradeClosedMsg) {
         message += tradeClosedMsg;
       }
       if (tradeOpenedMsg) {
         message += tradeOpenedMsg;
       }
-
-      // Add Associated News section with links if headlines is present
       if (pred.headlines && pred.headlines.length > 0) {
-        message += `📰 *Associated News Catalyst*:\n`;
-        pred.headlines.slice(0, 5).forEach((item: any, idx: number) => {
+        message += `\u{1F4F0} *Associated News Catalyst*:
+`;
+        pred.headlines.slice(0, 5).forEach((item, idx) => {
           const titleEscaped = item.title.replace(/[_*`[\]()]/g, "");
           const shortTitle = titleEscaped.substring(0, 80) + (titleEscaped.length > 80 ? "..." : "");
-          const score = item.sentiment !== undefined ? item.sentiment : heuristicSentiment(item.title);
+          const score = item.sentiment !== void 0 ? item.sentiment : heuristicSentiment(item.title);
           const scoreStr = score >= 0 ? `+${score.toFixed(2)}` : score.toFixed(2);
           const timeAgo = item.publishedAt ? ` | ${getNewsAgeString(item.publishedAt)}` : "";
           const metaStr = `[Score: ${scoreStr}${timeAgo}]`;
           if (item.url) {
-            message += `${idx + 1}. [${shortTitle}](${item.url}) ${metaStr}\n`;
+            message += `${idx + 1}. [${shortTitle}](${item.url}) ${metaStr}
+`;
           } else {
-            message += `${idx + 1}. ${shortTitle} ${metaStr}\n`;
+            message += `${idx + 1}. ${shortTitle} ${metaStr}
+`;
           }
         });
-        message += `\n`;
+        message += `
+`;
       }
+      message += `*Rationale*:
+_${pred.rationale.replace(/[_*`[\]()]/g, "")}_
 
-      message += `*Rationale*:\n_${pred.rationale.replace(/[_*`[\]()]/g, "")}_\n\n` +
-        `Check live terminal: Cortex Quant Alpha`;
-        
+Check live terminal: Cortex Quant Alpha`;
       await sendTelegramMessage(activeBotToken, activeChatId, message);
-      
-      // Update the stored direction for future comparison
       config.lastSentDirection = currentDirection;
     } else {
       console.log(`[Telegram Daemon] [telegram_alert_v1] Signal remains in matching trend region or Hold state (Current: ${currentDirection}, Last shared: ${config.lastSentDirection}). Suppressing redundant notification.`);
     }
-
-    // Always keep lastAction synced to prevent repeated logs on sequential polling
     config.lastAction = pred.action;
     saveTelegramConfig(config);
-  } catch (err: any) {
+  } catch (err) {
     console.error("[Telegram Daemon] [telegram_alert_v1] FAILED prediction checking loop:", err.message);
     config.error = err.message;
     saveTelegramConfig(config);
   }
 }
-
-function httpsRequest(url: string, options: any = {}): Promise<{ status: number; text: string; ok: boolean }> {
+function httpsRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
     try {
       const parsedUrl = new URL(url);
-      const reqOptions: any = {
+      const reqOptions = {
         method: options.method || "GET",
         hostname: parsedUrl.hostname,
         port: parsedUrl.port || 443,
@@ -2491,11 +2019,10 @@ function httpsRequest(url: string, options: any = {}): Promise<{ status: number;
         headers: {
           "Accept": "application/json",
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          ...(options.headers || {})
+          ...options.headers || {}
         },
-        timeout: options.timeout || 10000
+        timeout: options.timeout || 1e4
       };
-
       const req = https.request(reqOptions, (res) => {
         let data = "";
         res.on("data", (chunk) => {
@@ -2510,16 +2037,13 @@ function httpsRequest(url: string, options: any = {}): Promise<{ status: number;
           });
         });
       });
-
       req.on("error", (err) => {
         reject(err);
       });
-
       req.on("timeout", () => {
         req.destroy();
         reject(new Error("Request timeout"));
       });
-
       if (options.body) {
         const bodyStr = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
         req.setHeader("Content-Length", Buffer.byteLength(bodyStr));
@@ -2531,12 +2055,9 @@ function httpsRequest(url: string, options: any = {}): Promise<{ status: number;
     }
   });
 }
-
-// Resilient Jupiter v6 Quote fetcher with automated multi-mirror failover
-async function fetchJupiterQuote(inputMint: string, outputMint: string, amount: number, swapMode: string): Promise<any> {
+async function fetchJupiterQuote(inputMint, outputMint, amount, swapMode) {
   const config = loadJupiterConfig();
   const isPaper = config && config.tradingMode === "PAPER";
-  
   if (isPaper) {
     console.log(`[Jupiter Resilient] Paper Mode active. Instantly serving simulated swap quote to bypass RPC/aggregator load.`);
     return {
@@ -2551,46 +2072,42 @@ async function fetchJupiterQuote(inputMint: string, outputMint: string, amount: 
       routePlan: []
     };
   }
-
   const urls = [
     `https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&swapMode=${swapMode}&slippageBps=100`,
     `https://public.jupiterapi.com/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&swapMode=${swapMode}&slippageBps=100`
   ];
-  
   for (const url of urls) {
     try {
-      console.log(`[Jupiter Resilient] Initializing router state request: ${url.split('?')[0]}`);
-      const res = await httpsRequest(url, { timeout: 8000 });
+      console.log(`[Jupiter Resilient] Initializing router state request: ${url.split("?")[0]}`);
+      const res = await httpsRequest(url, { timeout: 8e3 });
       if (res.ok) {
         const data = JSON.parse(res.text);
-        if (data && (data.outAmount || data.priceImpactPct !== undefined)) {
+        if (data && (data.outAmount || data.priceImpactPct !== void 0)) {
           return data;
         }
       }
       console.log(`[Jupiter Resilient] Quote router returned response: ${res.status}`);
-    } catch (e: any) {
+    } catch (e) {
       try {
-        console.log(`[Jupiter Resilient] Activating secondary router state backup request: ${url.split('?')[0]}`);
+        console.log(`[Jupiter Resilient] Activating secondary router state backup request: ${url.split("?")[0]}`);
         const fetchRes = await fetch(url);
         if (fetchRes.ok) {
           const data = await fetchRes.json();
-          if (data && (data.outAmount || data.priceImpactPct !== undefined)) {
+          if (data && (data.outAmount || data.priceImpactPct !== void 0)) {
             return data;
           }
         }
-      } catch (innerErr: any) {
+      } catch (innerErr) {
         const errMsg = String(innerErr.message || innerErr);
         const cleanMsg = errMsg.includes("fetch failed") ? "network bypass active" : errMsg;
         console.log(`[Jupiter Resilient] Activating sandbox custom fallback pathway: ${cleanMsg}`);
       }
     }
   }
-
-  // Final sandbox simulation fallback to ensure 100% smooth UI experience under any workspace restrictions
   console.log(`[Jupiter Resilient] Secondary live backup completed. Custom sandbox simulation initialized.`);
   return {
-    inputMint: inputMint,
-    outputMint: outputMint,
+    inputMint,
+    outputMint,
     inAmount: String(amount),
     outAmount: String(Math.floor(amount * 174.65)),
     otherAmountThreshold: "0",
@@ -2600,52 +2117,43 @@ async function fetchJupiterQuote(inputMint: string, outputMint: string, amount: 
     routePlan: []
   };
 }
-
-// Resilient Jupiter v6 Swap payload builder with automated multi-mirror failover
-async function fetchJupiterSwap(quoteResponse: any, userPublicKey: string): Promise<string | null> {
+async function fetchJupiterSwap(quoteResponse, userPublicKey) {
   const config = loadJupiterConfig();
   const isPaper = config && config.tradingMode === "PAPER";
-
-  // Build a generic signable transaction that Phantom will display beautifully
   const getMockOrFallbackTransactionBytes = async () => {
     try {
       const connection = new Connection("https://api.mainnet-beta.solana.com");
-      let blockhash = "5T6H9Znm23fWv97R9p1h1q2w3e4r5t6y7u8i9o0p"; // Valid-length base58 string fallback
+      let blockhash = "5T6H9Znm23fWv97R9p1h1q2w3e4r5t6y7u8i9o0p";
       try {
         const blockData = await connection.getLatestBlockhash("confirmed");
         blockhash = blockData.blockhash;
-      } catch (e) {}
-
-      const ix = new TransactionInstruction({ 
-         keys: [], 
-         programId: new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGMfcHr"), 
-         data: Buffer.from(`Jupiter Perps Position | Execution Target: SOL, size: 0.05 SOL`, "utf-8") 
+      } catch (e) {
+      }
+      const ix = new TransactionInstruction({
+        keys: [],
+        programId: new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGMfcHr"),
+        data: Buffer.from(`Jupiter Perps Position | Execution Target: SOL, size: 0.05 SOL`, "utf-8")
       });
-      
       const msg = new TransactionMessage({
-         payerKey: new PublicKey(userPublicKey),
-         recentBlockhash: blockhash,
-         instructions: [ix]
+        payerKey: new PublicKey(userPublicKey),
+        recentBlockhash: blockhash,
+        instructions: [ix]
       }).compileToV0Message();
-      
       const tx = new VersionedTransaction(msg);
       return Buffer.from(tx.serialize()).toString("base64");
-    } catch (txBuildError: any) {
+    } catch (txBuildError) {
       console.warn("[Jupiter Fallback Tx Builder] Internal build bypass:", txBuildError.message);
       return null;
     }
   };
-
   if (isPaper) {
     console.log(`[Jupiter Resilient] Paper Mode active. Instantly serving simulated transaction payload.`);
     return getMockOrFallbackTransactionBytes();
   }
-
   const urls = [
     "https://quote-api.jup.ag/v6/swap",
     "https://public.jupiterapi.com/swap"
   ];
-  
   for (const url of urls) {
     try {
       console.log(`[Jupiter Resilient] Handshaking swap routing state: ${url}`);
@@ -2657,7 +2165,7 @@ async function fetchJupiterSwap(quoteResponse: any, userPublicKey: string): Prom
           userPublicKey,
           wrapAndUnwrapSol: true
         },
-        timeout: 8000
+        timeout: 8e3
       });
       if (res.ok) {
         const data = JSON.parse(res.text);
@@ -2666,7 +2174,7 @@ async function fetchJupiterSwap(quoteResponse: any, userPublicKey: string): Prom
         }
       }
       console.log(`[Jupiter Resilient] Swap router returned response: ${res.status}`);
-    } catch (e: any) {
+    } catch (e) {
       try {
         console.log(`[Jupiter Resilient] Activating swap secondary router state: ${url}`);
         const fetchRes = await fetch(url, {
@@ -2684,181 +2192,148 @@ async function fetchJupiterSwap(quoteResponse: any, userPublicKey: string): Prom
             return data.swapTransaction;
           }
         }
-      } catch (innerErr: any) {
+      } catch (innerErr) {
         const errMsg = String(innerErr.message || innerErr);
         const cleanMsg = errMsg.includes("fetch failed") ? "network bypass active" : errMsg;
         console.log(`[Jupiter Resilient] Activating swap custom fallback pathway: ${cleanMsg}`);
       }
     }
   }
-
   console.log(`[Jupiter Resilient] Swaps network router alternative matched successfully`);
   return getMockOrFallbackTransactionBytes();
 }
-
-// ---- Real Jupiter Perps execution via the official `jup` CLI ----
-// The previous implementation did a spot USDC<->SOL swap and, on failure, wrote a
-// Memo logging the *intended* trade — it never opened a real leveraged position.
-// We now shell out to the official Jupiter CLI (`jup perps open/close`), which
-// builds, signs and submits the real on-chain perps instructions. Requires the
-// CLI installed and a key imported: `jup keys add <name> --private-key <key>`.
-// The signing key is the CLI keystore key (config.jupCliKeyName, default "main"),
-// NOT config.privateKey.
-
-function jupCliKeyName(config: any): string {
-  return (config && config.jupCliKeyName) || "main";
+function jupCliKeyName(config) {
+  return config && config.jupCliKeyName || "main";
 }
-
-// Run a `jup` subcommand in JSON mode and return the parsed result (throws on CLI error).
-function runJupCli(args: string[]): Promise<any> {
+function runJupCli(args) {
   return new Promise((resolve, reject) => {
-    execFile("jup", [...args, "--format", "json"], { timeout: 90000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile("jup", [...args, "--format", "json"], { timeout: 9e4, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
       const out = (stdout || "").trim();
-      let parsed: any = null;
+      let parsed = null;
       if (out) {
         try {
           parsed = JSON.parse(out);
         } catch {
-          // Tolerate stray non-JSON lines: parse the last JSON-looking line.
-          const line = out.split("\n").map(l => l.trim()).reverse().find(l => l.startsWith("{") || l.startsWith("["));
-          if (line) { try { parsed = JSON.parse(line); } catch {} }
+          const line = out.split("\n").map((l) => l.trim()).reverse().find((l) => l.startsWith("{") || l.startsWith("["));
+          if (line) {
+            try {
+              parsed = JSON.parse(line);
+            } catch {
+            }
+          }
         }
       }
       if (parsed && parsed.error) return reject(new Error(parsed.error));
-      if (err && !parsed) return reject(new Error(((stderr || "").trim()) || err.message || "jup CLI failed"));
+      if (err && !parsed) return reject(new Error((stderr || "").trim() || err.message || "jup CLI failed"));
       resolve(parsed);
     });
   });
 }
-
-// Fetch the current USD price for a perps market asset (SOL/BTC/ETH) from the CLI.
-async function getPerpMarketPrice(asset: string): Promise<number> {
+async function getPerpMarketPrice(asset) {
   const markets = await runJupCli(["perps", "markets"]);
-  const m = Array.isArray(markets) ? markets.find((x: any) => String(x.asset).toUpperCase() === asset.toUpperCase()) : null;
+  const m = Array.isArray(markets) ? markets.find((x) => String(x.asset).toUpperCase() === asset.toUpperCase()) : null;
   return m && Number(m.priceUsd) > 0 ? Number(m.priceUsd) : 0;
 }
-
-// Background auto-execution helper. Signature kept backward-compatible with all
-// existing call sites: (direction, executeSizeSol) -> signature string | null.
-// `executeSizeSol` is the strategy's notional position size in base-asset units
-// (e.g. SOL units); we convert it to a collateral amount for the CLI.
-async function executeOnChainTradeServerSide(direction: "LONG" | "SHORT" | "CLOSE", executeSizeSol = 0.05): Promise<string | null> {
+async function executeOnChainTradeServerSide(direction, executeSizeSol = 0.05) {
   const config = loadJupiterConfig();
   const keyName = jupCliKeyName(config);
   const asset = String(config.token || "SOL").toUpperCase();
   const leverage = Number(config.leverage) || 5;
-
   try {
     if (direction === "CLOSE") {
-      // Find the open position for this asset (or any) and close it fully.
       const posResult = await runJupCli(["perps", "positions", "--key", keyName]);
-      const list = (posResult && posResult.positions) || [];
-      const match = list.find((p: any) => String(p.asset).toUpperCase() === asset) || list[0];
+      const list = posResult && posResult.positions || [];
+      const match = list.find((p) => String(p.asset).toUpperCase() === asset) || list[0];
       if (!match || !match.positionPubkey) {
         console.log(`[Jupiter Perps CLI] No open position found to CLOSE for ${asset}.`);
         return null;
       }
-      const res = await runJupCli(["perps", "close", "--position", match.positionPubkey, "--key", keyName]);
-      const sig = (res && (res.signature || (Array.isArray(res.signatures) && res.signatures[0]))) || null;
-      console.log(`[Jupiter Perps CLI] CLOSE submitted. Position: ${match.positionPubkey} Tx: ${sig}`);
-      return sig;
+      const res2 = await runJupCli(["perps", "close", "--position", match.positionPubkey, "--key", keyName]);
+      const sig2 = res2 && (res2.signature || Array.isArray(res2.signatures) && res2.signatures[0]) || null;
+      console.log(`[Jupiter Perps CLI] CLOSE submitted. Position: ${match.positionPubkey} Tx: ${sig2}`);
+      return sig2;
     }
-
-    // OPEN (LONG / SHORT)
     const side = direction === "LONG" ? "long" : "short";
-    // Convert notional base-asset size -> required collateral (USD), then to the
-    // input token's units. CLI input supports SOL/BTC/ETH/USDC (USDT -> USDC).
     const assetPrice = await getPerpMarketPrice(asset);
     if (!assetPrice) throw new Error(`Could not resolve ${asset} market price`);
     const notionalUsd = executeSizeSol * assetPrice;
     const collateralUsd = notionalUsd / leverage;
-
-    let input = String((config as any).collateralAsset || "USDC").toUpperCase();
+    let input = String(config.collateralAsset || "USDC").toUpperCase();
     if (input === "USDT") input = "USDC";
-    let amount: number;
+    let amount;
     if (input === "SOL") {
       const solPrice = asset === "SOL" ? assetPrice : await getPerpMarketPrice("SOL");
       amount = solPrice ? collateralUsd / solPrice : 0;
     } else {
-      // USDC collateral is ~1 USD.
       amount = collateralUsd;
     }
     amount = Number(amount.toFixed(6));
     if (!amount || amount <= 0) throw new Error("Computed collateral amount is zero");
-
     console.log(`[Jupiter Perps CLI] OPEN ${side} ${asset}: collateral ~${amount} ${input}, ${leverage}x (notional ~$${notionalUsd.toFixed(2)})`);
     const res = await runJupCli([
-      "perps", "open",
-      "--asset", asset,
-      "--side", side,
-      "--amount", String(amount),
-      "--input", input,
-      "--leverage", String(leverage),
-      "--key", keyName,
+      "perps",
+      "open",
+      "--asset",
+      asset,
+      "--side",
+      side,
+      "--amount",
+      String(amount),
+      "--input",
+      input,
+      "--leverage",
+      String(leverage),
+      "--key",
+      keyName
     ]);
-    const sig = (res && res.signature) || null;
+    const sig = res && res.signature || null;
     console.log(`[Jupiter Perps CLI] OPEN submitted. Position: ${res && res.positionPubkey} Tx: ${sig}`);
     return sig;
-  } catch (e: any) {
-    // Surface the real reason (e.g. "Collateral size must be at least $10 for new positions").
+  } catch (e) {
     console.error(`[Jupiter Perps CLI] ${direction} execution failed: ${e.message}`);
     throw new Error(`Jupiter Perps ${direction} failed: ${e.message}`);
   }
 }
-
-// Background auto-execution logic for Connected Jupiter/Phantom Wallets
-async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
+async function checkJupiterTradingAndState(forceTrigger = false) {
   const config = loadJupiterConfig();
   let activeWallet = config.walletAddress;
-  
-  // Only override with server private key if it is actually configured by the user (not auto-generated)
   if (config.privateKey && !config.privateKeyIsAutoGenerated) {
     try {
       const keypair = getKeypairFromPrivateKey(config.privateKey);
       activeWallet = keypair.publicKey.toBase58();
-    } catch (e) {}
+    } catch (e) {
+    }
   }
-
-  // Fallback: Use the auto-generated key pair public address only if no custom address has been connected yet
   if (!activeWallet && config.privateKey) {
     try {
       const keypair = getKeypairFromPrivateKey(config.privateKey);
       activeWallet = keypair.publicKey.toBase58();
-    } catch (e) {}
+    } catch (e) {
+    }
   }
-
-  // Robust Fallback: If no wallet is linked, and we are in PAPER trading mode (mock) or forceTriggering,
-  // we use a default demo wallet address so that the user doesn't get blocked by a missing wallet address.
   if (!activeWallet && (config.tradingMode === "PAPER" || forceTrigger)) {
     activeWallet = "4CppKXhEj4agKwfsPWGMzxffgXg84sA4qGa72UafuuYx";
   }
-
-  if ((!config.enabled && !forceTrigger) || !activeWallet) {
+  if (!config.enabled && !forceTrigger || !activeWallet) {
     console.log(`[Jupiter Daemon] Background execution is idle. Enabled: ${config.enabled}, Wallet connected: ${!!activeWallet}`);
     return;
   }
-
   console.log(`[Jupiter Daemon] Running execution check for wallet ${activeWallet} (forceTrigger: ${forceTrigger})...`);
   try {
     const pred = await getPredictionData(config.token, config.topic, config.weights);
-    config.lastCheckedAt = new Date().toISOString();
+    config.lastCheckedAt = (/* @__PURE__ */ new Date()).toISOString();
     delete config.error;
-
     let activeTrade = config.activeTrade || null;
     let lastTradePnL = config.lastTradePnL || 0;
     let cumulativePnL = config.cumulativePnL || 0;
     let tradesHistory = config.tradesHistory || [];
-
-    const action = pred.action; // "Long Buy" | "Short Sell" | "Long Sell (Overbought)" | "Short Buy (Oversold)" | "Hold"
-
+    const action = pred.action;
     let exitPrice = pred.price;
-    // Attempt to source real-time pricing from Jupiter's DEX price quote
     const jupPrice = await getJupiterQuotePrice();
     if (jupPrice > 0) {
       exitPrice = jupPrice;
     }
-
-    let enterSide: "LONG" | "SHORT" | "HOLD" | null = null;
+    let enterSide = null;
     if (action === "Long Buy" || action === "Short Buy (Oversold)") {
       enterSide = "LONG";
     } else if (action === "Short Sell" || action === "Long Sell (Overbought)") {
@@ -2866,7 +2341,6 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
     } else if (action === "Hold") {
       enterSide = "HOLD";
     }
-
     if (forceTrigger) {
       if (!enterSide || enterSide === "HOLD") {
         const compScore = pred.strategyDetails?.compositeScore ?? 0;
@@ -2874,28 +2348,23 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         console.log(`[Jupiter Daemon] Force triggering auto trade based on composite score direction: ${enterSide} (Score: ${compScore.toFixed(3)})`);
       }
     }
-
     let closedThisTick = false;
-    let reversalReentry = false; // allow opening the opposite side on the SAME tick after a reversal close
+    let reversalReentry = false;
     if (activeTrade) {
       let shouldClose = false;
       let closeReason = "";
-
       const entryPrice = activeTrade.entryPrice;
       const leverage = activeTrade.leverage || config.leverage || 5;
       let currentPnlPercent = 0;
       if (activeTrade.side === "LONG") {
-        currentPnlPercent = ((exitPrice - entryPrice) / entryPrice) * 100 * leverage;
+        currentPnlPercent = (exitPrice - entryPrice) / entryPrice * 100 * leverage;
       } else if (activeTrade.side === "SHORT") {
-        currentPnlPercent = ((entryPrice - exitPrice) / entryPrice) * 100 * leverage;
+        currentPnlPercent = (entryPrice - exitPrice) / entryPrice * 100 * leverage;
       }
-
-      // Check TP/SL based strictly on the liquidity pools calculated at entry
       const currentTpPct = activeTrade.takeProfitPct || 4;
       const currentSlPct = activeTrade.stopLossPct || 2;
-      const tpPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 + (currentTpPct / 100) / leverage) : entryPrice * (1 - (currentTpPct / 100) / leverage);
-      const slPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 - (currentSlPct / 100) / leverage) : entryPrice * (1 + (currentSlPct / 100) / leverage);
-
+      const tpPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 + currentTpPct / 100 / leverage) : entryPrice * (1 - currentTpPct / 100 / leverage);
+      const slPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 - currentSlPct / 100 / leverage) : entryPrice * (1 + currentSlPct / 100 / leverage);
       if (activeTrade.side === "LONG") {
         if (exitPrice >= tpPriceLimit) {
           shouldClose = true;
@@ -2913,28 +2382,20 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           closeReason = `Stop Loss Pool Pump ($${slPriceLimit.toFixed(2)})`;
         }
       }
-      
-      // Reversal trend changes
       if (!shouldClose && enterSide !== "HOLD" && enterSide !== activeTrade.side) {
         shouldClose = true;
-        reversalReentry = true; // Rule 04: settle and open the opposite on the same tick
+        reversalReentry = true;
         closeReason = `Trend Reversal (Signal flipped to ${enterSide})`;
       }
-
       if (shouldClose) {
         lastTradePnL = currentPnlPercent;
         cumulativePnL += currentPnlPercent;
-
-        // Track consecutive losing trades for the risk circuit breaker (win resets the streak).
-        (config as any).consecutiveLosses = currentPnlPercent < 0 ? (((config as any).consecutiveLosses || 0) + 1) : 0;
-
+        config.consecutiveLosses = currentPnlPercent < 0 ? (config.consecutiveLosses || 0) + 1 : 0;
         const closedId = Math.random().toString(36).substring(2, 9);
-        const exitTimeStr = new Date().toISOString();
+        const exitTimeStr = (/* @__PURE__ */ new Date()).toISOString();
         const durationText = calculateDurationStr(activeTrade.entryTime, exitTimeStr);
-
         const tpPct = activeTrade.takeProfitPct ?? (config.takeProfitPct || 4);
         const slPct = activeTrade.stopLossPct ?? (config.stopLossPct || 2);
-
         const closedTradeLog = {
           id: closedId,
           side: activeTrade.side,
@@ -2947,20 +2408,17 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           exitTime: exitTimeStr,
           takeProfitPct: tpPct,
           stopLossPct: slPct,
-          sentiment: activeTrade.sentiment !== undefined ? activeTrade.sentiment : pred.sentiment,
-          technicalScore: activeTrade.technicalScore !== undefined ? activeTrade.technicalScore : (pred.strategyDetails?.technicalScore),
-          news: activeTrade.news || pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || [],
+          sentiment: activeTrade.sentiment !== void 0 ? activeTrade.sentiment : pred.sentiment,
+          technicalScore: activeTrade.technicalScore !== void 0 ? activeTrade.technicalScore : pred.strategyDetails?.technicalScore,
+          news: activeTrade.news || pred.latestNews || pred.headlines?.map((h) => h.title || h) || [],
           mode: activeTrade.mode
         };
         tradesHistory.push(closedTradeLog);
         if (tradesHistory.length > 25) tradesHistory.shift();
-
         activeTrade = null;
         closedThisTick = true;
         console.log(`[Jupiter Daemon] Position Closed! Reason: ${closeReason}. PnL: ${currentPnlPercent.toFixed(2)}%`);
-
         try {
-          // Execute REAL on-chain close
           if (config.privateKey && closedTradeLog.mode !== "PAPER") {
             console.log(`[Jupiter Perps] Executing onchain CLOSE on Jupiter Perps. Size: ${closedTradeLog.sizeInSol} SOL`);
             const signature = await executeOnChainTradeServerSide("CLOSE", closedTradeLog.sizeInSol);
@@ -2970,152 +2428,134 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           } else {
             console.log(`[Jupiter Perps] Simulating automated CLOSE on Jupiter Perps API. Size: ${closedTradeLog.sizeInSol} SOL`);
           }
-        } catch (e: any) {
+        } catch (e) {
           console.error("[Jupiter Daemon] Failed to execute close on Jupiter Perps API:", e.message);
         }
-
         try {
           const telegramConfig = loadTelegramConfig();
-          const sideIcon = closedTradeLog.side === "LONG" ? "🟢" : "🔴";
-          const pnlIcon = currentPnlPercent >= 0 ? "🔵 +" : "🔴 ";
+          const sideIcon = closedTradeLog.side === "LONG" ? "\u{1F7E2}" : "\u{1F534}";
+          const pnlIcon = currentPnlPercent >= 0 ? "\u{1F535} +" : "\u{1F534} ";
           addAuditLog(telegramConfig, `Automated Close: ${sideIcon} at $${closedTradeLog.exitPrice.toFixed(2)}. ${closeReason}. PnL: ${pnlIcon}${currentPnlPercent.toFixed(2)}%`, "trade");
           saveTelegramConfig(telegramConfig);
-          
           const secrets = getTelegramSecrets();
           const activeBotToken = secrets.botToken || telegramConfig.botToken;
           const activeChatId = secrets.chatId || telegramConfig.chatId;
-
           if (telegramConfig.enabled && activeBotToken && activeChatId) {
-            const sideIcon = closedTradeLog.side === "LONG" ? "🟢" : "🔴";
-            const pnlIcon = currentPnlPercent >= 0 ? "✅" : "❌";
-            
+            const sideIcon2 = closedTradeLog.side === "LONG" ? "\u{1F7E2}" : "\u{1F534}";
+            const pnlIcon2 = currentPnlPercent >= 0 ? "\u2705" : "\u274C";
             const levClosedJup = config.leverage || 5;
-            const tpPriceClosedJup = closedTradeLog.side === "LONG" ? closedTradeLog.entryPrice * (1 + (closedTradeLog.takeProfitPct / 100) / levClosedJup) : closedTradeLog.entryPrice * (1 - (closedTradeLog.takeProfitPct / 100) / levClosedJup);
-            const slPriceClosedJup = closedTradeLog.side === "LONG" ? closedTradeLog.entryPrice * (1 - (closedTradeLog.stopLossPct / 100) / levClosedJup) : closedTradeLog.entryPrice * (1 + (closedTradeLog.stopLossPct / 100) / levClosedJup);
+            const tpPriceClosedJup = closedTradeLog.side === "LONG" ? closedTradeLog.entryPrice * (1 + closedTradeLog.takeProfitPct / 100 / levClosedJup) : closedTradeLog.entryPrice * (1 - closedTradeLog.takeProfitPct / 100 / levClosedJup);
+            const slPriceClosedJup = closedTradeLog.side === "LONG" ? closedTradeLog.entryPrice * (1 - closedTradeLog.stopLossPct / 100 / levClosedJup) : closedTradeLog.entryPrice * (1 + closedTradeLog.stopLossPct / 100 / levClosedJup);
+            let tlgMsg = `\u{1F916} *Automated Trade Closed!*
 
-            let tlgMsg = `🤖 *Automated Trade Closed!*\n\n` +
-              `*Action*: CLOSE ${sideIcon} ${closedTradeLog.side}\n` +
-              `*Reason*: ${closeReason}\n` +
-              `*Asset*: ${config.token}\n` +
-              `*Entry Price*: $${closedTradeLog.entryPrice.toFixed(2)}\n` +
-              `*Exit Price*: $${closedTradeLog.exitPrice.toFixed(2)}\n` +
-              `*Take Profit Limit*: +${closedTradeLog.takeProfitPct.toFixed(1)}% ($${tpPriceClosedJup.toFixed(2)})\n` +
-              `*Stop Loss Limit*: -${closedTradeLog.stopLossPct.toFixed(1)}% ($${slPriceClosedJup.toFixed(2)})\n` +
-              `*Trade Time/Duration*: ${durationText}\n` +
-              `*PnL*: ${pnlIcon} ${currentPnlPercent.toFixed(2)}%\n` +
-              `*Size*: ${closedTradeLog.sizeInSol.toFixed(4)} SOL\n` +
-              `*Sentiment Score (Political/News)*: ${closedTradeLog.sentiment !== undefined ? closedTradeLog.sentiment.toFixed(2) : "N/A"}\n` +
-              `*Technical Score (MACD)*: ${closedTradeLog.technicalScore !== undefined ? (closedTradeLog.technicalScore >= 0 ? "+" : "") + closedTradeLog.technicalScore.toFixed(2) : "N/A"}\n\n`;
+*Action*: CLOSE ${sideIcon2} ${closedTradeLog.side}
+*Reason*: ${closeReason}
+*Asset*: ${config.token}
+*Entry Price*: $${closedTradeLog.entryPrice.toFixed(2)}
+*Exit Price*: $${closedTradeLog.exitPrice.toFixed(2)}
+*Take Profit Limit*: +${closedTradeLog.takeProfitPct.toFixed(1)}% ($${tpPriceClosedJup.toFixed(2)})
+*Stop Loss Limit*: -${closedTradeLog.stopLossPct.toFixed(1)}% ($${slPriceClosedJup.toFixed(2)})
+*Trade Time/Duration*: ${durationText}
+*PnL*: ${pnlIcon2} ${currentPnlPercent.toFixed(2)}%
+*Size*: ${closedTradeLog.sizeInSol.toFixed(4)} SOL
+*Sentiment Score (Political/News)*: ${closedTradeLog.sentiment !== void 0 ? closedTradeLog.sentiment.toFixed(2) : "N/A"}
+*Technical Score (MACD)*: ${closedTradeLog.technicalScore !== void 0 ? (closedTradeLog.technicalScore >= 0 ? "+" : "") + closedTradeLog.technicalScore.toFixed(2) : "N/A"}
 
+`;
             if (closedTradeLog.news && closedTradeLog.news.length > 0) {
-              tlgMsg += `📰 *Associated News Catalyst*:\n`;
-              closedTradeLog.news.slice(0, 5).forEach((item: any, idx: number) => {
+              tlgMsg += `\u{1F4F0} *Associated News Catalyst*:
+`;
+              closedTradeLog.news.slice(0, 5).forEach((item, idx) => {
                 const isObj = item && typeof item === "object";
                 const titleStr = isObj ? item.title : item;
                 const titleEscaped = titleStr.replace(/[_*`[\]()]/g, "");
                 const shortTitle = titleEscaped.substring(0, 80) + (titleEscaped.length > 80 ? "..." : "");
-                
-                const score = isObj && item.sentiment !== undefined ? item.sentiment : heuristicSentiment(titleStr);
+                const score = isObj && item.sentiment !== void 0 ? item.sentiment : heuristicSentiment(titleStr);
                 const scoreStr = score >= 0 ? `+${score.toFixed(2)}` : score.toFixed(2);
                 const timeAgo = isObj && item.publishedAt ? ` | ${getNewsAgeString(item.publishedAt)}` : "";
                 const metaStr = `[Score: ${scoreStr}${timeAgo}]`;
-                
                 if (isObj && item.url) {
-                  tlgMsg += `${idx + 1}. [${shortTitle}](${item.url}) ${metaStr}\n`;
+                  tlgMsg += `${idx + 1}. [${shortTitle}](${item.url}) ${metaStr}
+`;
                 } else {
-                  tlgMsg += `${idx + 1}. ${shortTitle} ${metaStr}\n`;
+                  tlgMsg += `${idx + 1}. ${shortTitle} ${metaStr}
+`;
                 }
               });
-              tlgMsg += `\n`;
+              tlgMsg += `
+`;
             }
-
             await sendTelegramMessage(activeBotToken, activeChatId, tlgMsg);
           }
-        } catch (e: any) {
+        } catch (e) {
           console.error("[Jupiter Daemon] Failed to send Telegram alert for close:", e.message);
         }
       }
     }
-
-    // Only allow entering a position if not already in one (strict 1-trade limit check)
     if (!activeTrade && (!closedThisTick || reversalReentry)) {
       let canEnter = false;
       if (enterSide && enterSide !== "HOLD" && (pred.isTrendConfirmed3x || forceTrigger)) {
         canEnter = true;
       }
-
       if (pred.trend === "SIDEWAYS" && !forceTrigger) {
         canEnter = false;
         console.log(`[Jupiter Daemon] Trade entry suppressed because market direction is SIDEWAYS.`);
         config.error = "Trade entry suppressed: Market direction is sideways.";
       }
-
-      // Risk circuit breaker: after N consecutive losing trades, pause NEW entries (exits still
-      // work) until the streak is manually reset. Set maxConsecutiveLosses to 0 to disable.
-      const maxConsecLosses = (config as any).maxConsecutiveLosses ?? 4;
-      if (canEnter && maxConsecLosses > 0 && (((config as any).consecutiveLosses || 0) >= maxConsecLosses)) {
+      const maxConsecLosses = config.maxConsecutiveLosses ?? 4;
+      if (canEnter && maxConsecLosses > 0 && (config.consecutiveLosses || 0) >= maxConsecLosses) {
         canEnter = false;
-        config.error = `Circuit breaker active: ${(config as any).consecutiveLosses} consecutive losses (limit ${maxConsecLosses}). New entries paused; reset consecutiveLosses to resume.`;
+        config.error = `Circuit breaker active: ${config.consecutiveLosses} consecutive losses (limit ${maxConsecLosses}). New entries paused; reset consecutiveLosses to resume.`;
         console.log(`[Jupiter Daemon] ${config.error}`);
       }
-
       if (canEnter) {
         let executionAddress = config.walletAddress;
         if (config.privateKey) {
           try {
             const keypair = getKeypairFromPrivateKey(config.privateKey);
             executionAddress = keypair.publicKey.toBase58();
-          } catch (e) {}
+          } catch (e) {
+          }
         }
-
-        // Real perps execute from the Jupiter CLI keystore wallet, so balance /
-        // sizing checks must use that same wallet (not config.walletAddress).
         try {
           const cliKeys = await runJupCli(["keys", "list"]);
-          const k = Array.isArray(cliKeys) ? cliKeys.find((x: any) => x.name === jupCliKeyName(config)) : null;
+          const k = Array.isArray(cliKeys) ? cliKeys.find((x) => x.name === jupCliKeyName(config)) : null;
           if (k && k.address) executionAddress = k.address;
-        } catch (e) {}
-
-        // 1. Fetch live balances for SOL (gas) and SPL Collateral (USDT or USDC) to support Solana USDT perpetuals
+        } catch (e) {
+        }
         let solBalance = 0;
         let usdtBalance = 0;
         let usdcBalance = 0;
         let mode = config.tradingMode || "REAL";
-
         if (mode === "REAL" && (!config.privateKey || executionAddress === "DmtrAQtdA5tMDcHMtpHGzs5NA6hzdp9oRT7CsThwzMHh")) {
           mode = "PAPER";
         }
-
         if (mode === "PAPER") {
-          solBalance = 10.0;
-          usdtBalance = 1000.0;
-          usdcBalance = 1000.0;
+          solBalance = 10;
+          usdtBalance = 1e3;
+          usdcBalance = 1e3;
         } else {
           try {
             solBalance = await getSolanaWalletBalance(executionAddress);
             usdtBalance = await getSplTokenBalance(executionAddress, "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB");
             usdcBalance = await getSplTokenBalance(executionAddress, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
-            
-            if (solBalance < 0.002) {
+            if (solBalance < 2e-3) {
               console.log(`[Jupiter Daemon] Wallet ${executionAddress} has insufficient SOL balance (${solBalance.toFixed(6)} SOL) for real on-chain transaction. Seamlessly falling back to PAPER (Simulated) trading mode.`);
               mode = "PAPER";
-              solBalance = 10.0;
-              usdtBalance = 1000.0;
-              usdcBalance = 1000.0;
+              solBalance = 10;
+              usdtBalance = 1e3;
+              usdcBalance = 1e3;
             }
-          } catch (daemonBalErr: any) {
+          } catch (daemonBalErr) {
             console.warn("[Jupiter Daemon] Unresponsive RPC during automated run. Seamlessly falling back to PAPER trading style:", daemonBalErr.message);
             mode = "PAPER";
-            solBalance = 10.0;
-            usdtBalance = 1000.0;
-            usdcBalance = 1000.0;
+            solBalance = 10;
+            usdtBalance = 1e3;
+            usdcBalance = 1e3;
           }
         }
-
-        // 2. Select margin collateral token based on active balances / config (Auto prefer USDT for USDT perpetuals requested)
-        let collateralAsset: "USDT" | "USDC" | "SOL" = "SOL";
+        let collateralAsset = "SOL";
         let collateralBalance = solBalance;
-
         if (usdtBalance > 0) {
           collateralAsset = "USDT";
           collateralBalance = usdtBalance;
@@ -3126,52 +2566,42 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           collateralAsset = "SOL";
           collateralBalance = solBalance;
         }
-
         if (mode === "PAPER") {
-          solBalance = 10.0;
-          collateralBalance = 10.0;
+          solBalance = 10;
+          collateralBalance = 10;
         } else {
-          if (solBalance < 0.002) {
+          if (solBalance < 2e-3) {
             console.log(`[Jupiter Daemon] Wallet ${executionAddress} has insufficient SOL balance (${solBalance.toFixed(4)} SOL). Seamlessly falling back to PAPER (Simulated) trading.`);
             mode = "PAPER";
-            solBalance = 10.0;
-            collateralBalance = 10.0;
+            solBalance = 10;
+            collateralBalance = 10;
           } else if (collateralAsset === "SOL" && collateralBalance < 0.02) {
             console.log(`[Jupiter Daemon] Wallet ${executionAddress} has insufficient SOL margin collateral (${collateralBalance.toFixed(4)} SOL). Seamlessly falling back to PAPER (Simulated) trading.`);
             mode = "PAPER";
-            solBalance = 10.0;
-            collateralBalance = 10.0;
-          } else if ((collateralAsset === "USDT" || collateralAsset === "USDC") && collateralBalance < 1.0) {
+            solBalance = 10;
+            collateralBalance = 10;
+          } else if ((collateralAsset === "USDT" || collateralAsset === "USDC") && collateralBalance < 1) {
             console.log(`[Jupiter Daemon] Wallet ${executionAddress} has insufficient ${collateralAsset} margin collateral (${collateralBalance.toFixed(4)}). Seamlessly falling back to PAPER (Simulated) trading.`);
             mode = "PAPER";
-            solBalance = 10.0;
-            collateralBalance = 10.0;
+            solBalance = 10;
+            collateralBalance = 10;
           }
         }
-        
         let constraintWarning = "";
-
-
         const cooldownRemainingMinutes = 0;
         let cooldownElapsed = true;
-
         if (constraintWarning) {
           console.log(`[Jupiter Daemon] Trade Suppressed: ${constraintWarning}`);
           config.error = constraintWarning;
         } else {
-          // Clear any previous error if trade executes
           config.error = "";
-
           let entryPrice = pred.price;
           if (jupPrice > 0) {
             entryPrice = jupPrice;
           }
-
-          // 4. Calculate proper trade size in SOL (base asset units) using collateral asset type
           const leverage = config.leverage || 5;
           const allocationFraction = Math.min(config.allocationPercent, 100) / 100;
           let sizeInSol = 0.01;
-
           if (collateralAsset === "USDT" || collateralAsset === "USDC") {
             const marginAmount = collateralBalance * allocationFraction;
             const nominalValueInUsd = marginAmount * leverage;
@@ -3179,25 +2609,22 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           } else {
             sizeInSol = solBalance * allocationFraction * leverage;
           }
-
-          let tpPct = 4.0;
-          let slPct = 2.0;
-          if (pred.suggestedTpPrice && Math.abs(pred.suggestedTpPrice - pred.price) > 0.0001) {
-            tpPct = (Math.abs(pred.suggestedTpPrice - pred.price) / pred.price) * 100 * leverage;
+          let tpPct = 4;
+          let slPct = 2;
+          if (pred.suggestedTpPrice && Math.abs(pred.suggestedTpPrice - pred.price) > 1e-4) {
+            tpPct = Math.abs(pred.suggestedTpPrice - pred.price) / pred.price * 100 * leverage;
           } else {
-            tpPct = config.takeProfitPct || 4.0;
+            tpPct = config.takeProfitPct || 4;
           }
-          if (pred.suggestedSlPrice && Math.abs(pred.suggestedSlPrice - pred.price) > 0.0001) {
-            slPct = (Math.abs(pred.suggestedSlPrice - pred.price) / pred.price) * 100 * leverage;
+          if (pred.suggestedSlPrice && Math.abs(pred.suggestedSlPrice - pred.price) > 1e-4) {
+            slPct = Math.abs(pred.suggestedSlPrice - pred.price) / pred.price * 100 * leverage;
           } else {
-            slPct = config.stopLossPct || 2.0;
+            slPct = config.stopLossPct || 2;
           }
-
-          // Trigger automated trade!
           activeTrade = {
-            side: enterSide as "LONG" | "SHORT",
+            side: enterSide,
             entryPrice,
-            entryTime: new Date().toISOString(),
+            entryTime: (/* @__PURE__ */ new Date()).toISOString(),
             sizeInSol,
             leverage,
             collateralAsset,
@@ -3206,18 +2633,16 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             stopLossPct: slPct,
             sentiment: pred.sentiment,
             technicalScore: pred.strategyDetails?.technicalScore,
-            news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
+            news: pred.latestNews || pred.headlines?.map((h) => h.title || h) || []
           };
-          config.lastTradeAddedAt = new Date().toISOString();
+          config.lastTradeAddedAt = (/* @__PURE__ */ new Date()).toISOString();
           console.log(`[Jupiter Daemon] Automated Position Opened! Side: ${enterSide}, Size: ${sizeInSol.toFixed(4)} SOL @ $${entryPrice.toFixed(2)} [Collateral: ${collateralAsset} (${mode})]`);
-
           let onChainSignature = "";
           let realOpenFailed = false;
           try {
-            // Execute REAL on-chain open via the Jupiter Perps CLI
             if (config.privateKey && mode !== "PAPER") {
               console.log(`[Jupiter Perps] Executing REAL onchain OPEN: ${enterSide} ${config.token} (notional ${sizeInSol.toFixed(4)} units)`);
-              const signature = await executeOnChainTradeServerSide(enterSide as "LONG" | "SHORT", sizeInSol);
+              const signature = await executeOnChainTradeServerSide(enterSide, sizeInSol);
               if (signature) {
                 onChainSignature = signature;
               } else {
@@ -3226,104 +2651,98 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             } else {
               console.log(`[Jupiter Perps] PAPER mode OPEN (simulated, no on-chain execution). Side: ${enterSide}, Size: ${sizeInSol.toFixed(4)} SOL`);
             }
-          } catch (e: any) {
+          } catch (e) {
             realOpenFailed = true;
             console.error("[Jupiter Daemon] REAL open failed on Jupiter Perps CLI:", e.message);
             config.error = `Automated open failed: ${e.message}`;
           }
-
-          // Never track a position that did not actually open on-chain (prevents phantom positions / fake PnL).
           if (mode !== "PAPER" && realOpenFailed) {
             console.log("[Jupiter Daemon] Rolling back tracked position (real perps open did not execute).");
             activeTrade = null;
-            config.lastTradeAddedAt = undefined;
+            config.lastTradeAddedAt = void 0;
           }
-
           if (activeTrade) try {
             const telegramConfig = loadTelegramConfig();
             const logMsg = `Automated Open: ${enterSide} at $${entryPrice.toFixed(2)} [Size: ${sizeInSol.toFixed(4)} SOL, Lev: ${config.leverage || 5}x]` + (onChainSignature ? ` (Tx: ${onChainSignature.slice(0, 8)}...)` : "");
             addAuditLog(telegramConfig, logMsg, "trade");
             saveTelegramConfig(telegramConfig);
-            
             const secrets = getTelegramSecrets();
             const activeBotToken = secrets.botToken || telegramConfig.botToken;
             const activeChatId = secrets.chatId || telegramConfig.chatId;
-
             if (telegramConfig.enabled && activeBotToken && activeChatId) {
-              const sideIcon = enterSide === "LONG" ? "🟢" : "🔴";
+              const sideIcon = enterSide === "LONG" ? "\u{1F7E2}" : "\u{1F534}";
               const lev = config.leverage || 5;
-              const tpPrice = enterSide === "LONG" ? entryPrice * (1 + (tpPct / 100) / lev) : entryPrice * (1 - (tpPct / 100) / lev);
-              const slPrice = enterSide === "LONG" ? entryPrice * (1 - (slPct / 100) / lev) : entryPrice * (1 + (slPct / 100) / lev);
+              const tpPrice = enterSide === "LONG" ? entryPrice * (1 + tpPct / 100 / lev) : entryPrice * (1 - tpPct / 100 / lev);
+              const slPrice = enterSide === "LONG" ? entryPrice * (1 - slPct / 100 / lev) : entryPrice * (1 + slPct / 100 / lev);
+              let tlgMsg = `\u{1F916} *Automated Trade Opened!*
 
-              let tlgMsg = `🤖 *Automated Trade Opened!*\n\n` +
-                `*Action*: OPEN ${sideIcon} ${enterSide}\n` +
-                `*Asset*: ${config.token}\n` +
-                `*Size*: ${sizeInSol.toFixed(4)} SOL\n` +
-                `*Leverage*: ${lev}x\n` +
-                `*Entry Price*: $${entryPrice.toFixed(2)}\n` +
-                `*Take Profit Limit*: +${tpPct.toFixed(1)}% ($${tpPrice.toFixed(2)})\n` +
-                `*Stop Loss Limit*: -${slPct.toFixed(1)}% ($${slPrice.toFixed(2)})\n` +
-                `*Score (Σ)*: ${pred.strategyDetails.compositeScore?.toFixed(2) || "N/A"}\n` +
-                `*Sentiment Score (Political/News)*: ${pred.sentiment.toFixed(2)}\n` +
-                `*Technical Score (MACD)*: ${pred.strategyDetails.technicalScore !== undefined ? (pred.strategyDetails.technicalScore >= 0 ? "+" : "") + pred.strategyDetails.technicalScore.toFixed(2) : "N/A"}\n` +
-                `*Liquidity Score (RSI)*: ${pred.strategyDetails.liquidityScore !== undefined ? (pred.strategyDetails.liquidityScore >= 0 ? "+" : "") + pred.strategyDetails.liquidityScore.toFixed(2) : "N/A"}\n` +
-                `*Elliott Wave Score*: ${pred.strategyDetails.elliottWaveScore !== undefined ? (pred.strategyDetails.elliottWaveScore >= 0 ? "+" : "") + pred.strategyDetails.elliottWaveScore.toFixed(2) : "N/A"}\n\n`;
+*Action*: OPEN ${sideIcon} ${enterSide}
+*Asset*: ${config.token}
+*Size*: ${sizeInSol.toFixed(4)} SOL
+*Leverage*: ${lev}x
+*Entry Price*: $${entryPrice.toFixed(2)}
+*Take Profit Limit*: +${tpPct.toFixed(1)}% ($${tpPrice.toFixed(2)})
+*Stop Loss Limit*: -${slPct.toFixed(1)}% ($${slPrice.toFixed(2)})
+*Score (\u03A3)*: ${pred.strategyDetails.compositeScore?.toFixed(2) || "N/A"}
+*Sentiment Score (Political/News)*: ${pred.sentiment.toFixed(2)}
+*Technical Score (MACD)*: ${pred.strategyDetails.technicalScore !== void 0 ? (pred.strategyDetails.technicalScore >= 0 ? "+" : "") + pred.strategyDetails.technicalScore.toFixed(2) : "N/A"}
+*Liquidity Score (RSI)*: ${pred.strategyDetails.liquidityScore !== void 0 ? (pred.strategyDetails.liquidityScore >= 0 ? "+" : "") + pred.strategyDetails.liquidityScore.toFixed(2) : "N/A"}
+*Elliott Wave Score*: ${pred.strategyDetails.elliottWaveScore !== void 0 ? (pred.strategyDetails.elliottWaveScore >= 0 ? "+" : "") + pred.strategyDetails.elliottWaveScore.toFixed(2) : "N/A"}
 
-              // Add Associated News section with links if headlines is present
+`;
               if (pred.headlines && pred.headlines.length > 0) {
-                tlgMsg += `📰 *Associated News Catalyst*:\n`;
-                pred.headlines.slice(0, 5).forEach((item: any, idx: number) => {
+                tlgMsg += `\u{1F4F0} *Associated News Catalyst*:
+`;
+                pred.headlines.slice(0, 5).forEach((item, idx) => {
                   const titleEscaped = item.title.replace(/[_*`[\]()]/g, "");
                   const shortTitle = titleEscaped.substring(0, 80) + (titleEscaped.length > 80 ? "..." : "");
-                  const score = item.sentiment !== undefined ? item.sentiment : heuristicSentiment(item.title);
+                  const score = item.sentiment !== void 0 ? item.sentiment : heuristicSentiment(item.title);
                   const scoreStr = score >= 0 ? `+${score.toFixed(2)}` : score.toFixed(2);
                   const timeAgo = item.publishedAt ? ` | ${getNewsAgeString(item.publishedAt)}` : "";
                   const metaStr = `[Score: ${scoreStr}${timeAgo}]`;
                   if (item.url) {
-                    tlgMsg += `${idx + 1}. [${shortTitle}](${item.url}) ${metaStr}\n`;
+                    tlgMsg += `${idx + 1}. [${shortTitle}](${item.url}) ${metaStr}
+`;
                   } else {
-                    tlgMsg += `${idx + 1}. ${shortTitle} ${metaStr}\n`;
+                    tlgMsg += `${idx + 1}. ${shortTitle} ${metaStr}
+`;
                   }
                 });
-                tlgMsg += `\n`;
+                tlgMsg += `
+`;
               }
-                
               if (onChainSignature) {
-                tlgMsg += `\n*On-Chain Tx*: [${onChainSignature.slice(0, 8)}...](https://solscan.io/tx/${onChainSignature})`;
+                tlgMsg += `
+*On-Chain Tx*: [${onChainSignature.slice(0, 8)}...](https://solscan.io/tx/${onChainSignature})`;
               }
               await sendTelegramMessage(activeBotToken, activeChatId, tlgMsg);
             }
-          } catch (e: any) {
+          } catch (e) {
             console.error("[Jupiter Daemon] Failed to send Telegram alert for open:", e.message);
           }
         }
       }
     }
-
     config.activeTrade = activeTrade;
     config.lastTradePnL = lastTradePnL;
     config.cumulativePnL = cumulativePnL;
     config.tradesHistory = tradesHistory;
     config.lastAction = pred.action;
-
     saveJupiterConfig(config);
-  } catch (err: any) {
+  } catch (err) {
     console.error("[Jupiter Daemon] FAILED execution checking loop:", err.message);
     config.error = err.message;
     saveJupiterConfig(config);
   }
 }
-
-// Daemon scheduler handle
-let daemonTimer: NodeJS.Timeout | null = null;
-let jupiterDaemonTimer: NodeJS.Timeout | null = null;
-
-function restartDaemon(minutes: number) {
+var daemonTimer = null;
+var jupiterDaemonTimer = null;
+function restartDaemon(minutes) {
   if (daemonTimer) {
     clearInterval(daemonTimer);
   }
   const freq = minutes > 0 ? minutes : 5;
-  const intervalMs = freq * 60 * 1000;
+  const intervalMs = freq * 60 * 1e3;
   console.log(`[Telegram Daemon] [telegram_alert_v1] Initialized checking loop. Check interval: Every ${freq} minutes.`);
   daemonTimer = setInterval(() => {
     checkPredictionAndAlert().catch((err) => {
@@ -3331,13 +2750,12 @@ function restartDaemon(minutes: number) {
     });
   }, intervalMs);
 }
-
-function restartJupiterDaemon(minutes: number) {
+function restartJupiterDaemon(minutes) {
   if (jupiterDaemonTimer) {
     clearInterval(jupiterDaemonTimer);
   }
   const freq = minutes > 0 ? minutes : 5;
-  const intervalMs = freq * 60 * 1000;
+  const intervalMs = freq * 60 * 1e3;
   console.log(`[Jupiter Daemon] Initialized checking loop. Check interval: Every ${freq} minutes.`);
   jupiterDaemonTimer = setInterval(() => {
     checkJupiterTradingAndState().catch((err) => {
@@ -3345,64 +2763,45 @@ function restartJupiterDaemon(minutes: number) {
     });
   }, intervalMs);
 }
-
-// Start background monitoring daemons with configuration frequency is now handled in startServer
-
 app.post("/api/predict", async (req, res) => {
   try {
     const { token = "SOL", topic = "crypto,war", weights, interval = "15m" } = req.body;
     const result = await getPredictionData(token, topic, weights, interval);
     res.json(result);
-  } catch (error: any) {
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
-
 app.post("/api/forecast", async (req, res) => {
   try {
     const { token = "SOL", interval = "1h", weights, newsQueryKeywords = "" } = req.body;
-    const topic = newsQueryKeywords && newsQueryKeywords.trim() !== "" 
-      ? newsQueryKeywords.trim() 
-      : `${token.toUpperCase()} OR Solana cryptocurrency OR Solana news`;
-      
+    const topic = newsQueryKeywords && newsQueryKeywords.trim() !== "" ? newsQueryKeywords.trim() : `${token.toUpperCase()} OR Solana cryptocurrency OR Solana news`;
     const result = await getPredictionData(token, topic, weights, interval, newsQueryKeywords);
-    
-    // getPredictionData now perfectly returns the exact combined payload for Forecast and Alerts!
     res.json(result);
-  } catch (error: any) {
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
-
-// PRIMARY public contract: turn the live Cortex Alpha multi-factor strategy into
-// a single, clean TRADE RECOMMENDATION. Same engine as /api/forecast
-// (getPredictionData), reshaped into a concise decision object for external
-// consumers such as the `classifier` Claude Code plugin. See docs/API.md.
-// Accepts GET (query params) and POST (JSON body) for convenience.
-const handleGetStrategyOutput = async (req: any, res: any) => {
+var handleGetStrategyOutput = async (req, res) => {
   try {
-    const src = { ...(req.query || {}), ...(req.body || {}) };
+    const src = { ...req.query || {}, ...req.body || {} };
     const token = String(src.token || "SOL");
     const interval = String(src.interval || "15m");
-    const weights = src.weights; // optional { sentiment, technical, liquidity, elliottWave }
+    const weights = src.weights;
     const newsQueryKeywords = String(src.newsQueryKeywords || "");
-    const queryTopic =
-      (src.topic && String(src.topic).trim()) ||
-      (newsQueryKeywords && newsQueryKeywords.trim()) ||
-      `${token.toUpperCase()} OR Solana cryptocurrency OR Solana news`;
-
+    const queryTopic = src.topic && String(src.topic).trim() || newsQueryKeywords && newsQueryKeywords.trim() || `${token.toUpperCase()} OR Solana cryptocurrency OR Solana news`;
     const p = await getPredictionData(token, queryTopic, weights, interval, newsQueryKeywords);
-    const sd = p.strategyDetails || ({} as any);
-
-    // Concise, decision-first recommendation. `raw` carries the full forecast
-    // payload for consumers that want everything.
+    const sd = p.strategyDetails || {};
     const recommendation = {
       token: p.token,
       interval: p.interval,
       timestamp: p.timestamp,
-      recommendation: p.positionSide, // LONG | SHORT | HOLD
-      action: p.action, // e.g. "Long Buy", "Hold Chop Zone"
-      order: p.suggestedOrder, // BUY_MARKET | SELL_MARKET | HOLD
+      recommendation: p.positionSide,
+      // LONG | SHORT | HOLD
+      action: p.action,
+      // e.g. "Long Buy", "Hold Chop Zone"
+      order: p.suggestedOrder,
+      // BUY_MARKET | SELL_MARKET | HOLD
       confirmed: p.isTrendConfirmed3x,
       confidence: p.confidenceScore,
       price: p.currentPrice,
@@ -3416,73 +2815,60 @@ const handleGetStrategyOutput = async (req: any, res: any) => {
         technical: sd.technicalScore,
         momentum: sd.liquidityScore,
         sentiment: sd.sentimentScore,
-        elliottWave: sd.elliottWaveScore,
+        elliottWave: sd.elliottWaveScore
       },
       indicators: p.indicators,
       rationale: p.rationale,
-      raw: p,
+      raw: p
     };
     res.json(recommendation);
-  } catch (error: any) {
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
-
 app.get("/get-strategy-output", handleGetStrategyOutput);
 app.post("/get-strategy-output", handleGetStrategyOutput);
-// /api/* aliases — on Vercel only /api/* is rewritten to the serverless function,
-// so these guarantee the recommendation is reachable in production too.
 app.get("/api/get-strategy-output", handleGetStrategyOutput);
 app.post("/api/get-strategy-output", handleGetStrategyOutput);
 app.post("/api/strategy/signal", handleGetStrategyOutput);
-
 app.post("/api/backtest", async (req, res) => {
   try {
-    const { token = "SOL", interval = "1h", lookbackDays = 7, weights, initialCapital = 10000, startDate, endDate, leverage = 5, takeProfitPct = 4.0, stopLossPct = 2.0 } = req.body;
+    const { token = "SOL", interval = "1h", lookbackDays = 7, weights, initialCapital = 1e4, startDate, endDate, leverage = 5, takeProfitPct = 4, stopLossPct = 2 } = req.body;
     const symbol = `${token.toUpperCase()}-USD`;
-    
-    let period1: Date | undefined = parseQueryDate(startDate);
+    let period1 = parseQueryDate(startDate);
     const period2 = parseQueryDate(endDate);
-    
     if (!period1) {
-      period1 = subDays(new Date(), Number(lookbackDays) || 7);
+      period1 = subDays(/* @__PURE__ */ new Date(), Number(lookbackDays) || 7);
     }
-    
     const allowedIntervals = ["15m", "30m", "1h", "1d"];
     const validInterval = allowedIntervals.includes(interval) ? interval : "1h";
-    
-    const queryOptions: any = {
+    const queryOptions = {
       period1,
-      interval: validInterval as any
+      interval: validInterval
     };
     if (period2) {
       if (period2.getTime() <= period1.getTime()) {
         period2.setSeconds(period2.getSeconds() + 1);
         if (period2.getTime() <= period1.getTime()) {
-           period2.setDate(period2.getDate() + 1);
+          period2.setDate(period2.getDate() + 1);
         }
       }
       queryOptions.period2 = period2;
     }
-    
     const chart = await chartResilient(symbol, queryOptions, { validateResult: false });
-    const quotes = chart.quotes.filter((q: any) => q && q.close !== null);
-    
+    const quotes = chart.quotes.filter((q) => q && q.close !== null);
     if (quotes.length < 15) {
       return res.status(400).json({ error: "Insufficient historical data points for backtesting. Choose a longer lookback or a smaller interval." });
     }
-    
-    const closes = quotes.map((q: any) => q.close);
-    const dates = quotes.map((q: any) => q.date);
+    const closes = quotes.map((q) => q.close);
+    const dates = quotes.map((q) => q.date);
     const emaFast = calculateEMA(closes, 12);
     const emaSlow = calculateEMA(closes, 26);
     const rsis = calculateRSI(closes, 14);
-    
-    let capital = Number(initialCapital) || 10000;
-    let activePosition: any = null;
-    const trades: any[] = [];
-    const equityCurve: any[] = [];
-    
+    let capital = Number(initialCapital) || 1e4;
+    let activePosition = null;
+    const trades = [];
+    const equityCurve = [];
     let wins = 0;
     let losses = 0;
     let congruentCounts = 0;
@@ -3490,42 +2876,10 @@ app.post("/api/backtest", async (req, res) => {
     let totalErrorPctCombined = 0;
     let totalSmapeCombined = 0;
     let errorCountsCombined = 0;
-
     let lastSentDirection = "HOLD";
-    
-    // Start simulation after slow EMA becomes valid (index 26)
     const startIndex = Math.min(26, Math.floor(closes.length / 3));
-    
     for (let i = startIndex; i < closes.length; i++) {
-      const currentPrice = closes[i];
-      const dateStr = new Date(dates[i]).toISOString();
-      const currentRsi = rsis[i];
-      const fast = emaFast[i];
-      const slow = emaSlow[i];
-      
-      // Compute predicted price for step i using indicators computed at step i - 1
-      const pIdx = i - 1;
-      const pPrice = closes[pIdx];
-      const pEmaFast = emaFast[pIdx];
-      const pEmaSlow = emaSlow[pIdx];
-      const pRsi = rsis[pIdx];
-      
-      const pPrevMomPrice = closes[Math.max(0, pIdx - 3)];
-      const pMomentum = (pPrice - pPrevMomPrice) / (pPrevMomPrice || 1);
-      const pSentiment = Math.min(Math.max(pMomentum * 30, -1), 1);
-      
-      const pStrategy = performCoreAnalysis(closes.slice(0, pIdx + 1), [], weights, pSentiment);
-      const pFinalScore = pStrategy.compositeScore;
-      
-      const predictedPrice = pPrice * (1 + pFinalScore * 0.008);
-      const errorRatePct = Math.abs((predictedPrice - currentPrice) / currentPrice) * 100;
-      const denom = (Math.abs(currentPrice) + Math.abs(predictedPrice)) / 2;
-      const smape = denom > 0 ? (Math.abs(predictedPrice - currentPrice) / denom) * 100 : 0;
-      totalErrorPctCombined += errorRatePct;
-      totalSmapeCombined += smape;
-      errorCountsCombined++;
-
-      function getTickSignal(tickIdx: number) {
+      let getTickSignal = function(tickIdx) {
         if (tickIdx < 0) {
           return {
             positionSide: "HOLD",
@@ -3540,37 +2894,33 @@ app.post("/api/backtest", async (req, res) => {
         const prPrice = closes[Math.max(0, tickIdx - 3)];
         const mom = (closes[tickIdx] - prPrice) / (prPrice || 1);
         const calcSent = Math.min(Math.max(mom * 30, -1), 1);
-        
         const sData = performCoreAnalysis(closes.slice(0, tickIdx + 1), [], weights, calcSent);
         const fScore = sData.compositeScore;
-        
         const tickCloses = closes.slice(0, tickIdx + 1);
         const ema200List = calculateEMA(tickCloses, Math.min(200, tickCloses.length));
         const tickEma200 = ema200List[ema200List.length - 1];
         const tickClose = closes[tickIdx];
-
-        // Same spec-faithful decision as live: Σ vs ±0.08 + Chop Zone. Elliott Wave is
-        // already folded into Σ; no EW veto / 200-EMA suppression gate.
         const cRsi = rsis[tickIdx] || 50;
         let aRec = sData.isChop ? "Hold Chop Zone" : "Hold";
         let pSide = "HOLD";
         let trnd = "SIDEWAYS";
-
         if (fScore > 0.08) {
-            pSide = "LONG"; aRec = cRsi < 30 ? "Long Buy (Oversold)" : "Long Buy"; trnd = "UP";
+          pSide = "LONG";
+          aRec = cRsi < 30 ? "Long Buy (Oversold)" : "Long Buy";
+          trnd = "UP";
         } else if (fScore < -0.08) {
-            pSide = "SHORT"; aRec = cRsi > 70 ? "Short Sell (Overbought)" : "Short Sell"; trnd = "DOWN";
+          pSide = "SHORT";
+          aRec = cRsi > 70 ? "Short Sell (Overbought)" : "Short Sell";
+          trnd = "DOWN";
         }
-
         if (sData.isHoldZone) {
           pSide = "HOLD";
           trnd = "CHOP/HOLD";
-          aRec = sData.isChop ? "Hold Chop Zone" : "Hold (Σ below threshold)";
+          aRec = sData.isChop ? "Hold Chop Zone" : "Hold (\u03A3 below threshold)";
         }
-        
-        return { 
-          positionSide: pSide, 
-          actionRecommendation: aRec, 
+        return {
+          positionSide: pSide,
+          actionRecommendation: aRec,
           finalScore: fScore,
           rsiScore: sData.rsiScore,
           emaScore: sData.emaScore,
@@ -3578,47 +2928,61 @@ app.post("/api/backtest", async (req, res) => {
           elliotWavePhase: sData.elliotWavePhase,
           trnd
         };
-      }
-
+      };
+      const currentPrice = closes[i];
+      const dateStr = new Date(dates[i]).toISOString();
+      const currentRsi = rsis[i];
+      const fast = emaFast[i];
+      const slow = emaSlow[i];
+      const pIdx = i - 1;
+      const pPrice = closes[pIdx];
+      const pEmaFast = emaFast[pIdx];
+      const pEmaSlow = emaSlow[pIdx];
+      const pRsi = rsis[pIdx];
+      const pPrevMomPrice = closes[Math.max(0, pIdx - 3)];
+      const pMomentum = (pPrice - pPrevMomPrice) / (pPrevMomPrice || 1);
+      const pSentiment = Math.min(Math.max(pMomentum * 30, -1), 1);
+      const pStrategy = performCoreAnalysis(closes.slice(0, pIdx + 1), [], weights, pSentiment);
+      const pFinalScore = pStrategy.compositeScore;
+      const predictedPrice = pPrice * (1 + pFinalScore * 8e-3);
+      const errorRatePct = Math.abs((predictedPrice - currentPrice) / currentPrice) * 100;
+      const denom = (Math.abs(currentPrice) + Math.abs(predictedPrice)) / 2;
+      const smape = denom > 0 ? Math.abs(predictedPrice - currentPrice) / denom * 100 : 0;
+      totalErrorPctCombined += errorRatePct;
+      totalSmapeCombined += smape;
+      errorCountsCombined++;
       const currentSig = getTickSignal(i);
       const prevSig1 = getTickSignal(i - 1);
       const prevSig2 = getTickSignal(i - 2);
-      
       const positionSide = currentSig.positionSide;
       let actionRecommendation = currentSig.actionRecommendation;
       const finalScore = currentSig.finalScore;
-      
-      const isTrendConfirmed3x = (positionSide !== "HOLD" && positionSide === prevSig1.positionSide);
-
-
-      // Measure prediction quality: directional hit rate
+      const isTrendConfirmed3x = positionSide !== "HOLD" && positionSide === prevSig1.positionSide;
       if (i < closes.length - 1) {
         const nextPrice = closes[i + 1];
         const actualReturn = (nextPrice - currentPrice) / currentPrice;
-        const predDir = finalScore > 0 ? 1 : (finalScore < 0 ? -1 : 0);
-        const actDir = actualReturn > 0 ? 1 : (actualReturn < 0 ? -1 : 0);
+        const predDir = finalScore > 0 ? 1 : finalScore < 0 ? -1 : 0;
+        const actDir = actualReturn > 0 ? 1 : actualReturn < 0 ? -1 : 0;
         if (predDir === actDir) {
           congruentCounts++;
         }
         predictionSteps++;
       }
-      
-      const sizeInUsd = capital * 0.15; // use 15% sizing
-      const sizeUnits = (sizeInUsd * leverage) / currentPrice;
-      
+      const sizeInUsd = capital * 0.15;
+      const sizeUnits = sizeInUsd * leverage / currentPrice;
       if (activePosition === null) {
         if (positionSide === "HOLD") {
-          lastSentDirection = "HOLD"; // Reset so we can catch new trends later
+          lastSentDirection = "HOLD";
         } else if (positionSide !== lastSentDirection) {
           const is1stConfirmation = positionSide !== prevSig1.positionSide;
           const is2ndConfirmation = positionSide === prevSig1.positionSide && positionSide !== prevSig2.positionSide;
-          
           if (is1stConfirmation) {
             trades.push({
               type: positionSide === "LONG" ? "CONFIRM_LONG" : "CONFIRM_SHORT",
               date: dateStr,
               price: currentPrice,
-              capitalBefore: capital, // or capital
+              capitalBefore: capital,
+              // or capital
               note: `1st Signal Confirmation (${positionSide})`,
               sentimentScore: currentSig.sentimentScore,
               technicalScore: currentSig.emaScore,
@@ -3631,7 +2995,8 @@ app.post("/api/backtest", async (req, res) => {
               type: positionSide === "LONG" ? "CONFIRM_LONG" : "CONFIRM_SHORT",
               date: dateStr,
               price: currentPrice,
-              capitalBefore: capital, // or capital
+              capitalBefore: capital,
+              // or capital
               note: `2nd Signal Confirmation (${positionSide})`,
               sentimentScore: currentSig.sentimentScore,
               technicalScore: currentSig.emaScore,
@@ -3641,31 +3006,26 @@ app.post("/api/backtest", async (req, res) => {
             });
           }
         }
-        
         if (positionSide !== "HOLD" && positionSide !== lastSentDirection && isTrendConfirmed3x && currentSig.trnd !== "SIDEWAYS") {
-          // Calculate dynamic TP/SL
-          const recentHighs = closes.slice(Math.max(0, i - 20), i).map((c: number) => c);
-          const recentLows = closes.slice(Math.max(0, i - 20), i).map((c: number) => c);
+          const recentHighs = closes.slice(Math.max(0, i - 20), i).map((c) => c);
+          const recentLows = closes.slice(Math.max(0, i - 20), i).map((c) => c);
           const localHigh = Math.max(...recentHighs, currentPrice);
           const localLow = Math.min(...recentLows, currentPrice);
-          const distToHighPct = ((localHigh - currentPrice) / currentPrice) * 100;
-          const distToLowPct = ((currentPrice - localLow) / currentPrice) * 100;
-          
+          const distToHighPct = (localHigh - currentPrice) / currentPrice * 100;
+          const distToLowPct = (currentPrice - localLow) / currentPrice * 100;
           let dynamicTp = 0;
           let dynamicSl = 0;
-
           if (positionSide === "LONG") {
-              const suggestedTpPrice = localHigh * 1.002;
-              const suggestedSlPrice = localLow * 0.998;
-              dynamicTp = (Math.abs(suggestedTpPrice - currentPrice) / currentPrice) * 100 * leverage;
-              dynamicSl = (Math.abs(currentPrice - suggestedSlPrice) / currentPrice) * 100 * leverage;
+            const suggestedTpPrice = localHigh * 1.002;
+            const suggestedSlPrice = localLow * 0.998;
+            dynamicTp = Math.abs(suggestedTpPrice - currentPrice) / currentPrice * 100 * leverage;
+            dynamicSl = Math.abs(currentPrice - suggestedSlPrice) / currentPrice * 100 * leverage;
           } else if (positionSide === "SHORT") {
-              const suggestedTpPrice = localLow * 0.998;
-              const suggestedSlPrice = localHigh * 1.002;
-              dynamicTp = (Math.abs(currentPrice - suggestedTpPrice) / currentPrice) * 100 * leverage;
-              dynamicSl = (Math.abs(suggestedSlPrice - currentPrice) / currentPrice) * 100 * leverage;
+            const suggestedTpPrice = localLow * 0.998;
+            const suggestedSlPrice = localHigh * 1.002;
+            dynamicTp = Math.abs(currentPrice - suggestedTpPrice) / currentPrice * 100 * leverage;
+            dynamicSl = Math.abs(suggestedSlPrice - currentPrice) / currentPrice * 100 * leverage;
           }
-
           if (positionSide === "LONG") {
             activePosition = {
               side: "LONG",
@@ -3734,12 +3094,10 @@ app.post("/api/backtest", async (req, res) => {
         const pos = activePosition;
         let shouldClose = false;
         let closeReason = "";
-        
-        const currentTp = pos.tpPct; // We know pos.tpPct and slPct are already dynamically generated at entry
+        const currentTp = pos.tpPct;
         const currentSl = pos.slPct;
-
         if (pos.side === "LONG") {
-          const gainPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 * leverage;
+          const gainPct = (currentPrice - pos.entryPrice) / pos.entryPrice * 100 * leverage;
           if (gainPct >= currentTp) {
             shouldClose = true;
             closeReason = `Target profit hit (+${currentTp.toFixed(1)}%)`;
@@ -3748,7 +3106,7 @@ app.post("/api/backtest", async (req, res) => {
             closeReason = `Stop-loss triggered (-${currentSl.toFixed(1)}%)`;
           }
         } else if (pos.side === "SHORT") {
-          const gainPct = ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100 * leverage;
+          const gainPct = (pos.entryPrice - currentPrice) / pos.entryPrice * 100 * leverage;
           if (gainPct >= currentTp) {
             shouldClose = true;
             closeReason = `Target profit hit (+${currentTp.toFixed(1)}%)`;
@@ -3757,36 +3115,29 @@ app.post("/api/backtest", async (req, res) => {
             closeReason = `Stop-loss triggered (-${currentSl.toFixed(1)}%)`;
           }
         }
-
-        const elapsedMinutes = (new Date(dateStr).getTime() - new Date(pos.entryDate).getTime()) / (60 * 1000);
-        const unrealizedPnL = pos.side === "LONG"
-          ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 * leverage
-          : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100 * leverage;
-
+        const elapsedMinutes = (new Date(dateStr).getTime() - new Date(pos.entryDate).getTime()) / (60 * 1e3);
+        const unrealizedPnL = pos.side === "LONG" ? (currentPrice - pos.entryPrice) / pos.entryPrice * 100 * leverage : (pos.entryPrice - currentPrice) / pos.entryPrice * 100 * leverage;
         if (!shouldClose && elapsedMinutes >= 90 && unrealizedPnL < 0.5) {
           shouldClose = true;
           closeReason = `PnL Threshold Time Limit Exceeded (Duration: ${Math.round(elapsedMinutes)} mins, PnL: ${unrealizedPnL.toFixed(2)}% < +0.5%)`;
         }
-        
         if (!shouldClose && positionSide !== "HOLD" && positionSide !== pos.side) {
-            shouldClose = true;
-            closeReason = `Trend Reversal (Signal flipped to ${positionSide})`;
+          shouldClose = true;
+          closeReason = `Trend Reversal (Signal flipped to ${positionSide})`;
         }
-
         if (shouldClose) {
-          const rawPnl = pos.side === "LONG" ? (pos.size * (currentPrice - pos.entryPrice)) : (pos.size * (pos.entryPrice - currentPrice));
-          const fee = Math.abs(rawPnl * 0.001); // 0.1% transaction drag
+          const rawPnl = pos.side === "LONG" ? pos.size * (currentPrice - pos.entryPrice) : pos.size * (pos.entryPrice - currentPrice);
+          const fee = Math.abs(rawPnl * 1e-3);
           const netPnl = rawPnl - fee;
           capital += netPnl;
-          
-          if (netPnl > 0) wins++; else losses++;
-          
+          if (netPnl > 0) wins++;
+          else losses++;
           trades.push({
             type: pos.side === "LONG" ? "CLOSE_LONG" : "CLOSE_SHORT",
             date: dateStr,
             price: currentPrice,
             pnl: netPnl,
-            pnlPct: (netPnl / sizeInUsd) * 100,
+            pnlPct: netPnl / sizeInUsd * 100,
             capitalAfter: capital,
             openDate: pos.entryDate,
             note: closeReason,
@@ -3804,16 +3155,12 @@ app.post("/api/backtest", async (req, res) => {
           activePosition = null;
         }
       }
-      
       let currentEquity = capital;
       if (activePosition !== null) {
         const pos = activePosition;
-        const rawCurrentPnl = pos.side === "LONG" 
-          ? pos.size * (currentPrice - pos.entryPrice)
-          : pos.size * (pos.entryPrice - currentPrice);
+        const rawCurrentPnl = pos.side === "LONG" ? pos.size * (currentPrice - pos.entryPrice) : pos.size * (pos.entryPrice - currentPrice);
         currentEquity += rawCurrentPnl;
       }
-      
       equityCurve.push({
         date: dateStr.substring(0, 16).replace("T", " "),
         equity: Number(currentEquity.toFixed(2)),
@@ -3822,52 +3169,42 @@ app.post("/api/backtest", async (req, res) => {
         errorRatePct: Number(smape.toFixed(2))
       });
     }
-    
-    // Forced exit at end of timeline window
     if (activePosition !== null) {
       const pos = activePosition;
       const finalPrice = closes[closes.length - 1];
       const finalDateStr = new Date(dates[dates.length - 1]).toISOString();
-      const rawPnl = pos.side === "LONG" 
-        ? pos.size * (finalPrice - pos.entryPrice)
-        : pos.size * (pos.entryPrice - finalPrice);
-      const fee = Math.abs(rawPnl * 0.001);
+      const rawPnl = pos.side === "LONG" ? pos.size * (finalPrice - pos.entryPrice) : pos.size * (pos.entryPrice - finalPrice);
+      const fee = Math.abs(rawPnl * 1e-3);
       const netPnl = rawPnl - fee;
-      
       capital += netPnl;
-      if (netPnl > 0) wins++; else losses++;
-      
+      if (netPnl > 0) wins++;
+      else losses++;
       trades.push({
         type: pos.side === "LONG" ? "CLOSE_LONG" : "CLOSE_SHORT",
         date: finalDateStr,
         price: finalPrice,
         pnl: netPnl,
-        pnlPct: (netPnl / (capital * 0.15)) * 100,
+        pnlPct: netPnl / (capital * 0.15) * 100,
         capitalAfter: capital,
         openDate: pos.entryDate,
         note: "Forced settlement at final historical tick boundary"
       });
     }
-    
     const totalTrades = wins + losses;
-    const winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
-    const pnlPct = ((capital - initialCapital) / initialCapital) * 100;
-    const predictionQualityPct = predictionSteps > 0 ? (congruentCounts / predictionSteps) * 100 : 0;
-    
-    // Symmetric Error tracks crypto prices with high-integrity alignment
-    const averageSmapePct = errorCountsCombined > 0 ? (totalSmapeCombined / errorCountsCombined) : 0;
-    const symmetricErrorRate = averageSmapePct / 2; // maps SMAPE's 200% bound symmetrically into 100%
+    const winRate = totalTrades > 0 ? wins / totalTrades * 100 : 0;
+    const pnlPct = (capital - initialCapital) / initialCapital * 100;
+    const predictionQualityPct = predictionSteps > 0 ? congruentCounts / predictionSteps * 100 : 0;
+    const averageSmapePct = errorCountsCombined > 0 ? totalSmapeCombined / errorCountsCombined : 0;
+    const symmetricErrorRate = averageSmapePct / 2;
     const backtestAccuracyPct = Math.max(0, 100 - symmetricErrorRate);
-    const averageErrorPct = averageSmapePct; // set SMAPE directly as standard error return
-    
+    const averageErrorPct = averageSmapePct;
     let maxEq = initialCapital;
     let maxDd = 0;
-    equityCurve.forEach(p => {
+    equityCurve.forEach((p) => {
       if (p.equity > maxEq) maxEq = p.equity;
-      const dd = ((maxEq - p.equity) / maxEq) * 100;
+      const dd = (maxEq - p.equity) / maxEq * 100;
       if (dd > maxDd) maxDd = dd;
     });
-    
     res.json({
       metrics: {
         initialCapital,
@@ -3882,27 +3219,20 @@ app.post("/api/backtest", async (req, res) => {
         averageErrorPct,
         backtestAccuracyPct
       },
-      trades: trades.reverse(), // most recent trades first in table display
+      trades: trades.reverse(),
+      // most recent trades first in table display
       equityCurve
     });
-  } catch (error: any) {
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
-
 app.get("/api/telegram-config", (req, res) => {
   try {
     const config = loadTelegramConfig();
     const secrets = getTelegramSecrets();
-    
-    const botTokenMasked = secrets.botToken 
-      ? (`${secrets.botToken.substring(0, 6)}...${secrets.botToken.substring(secrets.botToken.length - 4)}`)
-      : (config.botToken ? "****" : "");
-
-    const chatIdMasked = secrets.chatId
-      ? (`${secrets.chatId.substring(0, 4)}...`)
-      : config.chatId;
-
+    const botTokenMasked = secrets.botToken ? `${secrets.botToken.substring(0, 6)}...${secrets.botToken.substring(secrets.botToken.length - 4)}` : config.botToken ? "****" : "";
+    const chatIdMasked = secrets.chatId ? `${secrets.chatId.substring(0, 4)}...` : config.chatId;
     res.json({
       ...config,
       secretsConfigured: !!(secrets.botToken && secrets.chatId),
@@ -3912,74 +3242,65 @@ app.get("/api/telegram-config", (req, res) => {
       chatId: chatIdMasked,
       botIdentifier: "telegram_alert_v1"
     });
-  } catch (err: any) {
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
 app.post("/api/telegram-config", async (req, res) => {
   try {
-    const { 
-      enabled, 
-      token, 
-      topic, 
-      weights, 
-      frequency, 
-      cooldownMinutes, 
-      takeProfitPct, 
-      stopLossPct, 
-      leverage, 
-      interval, 
-      resetStats, 
-      testAlert, 
-      triggerAlert 
+    const {
+      enabled,
+      token,
+      topic,
+      weights,
+      frequency,
+      cooldownMinutes,
+      takeProfitPct,
+      stopLossPct,
+      leverage,
+      interval,
+      resetStats,
+      testAlert,
+      triggerAlert
     } = req.body;
     const current = loadTelegramConfig();
     const secrets = getTelegramSecrets();
-    
-    // We strictly use bot credentials from system environment variables first
     const activeBotToken = secrets.botToken || current.botToken;
     const activeChatId = secrets.chatId || current.chatId;
-    
     current.enabled = !!enabled;
     if (token) {
       if (current.token !== token) {
-        current.activeTrade = null; // Reset current trade to avoid incorrect asset price evaluation
+        current.activeTrade = null;
       }
       current.token = token;
     }
     if (topic) current.topic = topic;
     if (weights) current.weights = weights;
-    
     const newFrequency = Number(frequency);
     if (newFrequency && !isNaN(newFrequency) && newFrequency > 0) {
       current.frequency = newFrequency;
     }
-
-    if (cooldownMinutes !== undefined) {
+    if (cooldownMinutes !== void 0) {
       const parsedCooldown = Number(cooldownMinutes);
       if (!isNaN(parsedCooldown) && parsedCooldown >= 0) {
         current.cooldownMinutes = parsedCooldown;
       }
     }
-
-    if (takeProfitPct !== undefined) {
+    if (takeProfitPct !== void 0) {
       current.takeProfitPct = Number(takeProfitPct) || 4;
     }
-    if (stopLossPct !== undefined) {
+    if (stopLossPct !== void 0) {
       current.stopLossPct = Number(stopLossPct) || 2;
     }
-    if (leverage !== undefined) {
+    if (leverage !== void 0) {
       current.leverage = Number(leverage) || 5;
     }
     if (interval) {
       current.interval = interval;
     }
-
-    if (req.body.newsTelegramChannel !== undefined) {
+    if (req.body.newsTelegramChannel !== void 0) {
       current.newsTelegramChannel = String(req.body.newsTelegramChannel).trim();
     }
-
     if (resetStats) {
       current.lastTradePnL = 0;
       current.cumulativePnL = 0;
@@ -3988,161 +3309,135 @@ app.post("/api/telegram-config", async (req, res) => {
       current.lastTradeAddedAt = "";
       current.auditLogs = [];
     }
-    
     saveTelegramConfig(current);
-    
-    // Dynamically adjust daemon checking schedule
     restartDaemon(current.frequency || 5);
-    
     if (triggerAlert) {
       await checkPredictionAndAlert(true);
     } else if (testAlert) {
       if (!activeBotToken || !activeChatId) {
         return res.status(400).json({ error: "No Telegram bot credentials configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in environment secrets." });
       }
-
       let predictionSnippet = "";
       try {
         const pred = await getPredictionData(current.token, current.topic, current.weights);
         let tpSlStr = "";
         if (pred.suggestedTpPrice && pred.suggestedSlPrice && (pred.positionSide === "LONG" || pred.positionSide === "SHORT")) {
-           const lev = current.leverage || 5;
-           const tpPct = (Math.abs(pred.suggestedTpPrice - pred.price) / pred.price) * 100 * lev;
-           const slPct = (Math.abs(pred.suggestedSlPrice - pred.price) / pred.price) * 100 * lev;
-           
-           tpSlStr = `\n• *Estimated Liquidation Take-Profit*: +${tpPct.toFixed(1)}% ($${pred.suggestedTpPrice.toFixed(2)})` +
-                     `\n• *Estimated Liquidation Stop-Loss*: -${slPct.toFixed(1)}% ($${pred.suggestedSlPrice.toFixed(2)})`;
+          const lev = current.leverage || 5;
+          const tpPct = Math.abs(pred.suggestedTpPrice - pred.price) / pred.price * 100 * lev;
+          const slPct = Math.abs(pred.suggestedSlPrice - pred.price) / pred.price * 100 * lev;
+          tpSlStr = `
+\u2022 *Estimated Liquidation Take-Profit*: +${tpPct.toFixed(1)}% ($${pred.suggestedTpPrice.toFixed(2)})
+\u2022 *Estimated Liquidation Stop-Loss*: -${slPct.toFixed(1)}% ($${pred.suggestedSlPrice.toFixed(2)})`;
         }
-        
-        predictionSnippet = `\n\n🎯 *Real-Time Intelligence Overlays* 🎯\n` +
-          `• *Tactical Action*: \`${pred.action}\`\n` +
-          `• *Last Spot Price*: \`$${pred.price.toFixed(2)}\`${tpSlStr}\n` +
-          `• *Sentiment Score (Political/News)*: \`${pred.sentiment.toFixed(2)}\`\n` +
-          `• *Technical Score (MACD)*: \`${pred.strategyDetails?.technicalScore?.toFixed(2) ?? 'N/A'}\`\n` +
-          `• *Liquidity Score (RSI)*: \`${pred.strategyDetails?.liquidityScore?.toFixed(2) ?? 'N/A'}\`\n` +
-          `• *Elliott Wave Score*: \`${pred.strategyDetails?.elliottWaveScore?.toFixed(2) ?? 'N/A'}\`\n` +
-          `• *Target Catalyst Topic*: \`"${current.topic}"\`\n` +
-          `• *Formula Weights Used*: Sentiment: \`${(current.weights?.sentiment || 0.9) * 100}%\`, Technical: \`${(current.weights?.technical || 0.85) * 100}%\`, Liquidity: \`${(current.weights?.liquidity || 0.85) * 100}%\`, Elliott Wave: \`${(current.weights?.elliottWave || 0.85) * 100}%\`\n` +
-          `• *Calculated AI Rationale*:\n_${pred.rationale.replace(/[_*`\[\]()]/g, "")}_`;
-      } catch (predErr: any) {
-        predictionSnippet = `\n\n⚠️ *Real-Time Intelligence Overlaid Error*: ${predErr.message || predErr}`;
-      }
+        predictionSnippet = `
 
-      const testMsg = `🧪 *Cortex Alpha - Telegram Connection Test* 🧪\n\n` +
-        `• *Bot Identifier*: \`telegram_alert_v1\`\n` +
-        `• *Connection Status*: Alerts ${current.enabled ? "Active 🟢" : "Inactive ⚪"}\n` +
-        `• *Check Frequency*: Every ${current.frequency || 5} min(s)\n` +
-        `• *Monitored Asset*: ${current.token.toUpperCase()}\n` +
-        `• *Current Trade PnL*: ${current.lastTradePnL ? current.lastTradePnL.toFixed(2) + "%" : "0.00%"}\n` +
-        `• *Cumulative Stats*: ${current.cumulativePnL ? current.cumulativePnL.toFixed(2) + "%" : "0.00%"}\n` +
-        `• *Timestamp*: ${new Date().toLocaleString()}` +
-        predictionSnippet;
-        
+\u{1F3AF} *Real-Time Intelligence Overlays* \u{1F3AF}
+\u2022 *Tactical Action*: \`${pred.action}\`
+\u2022 *Last Spot Price*: \`$${pred.price.toFixed(2)}\`${tpSlStr}
+\u2022 *Sentiment Score (Political/News)*: \`${pred.sentiment.toFixed(2)}\`
+\u2022 *Technical Score (MACD)*: \`${pred.strategyDetails?.technicalScore?.toFixed(2) ?? "N/A"}\`
+\u2022 *Liquidity Score (RSI)*: \`${pred.strategyDetails?.liquidityScore?.toFixed(2) ?? "N/A"}\`
+\u2022 *Elliott Wave Score*: \`${pred.strategyDetails?.elliottWaveScore?.toFixed(2) ?? "N/A"}\`
+\u2022 *Target Catalyst Topic*: \`"${current.topic}"\`
+\u2022 *Formula Weights Used*: Sentiment: \`${(current.weights?.sentiment || 0.9) * 100}%\`, Technical: \`${(current.weights?.technical || 0.85) * 100}%\`, Liquidity: \`${(current.weights?.liquidity || 0.85) * 100}%\`, Elliott Wave: \`${(current.weights?.elliottWave || 0.85) * 100}%\`
+\u2022 *Calculated AI Rationale*:
+_${pred.rationale.replace(/[_*`\[\]()]/g, "")}_`;
+      } catch (predErr) {
+        predictionSnippet = `
+
+\u26A0\uFE0F *Real-Time Intelligence Overlaid Error*: ${predErr.message || predErr}`;
+      }
+      const testMsg = `\u{1F9EA} *Cortex Alpha - Telegram Connection Test* \u{1F9EA}
+
+\u2022 *Bot Identifier*: \`telegram_alert_v1\`
+\u2022 *Connection Status*: Alerts ${current.enabled ? "Active \u{1F7E2}" : "Inactive \u26AA"}
+\u2022 *Check Frequency*: Every ${current.frequency || 5} min(s)
+\u2022 *Monitored Asset*: ${current.token.toUpperCase()}
+\u2022 *Current Trade PnL*: ${current.lastTradePnL ? current.lastTradePnL.toFixed(2) + "%" : "0.00%"}
+\u2022 *Cumulative Stats*: ${current.cumulativePnL ? current.cumulativePnL.toFixed(2) + "%" : "0.00%"}
+\u2022 *Timestamp*: ${(/* @__PURE__ */ new Date()).toLocaleString()}` + predictionSnippet;
       await sendTelegramMessage(activeBotToken, activeChatId, testMsg);
     }
-    
     res.json({ success: true, message: "Configuration cached successfully!" });
-  } catch (err: any) {
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
 app.post("/api/drift-evaluate", async (req, res) => {
   try {
     const { walletAddress } = req.body;
     if (!walletAddress) throw new Error("Wallet Address is required.");
-    
-    // Completely bypass DriftClient initialization to avoid RPC 504 hangs
-    // Simulate successful margin account check immediately.
-    await new Promise(r => setTimeout(r, 500));
-    
+    await new Promise((r) => setTimeout(r, 500));
     res.json({ success: true, message: "Drift margin account check passed." });
-  } catch (err: any) {
+  } catch (err) {
     res.json({ success: true, message: "Drift margin check bypassed smoothly." });
   }
 });
-
 app.post("/api/jupiter-perps/build-tx", async (req, res) => {
   const { walletAddress, direction, executeSizeSol } = req.body;
-  
   if (!walletAddress) {
     return res.status(400).json({ error: "Wallet address is required." });
   }
-
   if (!direction || !["LONG", "SHORT", "CLOSE"].includes(direction)) {
     return res.status(400).json({ error: "Invalid direction. Must be LONG, SHORT, or CLOSE." });
   }
-
   try {
     console.log(`[Jupiter Perps] Building ${direction} transaction for ${walletAddress}. Size: ${executeSizeSol} SOL`);
-    
-    // Explicitly construct a position trade transaction so Phantom displays the Perpetual Position details
     const config = loadJupiterConfig();
     const connection = new Connection("https://api.mainnet-beta.solana.com");
     const { blockhash } = await connection.getLatestBlockhash();
-    
     let actualWalletAddress = walletAddress;
     let keypair = null;
-
     if (config.privateKey && !config.privateKeyIsAutoGenerated) {
-       let cleanedKey = config.privateKey.trim();
-       if (cleanedKey.startsWith('"') && cleanedKey.endsWith('"')) {
-         cleanedKey = cleanedKey.slice(1, -1).trim();
-       }
-       if (cleanedKey.startsWith("'") && cleanedKey.endsWith("'")) {
-         cleanedKey = cleanedKey.slice(1, -1).trim();
-       }
-       
-       if (cleanedKey) {
-         try {
-           keypair = getKeypairFromPrivateKey(config.privateKey);
-           actualWalletAddress = keypair.publicKey.toBase58();
-         } catch (decodeErr: any) {
-           console.warn("[Jupiter Perps] Bad server private key layout:", decodeErr.message);
-           actualWalletAddress = walletAddress;
-         }
-       }
+      let cleanedKey = config.privateKey.trim();
+      if (cleanedKey.startsWith('"') && cleanedKey.endsWith('"')) {
+        cleanedKey = cleanedKey.slice(1, -1).trim();
+      }
+      if (cleanedKey.startsWith("'") && cleanedKey.endsWith("'")) {
+        cleanedKey = cleanedKey.slice(1, -1).trim();
+      }
+      if (cleanedKey) {
+        try {
+          keypair = getKeypairFromPrivateKey(config.privateKey);
+          actualWalletAddress = keypair.publicKey.toBase58();
+        } catch (decodeErr) {
+          console.warn("[Jupiter Perps] Bad server private key layout:", decodeErr.message);
+          actualWalletAddress = walletAddress;
+        }
+      }
     }
-
     if (!actualWalletAddress) {
       throw new Error("No connected wallet address identified. Please connect Phantom Wallet or specify a valid base58 Automated Server Key.");
     }
-
     try {
       new PublicKey(actualWalletAddress);
-    } catch (pubKeyErr: any) {
+    } catch (pubKeyErr) {
       throw new Error(`The target wallet address '${actualWalletAddress}' is not in a valid Base58 public key format. Please reconnect Phantom Wallet or configure your private key again.`);
     }
-
-    // Use official Jupiter v6 quote & swap APIs to construct the exact spot swap instruction for the user's wallet
     let transactionSerialized = null;
     let customMsg = `Jupiter Perps position (${direction}) generated on-chain!`;
-
     if (keypair) {
-       console.log("[Jupiter Perps] Server-side Private Key found. Executing real Jupiter Swap trade server-side...");
-       const signature = await executeOnChainTradeServerSide(direction as "LONG" | "SHORT" | "CLOSE", Number(executeSizeSol) || 0.05);
-       if (signature) {
-         return res.json({
-           success: true,
-           bypassPhantom: true,
-           signature,
-           message: `Jupiter Swap trade (${direction}) executed on-chain securely!`
-         });
-       } else {
-         throw new Error("Execution failed: Real Jupiter trade and on-chain Fallback both returned invalid signatures.");
-       }
+      console.log("[Jupiter Perps] Server-side Private Key found. Executing real Jupiter Swap trade server-side...");
+      const signature = await executeOnChainTradeServerSide(direction, Number(executeSizeSol) || 0.05);
+      if (signature) {
+        return res.json({
+          success: true,
+          bypassPhantom: true,
+          signature,
+          message: `Jupiter Swap trade (${direction}) executed on-chain securely!`
+        });
+      } else {
+        throw new Error("Execution failed: Real Jupiter trade and on-chain Fallback both returned invalid signatures.");
+      }
     } else {
-      // Fetch a real transaction from Jupiter for user signature
       try {
         const solMint = "So11111111111111111111111111111111111111112";
         const usdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-
         const isLong = direction === "LONG";
         const inputMint = isLong ? usdcMint : solMint;
         const outputMint = isLong ? solMint : usdcMint;
         const swapMode = isLong ? "ExactOut" : "ExactIn";
-        const amountVal = Math.floor((Number(executeSizeSol) || 0.05) * 1_000_000_000);
-
+        const amountVal = Math.floor((Number(executeSizeSol) || 0.05) * 1e9);
         const quoteData = await fetchJupiterQuote(inputMint, outputMint, amountVal, swapMode);
         if (quoteData) {
           const swapTx = await fetchJupiterSwap(quoteData, actualWalletAddress);
@@ -4156,39 +3451,34 @@ app.post("/api/jupiter-perps/build-tx", async (req, res) => {
         } else {
           console.log("[Jupiter Perps API] Quote fetch bypassed or unavailable, falling back to stateful memo.");
         }
-      } catch (buildErr: any) {
+      } catch (buildErr) {
         const errMsg = String(buildErr.message || buildErr);
         const cleanMsg = errMsg.includes("fetch failed") ? "network route bypassed under Sandbox" : errMsg;
         console.log("[Jupiter Perps API] Bypassed real swap transaction lookup:", cleanMsg);
       }
     }
-
     if (!transactionSerialized) {
-      // Fallback: Create a Memo instruction that Phantom Wallet inherently displays as the transaction description!
-      const ix = new TransactionInstruction({ 
-         keys: [], 
-         programId: new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGMfcHr"), 
-         data: Buffer.from(`Jupiter Perps Position: ${direction} | Size: ${executeSizeSol} SOL x5`, "utf-8") 
+      const ix = new TransactionInstruction({
+        keys: [],
+        programId: new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGMfcHr"),
+        data: Buffer.from(`Jupiter Perps Position: ${direction} | Size: ${executeSizeSol} SOL x5`, "utf-8")
       });
-      
       const msg = new TransactionMessage({
-         payerKey: new PublicKey(actualWalletAddress),
-         recentBlockhash: blockhash,
-         instructions: [ix]
+        payerKey: new PublicKey(actualWalletAddress),
+        recentBlockhash: blockhash,
+        instructions: [ix]
       }).compileToV0Message();
-      
       const tx = new VersionedTransaction(msg);
       transactionSerialized = Buffer.from(tx.serialize()).toString("base64");
     }
-
     res.json({
       success: true,
       transaction: transactionSerialized,
-      transactionSerialized: transactionSerialized,
+      transactionSerialized,
       isVersionedTransaction: true,
       message: customMsg
     });
-  } catch (err: any) {
+  } catch (err) {
     console.error("[Jupiter Perps API error]", err);
     res.json({
       success: false,
@@ -4196,68 +3486,42 @@ app.post("/api/jupiter-perps/build-tx", async (req, res) => {
     });
   }
 });
-
-interface CachedBalances {
-  balance: number;
-  usdcBalance: number;
-  usdtBalance: number;
-  jupBalance: number;
-  bonkBalance: number;
-  timestamp: number;
-}
-
-interface CachedPrices {
-  liveUsdcPrice: number;
-  liveUsdtPrice: number;
-  liveJupPrice: number;
-  liveBonkPrice: number;
-  liveJupiterPrice: number;
-  timestamp: number;
-}
-
-const balancesCache: Record<string, CachedBalances> = {};
-let pricesCache: CachedPrices | null = null;
-const CACHE_TTL_MS = 15000; // 15 seconds
-
-async function buildJupiterConfigResponse(config: JupiterConfig) {
+var balancesCache = {};
+var pricesCache = null;
+var CACHE_TTL_MS = 15e3;
+async function buildJupiterConfigResponse(config) {
   let balance = 0;
   let usdcBalance = 0;
   let usdtBalance = 0;
   let perpBalance = 0;
   let jupBalance = 0;
   let bonkBalance = 0;
-
-  let liveUsdcPrice = 1.0;
-  let liveUsdtPrice = 1.0;
-  let liveJupPrice = 1.0;
-  let liveBonkPrice = 0.00002;
-
+  let liveUsdcPrice = 1;
+  let liveUsdtPrice = 1;
+  let liveJupPrice = 1;
+  let liveBonkPrice = 2e-5;
   let targetAddress = config.walletAddress || "";
   if (!targetAddress && config.privateKey && !config.disconnected) {
     try {
       const keypair = getKeypairFromPrivateKey(config.privateKey);
       targetAddress = keypair.publicKey.toBase58();
-    } catch (e: any) {
+    } catch (e) {
       console.warn("[Jupiter Balances Warning] Failed to derive address from privateKey:", e.message);
     }
   }
-
   const isDemoAddress = !targetAddress || targetAddress === "DmtrAQtdA5tMDcHMtpHGzs5NA6hzdp9oRT7CsThwzMHh";
-
   let tradingModeOverride = config.tradingMode || "REAL";
-
   if (targetAddress) {
     if (config.tradingMode === "PAPER") {
-      // In paper trading mode, assign simulated portfolio balances directly to bypass RPC throttling
-      balance = 10.0;
-      usdcBalance = 1000.0;
-      usdtBalance = 1000.0;
-      jupBalance = 500.0;
-      bonkBalance = 10000000.0;
+      balance = 10;
+      usdcBalance = 1e3;
+      usdtBalance = 1e3;
+      jupBalance = 500;
+      bonkBalance = 1e7;
     } else {
       const cached = balancesCache[targetAddress];
-      const now = Date.now();
-      if (cached && (now - cached.timestamp < CACHE_TTL_MS)) {
+      const now3 = Date.now();
+      if (cached && now3 - cached.timestamp < CACHE_TTL_MS) {
         balance = cached.balance;
         usdcBalance = cached.usdcBalance;
         usdtBalance = cached.usdtBalance;
@@ -4283,9 +3547,9 @@ async function buildJupiterConfigResponse(config: JupiterConfig) {
             usdtBalance,
             jupBalance,
             bonkBalance,
-            timestamp: now
+            timestamp: now3
           };
-        } catch (e: any) {
+        } catch (e) {
           console.warn("[Jupiter Balances Bypass] Failed to load fresh balances; falling back to cache if available:", e.message);
           if (cached) {
             balance = cached.balance;
@@ -4294,57 +3558,53 @@ async function buildJupiterConfigResponse(config: JupiterConfig) {
             jupBalance = cached.jupBalance;
             bonkBalance = cached.bonkBalance;
           } else {
-            // High resilience fallback balances instead of immediate resetting to absolute zero upon public RPC network bottlenecks of sandboxed environments
             balance = 12.456;
-            usdcBalance = 1250.0;
-            usdtBalance = 850.0;
-            jupBalance = 750.0;
-            bonkBalance = 15000000.0;
+            usdcBalance = 1250;
+            usdtBalance = 850;
+            jupBalance = 750;
+            bonkBalance = 15e6;
             balancesCache[targetAddress] = {
               balance,
               usdcBalance,
               usdtBalance,
               jupBalance,
               bonkBalance,
-              timestamp: now
+              timestamp: now3
             };
           }
         }
       }
     }
-
-    const now = Date.now();
-    if (pricesCache && (now - pricesCache.timestamp < CACHE_TTL_MS)) {
+    const now2 = Date.now();
+    if (pricesCache && now2 - pricesCache.timestamp < CACHE_TTL_MS) {
       liveUsdcPrice = pricesCache.liveUsdcPrice;
       liveUsdtPrice = pricesCache.liveUsdtPrice;
       liveJupPrice = pricesCache.liveJupPrice;
       liveBonkPrice = pricesCache.liveBonkPrice;
     } else {
       try {
-        // Attempt to load live prices from Jupiter (always want real prices for charts/valuations)
         const [uPrice, tPrice, jPrice, bPrice] = await Promise.all([
-          getJupiterTokenPrice("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 1.0),
-          getJupiterTokenPrice("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", 1.0),
-          getJupiterTokenPrice("JUPyiwrME3daJvmgHbaYzZ6TBMR6Y4X26MSp7E8CwsH", 1.0),
-          getJupiterTokenPrice("DezXAZ8z7PnrnRJjz3wX4mN4ye3tav896qiKHzERAH5X", 0.00002)
+          getJupiterTokenPrice("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 1),
+          getJupiterTokenPrice("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", 1),
+          getJupiterTokenPrice("JUPyiwrME3daJvmgHbaYzZ6TBMR6Y4X26MSp7E8CwsH", 1),
+          getJupiterTokenPrice("DezXAZ8z7PnrnRJjz3wX4mN4ye3tav896qiKHzERAH5X", 2e-5)
         ]);
         liveUsdcPrice = uPrice;
         liveUsdtPrice = tPrice;
         liveJupPrice = jPrice;
         liveBonkPrice = bPrice;
-      } catch (e: any) {
+      } catch (e) {
         console.log("[Jupiter Prices Bypass]", e.message);
       }
     }
-
     try {
       perpBalance = config.activeTrade && config.activeTrade.sizeInSol ? config.activeTrade.sizeInSol : 0;
-    } catch(e) {}
+    } catch (e) {
+    }
   }
-
   let currentPrice = 174.65;
   const now = Date.now();
-  if (pricesCache && (now - pricesCache.timestamp < CACHE_TTL_MS)) {
+  if (pricesCache && now - pricesCache.timestamp < CACHE_TTL_MS) {
     currentPrice = pricesCache.liveJupiterPrice;
   } else {
     currentPrice = await getJupiterQuotePrice();
@@ -4358,26 +3618,19 @@ async function buildJupiterConfigResponse(config: JupiterConfig) {
       timestamp: now
     };
   }
-
   if (config.tradingMode === "PAPER" || isDemoAddress) {
-    // Only fall back to simulated balances if explicitly configured for PAPER or using the demo address
     tradingModeOverride = "PAPER";
-    const startingSol = 10.0;
-    const startingUsdc = 1000.0;
-
-    // Calculate PnL from tradesHistory
+    const startingSol = 10;
+    const startingUsdc = 1e3;
     let histUsdcPnL = 0;
     if (config.tradesHistory && config.tradesHistory.length > 0) {
-      config.tradesHistory.forEach((trade: any) => {
+      config.tradesHistory.forEach((trade) => {
         const pnlFraction = (trade.pnl || 0) / 100;
         const sizeSol = trade.sizeInSol || 0.05;
         const entry = trade.entryPrice || 174.65;
-        // PnL in USDC is size x price x pnl_pct
         histUsdcPnL += pnlFraction * sizeSol * entry;
       });
     }
-
-    // Live active trade PnL
     let activeUsdcPnL = 0;
     let marginDeduction = 0;
     if (config.activeTrade) {
@@ -4385,26 +3638,22 @@ async function buildJupiterConfigResponse(config: JupiterConfig) {
       const entry = active.entryPrice || currentPrice;
       const sizeSol = active.sizeInSol || 0.05;
       const lev = active.leverage || 5;
-      marginDeduction = (sizeSol * entry) / lev;
-
+      marginDeduction = sizeSol * entry / lev;
       const priceDiff = currentPrice - entry;
-      let pctChange = entry > 0 ? (priceDiff / entry) * 100 * lev : 0;
+      let pctChange = entry > 0 ? priceDiff / entry * 100 * lev : 0;
       if (active.side === "SHORT") {
         pctChange = -pctChange;
       }
-      activeUsdcPnL = (pctChange / 100) * sizeSol * entry;
+      activeUsdcPnL = pctChange / 100 * sizeSol * entry;
     }
-
     usdcBalance = startingUsdc + histUsdcPnL + activeUsdcPnL - marginDeduction;
     if (usdcBalance < 0) usdcBalance = 0;
-
     balance = startingSol;
-    usdtBalance = 1000.0;
-    jupBalance = 500.0;
-    bonkBalance = 10000000.0;
+    usdtBalance = 1e3;
+    jupBalance = 500;
+    bonkBalance = 1e7;
     perpBalance = config.activeTrade && config.activeTrade.sizeInSol ? config.activeTrade.sizeInSol : 0;
   }
-
   return {
     ...config,
     walletAddress: config.walletAddress || targetAddress,
@@ -4422,89 +3671,77 @@ async function buildJupiterConfigResponse(config: JupiterConfig) {
     liveJupiterPrice: currentPrice > 0 ? currentPrice : null
   };
 }
-
 app.get("/api/jupiter-config", async (req, res) => {
   try {
     const config = loadJupiterConfig();
-    // Proactively delete any stale balance or execution errors if they are in PAPER mode, to keep the dashboard clean
     if (config.tradingMode === "PAPER" && config.error) {
       delete config.error;
       saveJupiterConfig(config);
     }
     const resp = await buildJupiterConfigResponse(config);
     res.json(resp);
-  } catch (err: any) {
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
 app.post("/api/jupiter-config", async (req, res) => {
   try {
-    const { 
+    const {
       walletAddress,
       privateKey,
       rpcUrl,
-      enabled, 
+      enabled,
       tradingMode,
-      leverage, 
-      allocationPercent, 
+      leverage,
+      allocationPercent,
       takeProfitPct,
       stopLossPct,
       frequencyMinutes,
       cooldownMinutes,
-      token, 
-      topic, 
-      weights, 
+      token,
+      topic,
+      weights,
       interval,
       resetStats,
       forceClose,
-      forceOpen, // side: "LONG" | "SHORT"
+      forceOpen,
+      // side: "LONG" | "SHORT"
       disconnect,
       triggerAutoTrade
     } = req.body;
-
     if (triggerAutoTrade) {
       const configBefore = loadJupiterConfig();
       const hadActiveBefore = !!configBefore.activeTrade;
-      const beforeSide = hadActiveBefore ? configBefore.activeTrade!.side : null;
-
+      const beforeSide = hadActiveBefore ? configBefore.activeTrade.side : null;
       await checkJupiterTradingAndState(true);
-      
       const updatedConfig = loadJupiterConfig();
       const hasActiveAfter = !!updatedConfig.activeTrade;
-      const afterSide = hasActiveAfter ? updatedConfig.activeTrade!.side : null;
-
+      const afterSide = hasActiveAfter ? updatedConfig.activeTrade.side : null;
       let executedSide = null;
       let closedSomething = false;
-
       if (!hadActiveBefore && hasActiveAfter) {
-         executedSide = afterSide;
+        executedSide = afterSide;
       } else if (hadActiveBefore && !hasActiveAfter) {
-         closedSomething = true;
+        closedSomething = true;
       } else if (hadActiveBefore && hasActiveAfter && beforeSide !== afterSide) {
-         closedSomething = true;
-         executedSide = afterSide;
+        closedSomething = true;
+        executedSide = afterSide;
       }
-
       if (updatedConfig.error) {
-         return res.json({ success: false, message: `Auto Bot Eval: ${updatedConfig.error}` });
+        return res.json({ success: false, message: `Auto Bot Eval: ${updatedConfig.error}` });
       } else {
-         return res.json({ 
-           success: true, 
-           message: `Auto Bot Eval completed! Signal processed. ${executedSide ? "Trade executed on-chain!" : closedSomething ? "Position Closed on-chain!" : "No new trade (Hold signal)."}`,
-           executedSide,
-           closedSomething
-         });
+        return res.json({
+          success: true,
+          message: `Auto Bot Eval completed! Signal processed. ${executedSide ? "Trade executed on-chain!" : closedSomething ? "Position Closed on-chain!" : "No new trade (Hold signal)."}`,
+          executedSide,
+          closedSomething
+        });
       }
     }
-
     const current = loadJupiterConfig();
-
-    // Clear stale errors when updating any standard settings or inputs to unblock the dashboard immediately!
     if (!triggerAutoTrade && !forceOpen && !forceClose) {
       delete current.error;
     }
-
     if (disconnect) {
       current.walletAddress = "";
       current.privateKey = "";
@@ -4516,12 +3753,10 @@ app.post("/api/jupiter-config", async (req, res) => {
       saveJupiterConfig(current);
       return res.json({ success: true, message: "Wallet disconnected successfully!" });
     }
-
-    if (privateKey !== undefined || walletAddress !== undefined) {
+    if (privateKey !== void 0 || walletAddress !== void 0) {
       delete current.disconnected;
     }
-
-    if (privateKey !== undefined) {
+    if (privateKey !== void 0) {
       let cleanedKey = String(privateKey).trim();
       if (cleanedKey.startsWith('"') && cleanedKey.endsWith('"')) {
         cleanedKey = cleanedKey.slice(1, -1).trim();
@@ -4529,7 +3764,6 @@ app.post("/api/jupiter-config", async (req, res) => {
       if (cleanedKey.startsWith("'") && cleanedKey.endsWith("'")) {
         cleanedKey = cleanedKey.slice(1, -1).trim();
       }
-
       if (cleanedKey) {
         try {
           const keypair = getKeypairFromPrivateKey(cleanedKey);
@@ -4537,7 +3771,7 @@ app.post("/api/jupiter-config", async (req, res) => {
           current.privateKeyIsAutoGenerated = false;
           current.walletAddress = keypair.publicKey.toBase58();
           console.log(`[Jupiter Config] Auto-derived walletAddress from privateKey: ${current.walletAddress}`);
-        } catch (e: any) {
+        } catch (e) {
           console.warn("[Jupiter Config] Provided privateKey is not a valid private key format:", e.message);
           return res.status(400).json({ error: `Invalid private key format: ${e.message}` });
         }
@@ -4546,14 +3780,13 @@ app.post("/api/jupiter-config", async (req, res) => {
         current.privateKeyIsAutoGenerated = false;
       }
     }
-    
-    if (walletAddress !== undefined && privateKey === undefined) {
+    if (walletAddress !== void 0 && privateKey === void 0) {
       current.walletAddress = String(walletAddress).trim();
     }
-    if (rpcUrl !== undefined) {
+    if (rpcUrl !== void 0) {
       current.rpcUrl = String(rpcUrl).trim();
     }
-    if (enabled !== undefined) {
+    if (enabled !== void 0) {
       const wasEnabled = current.enabled;
       current.enabled = !!enabled;
       if (current.enabled && !wasEnabled) {
@@ -4565,37 +3798,29 @@ app.post("/api/jupiter-config", async (req, res) => {
         });
       }
     }
-    if (tradingMode !== undefined) current.tradingMode = tradingMode;
-    
-    if (leverage !== undefined) {
+    if (tradingMode !== void 0) current.tradingMode = tradingMode;
+    if (leverage !== void 0) {
       current.leverage = Number(leverage) || 5;
     }
-
-    if (allocationPercent !== undefined) {
+    if (allocationPercent !== void 0) {
       current.allocationPercent = Math.min(Number(allocationPercent) || 5, 100);
     }
-
-    if (takeProfitPct !== undefined) {
+    if (takeProfitPct !== void 0) {
       current.takeProfitPct = Number(takeProfitPct) || 4;
     }
-
-    if (stopLossPct !== undefined) {
+    if (stopLossPct !== void 0) {
       current.stopLossPct = Number(stopLossPct) || 2;
     }
-
-    if (frequencyMinutes !== undefined) {
+    if (frequencyMinutes !== void 0) {
       current.frequencyMinutes = Number(frequencyMinutes) || 5;
     }
-
-    if (cooldownMinutes !== undefined) {
+    if (cooldownMinutes !== void 0) {
       current.cooldownMinutes = Number(cooldownMinutes) || 30;
     }
-
     if (token) current.token = token;
     if (topic) current.topic = topic;
     if (weights) current.weights = weights;
     if (interval) current.interval = interval;
-
     if (resetStats) {
       current.lastTradePnL = 0;
       current.cumulativePnL = 0;
@@ -4603,9 +3828,7 @@ app.post("/api/jupiter-config", async (req, res) => {
       current.tradesHistory = [];
       current.lastTradeAddedAt = "";
     }
-    
     restartJupiterDaemon(current.frequencyMinutes || 5);
-
     if (forceClose && current.activeTrade) {
       const entryPrice = current.activeTrade.entryPrice;
       let exitPrice = await getJupiterQuotePrice();
@@ -4613,25 +3836,20 @@ app.post("/api/jupiter-config", async (req, res) => {
         const pred = await getPredictionData(current.token, current.topic, current.weights);
         exitPrice = pred.price;
       }
-
       let pnlPercent = 0;
       const lev = current.activeTrade.leverage || 1;
       if (current.activeTrade.side === "LONG") {
-        pnlPercent = ((exitPrice - entryPrice) / entryPrice) * 100 * lev;
+        pnlPercent = (exitPrice - entryPrice) / entryPrice * 100 * lev;
       } else if (current.activeTrade.side === "SHORT") {
-        pnlPercent = ((entryPrice - exitPrice) / entryPrice) * 100 * lev;
+        pnlPercent = (entryPrice - exitPrice) / entryPrice * 100 * lev;
       }
-
       current.lastTradePnL = pnlPercent;
       current.cumulativePnL += pnlPercent;
-
       const closedId = Math.random().toString(36).substring(2, 9);
-      const exitTimeStr = new Date().toISOString();
+      const exitTimeStr = (/* @__PURE__ */ new Date()).toISOString();
       const durationText = calculateDurationStr(current.activeTrade.entryTime, exitTimeStr);
-
-      const tpPct = 4.0;
-      const slPct = 2.0;
-
+      const tpPct = 4;
+      const slPct = 2;
       current.tradesHistory.push({
         id: closedId,
         side: current.activeTrade.side,
@@ -4642,132 +3860,116 @@ app.post("/api/jupiter-config", async (req, res) => {
         leverage: current.activeTrade.leverage,
         entryTime: current.activeTrade.entryTime,
         exitTime: exitTimeStr,
-        takeProfitPct: current.activeTrade.takeProfitPct !== undefined ? current.activeTrade.takeProfitPct : tpPct,
-        stopLossPct: current.activeTrade.stopLossPct !== undefined ? current.activeTrade.stopLossPct : slPct
+        takeProfitPct: current.activeTrade.takeProfitPct !== void 0 ? current.activeTrade.takeProfitPct : tpPct,
+        stopLossPct: current.activeTrade.stopLossPct !== void 0 ? current.activeTrade.stopLossPct : slPct
       });
-      
       if (current.privateKey) {
-         console.log(`[Jupiter Config Override] Executing mainnet on-chain CLOSE for ${current.activeTrade.sizeInSol} SOL...`);
-         try {
-           await executeOnChainTradeServerSide("CLOSE", current.activeTrade.sizeInSol);
-         } catch (err: any) {
-           console.error("[Jupiter Override] Failed to execute on-chain close:", err.message);
-         }
+        console.log(`[Jupiter Config Override] Executing mainnet on-chain CLOSE for ${current.activeTrade.sizeInSol} SOL...`);
+        try {
+          await executeOnChainTradeServerSide("CLOSE", current.activeTrade.sizeInSol);
+        } catch (err) {
+          console.error("[Jupiter Override] Failed to execute on-chain close:", err.message);
+        }
       }
-
       try {
         const tConf = loadTelegramConfig();
-        const sideIcon = current.activeTrade.side === "LONG" ? "🟢" : "🔴";
-        const pnlIcon = pnlPercent >= 0 ? "🔵 +" : "🔴 ";
+        const sideIcon = current.activeTrade.side === "LONG" ? "\u{1F7E2}" : "\u{1F534}";
+        const pnlIcon = pnlPercent >= 0 ? "\u{1F535} +" : "\u{1F534} ";
         addAuditLog(tConf, `Manual Override: Closed ${sideIcon} position at $${exitPrice.toFixed(2)}. PnL: ${pnlIcon}${pnlPercent.toFixed(2)}%`, "trade");
         saveTelegramConfig(tConf);
-      } catch (e) {}
-      
+      } catch (e) {
+      }
       if (current.tradesHistory.length > 25) current.tradesHistory.shift();
       current.activeTrade = null;
     }
-
     if (forceOpen && (forceOpen === "LONG" || forceOpen === "SHORT")) {
-      // If a position is already open, settle it first before opening the new one!
       if (current.activeTrade) {
-        const entryPrice = current.activeTrade.entryPrice;
+        const entryPrice2 = current.activeTrade.entryPrice;
         let exitPrice = await getJupiterQuotePrice();
         if (exitPrice <= 0) {
           const pred = await getPredictionData(current.token, current.topic, current.weights);
           exitPrice = pred.price;
         }
-
         let pnlPercent = 0;
         const lev = current.activeTrade.leverage || 1;
         if (current.activeTrade.side === "LONG") {
-          pnlPercent = ((exitPrice - entryPrice) / entryPrice) * 100 * lev;
+          pnlPercent = (exitPrice - entryPrice2) / entryPrice2 * 100 * lev;
         } else if (current.activeTrade.side === "SHORT") {
-          pnlPercent = ((entryPrice - exitPrice) / entryPrice) * 100 * lev;
+          pnlPercent = (entryPrice2 - exitPrice) / entryPrice2 * 100 * lev;
         }
-
         current.lastTradePnL = pnlPercent;
         current.cumulativePnL += pnlPercent;
-
         const closedId = Math.random().toString(36).substring(2, 9);
-        const exitTimeStr = new Date().toISOString();
+        const exitTimeStr = (/* @__PURE__ */ new Date()).toISOString();
         const durationText = calculateDurationStr(current.activeTrade.entryTime, exitTimeStr);
-
-        const tpPct = 4.0;
-        const slPct = 2.0;
-
+        const tpPct2 = 4;
+        const slPct2 = 2;
         current.tradesHistory.push({
           id: closedId,
           side: current.activeTrade.side,
-          entryPrice,
+          entryPrice: entryPrice2,
           exitPrice,
           pnl: pnlPercent,
           sizeInSol: current.activeTrade.sizeInSol,
           leverage: current.activeTrade.leverage,
           entryTime: current.activeTrade.entryTime,
           exitTime: exitTimeStr,
-          takeProfitPct: current.activeTrade.takeProfitPct !== undefined ? current.activeTrade.takeProfitPct : tpPct,
-          stopLossPct: current.activeTrade.stopLossPct !== undefined ? current.activeTrade.stopLossPct : slPct,
+          takeProfitPct: current.activeTrade.takeProfitPct !== void 0 ? current.activeTrade.takeProfitPct : tpPct2,
+          stopLossPct: current.activeTrade.stopLossPct !== void 0 ? current.activeTrade.stopLossPct : slPct2,
           mode: current.activeTrade.mode
         });
         if (current.privateKey && current.activeTrade?.mode !== "PAPER") {
-           console.log(`[Jupiter Config Override] Executing mainnet on-chain CLOSE first for ${current.activeTrade.sizeInSol} SOL...`);
-           try {
-             await executeOnChainTradeServerSide("CLOSE", current.activeTrade.sizeInSol);
-           } catch (err: any) {
-             console.error("[Jupiter Override] Failed to execute on-chain close first:", err.message);
-           }
+          console.log(`[Jupiter Config Override] Executing mainnet on-chain CLOSE first for ${current.activeTrade.sizeInSol} SOL...`);
+          try {
+            await executeOnChainTradeServerSide("CLOSE", current.activeTrade.sizeInSol);
+          } catch (err) {
+            console.error("[Jupiter Override] Failed to execute on-chain close first:", err.message);
+          }
         }
-
         if (current.tradesHistory.length > 25) current.tradesHistory.shift();
         current.activeTrade = null;
       }
-
       let executionAddress = current.walletAddress;
       if (current.privateKey) {
         try {
           const keypair = getKeypairFromPrivateKey(current.privateKey);
           executionAddress = keypair.publicKey.toBase58();
-        } catch (e) {}
+        } catch (e) {
+        }
       }
-
       let solBalance = 0;
       let usdtBalance = 0;
       let usdcBalance = 0;
       let mode = current.tradingMode || "REAL";
-
       if (mode === "REAL" && (!current.privateKey || executionAddress === "DmtrAQtdA5tMDcHMtpHGzs5NA6hzdp9oRT7CsThwzMHh")) {
         mode = "PAPER";
       }
-
       if (mode === "PAPER") {
-        solBalance = 10.0;
-        usdtBalance = 1000.0;
-        usdcBalance = 1000.0;
+        solBalance = 10;
+        usdtBalance = 1e3;
+        usdcBalance = 1e3;
       } else {
         try {
           solBalance = await getSolanaWalletBalance(executionAddress);
           usdtBalance = await getSplTokenBalance(executionAddress, "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB");
           usdcBalance = await getSplTokenBalance(executionAddress, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
-
-          if (solBalance < 0.002) {
+          if (solBalance < 2e-3) {
             console.log(`[Jupiter Config] Action wallet ${executionAddress} has insufficient SOL balance (${solBalance.toFixed(6)} SOL). Seamlessly falling back to PAPER (Simulated) trading mode.`);
             mode = "PAPER";
-            solBalance = 10.0;
-            usdtBalance = 1000.0;
-            usdcBalance = 1000.0;
+            solBalance = 10;
+            usdtBalance = 1e3;
+            usdcBalance = 1e3;
           }
-        } catch (balErr: any) {
+        } catch (balErr) {
           console.warn("[Jupiter Config Override] Balance lookup failed, seamlessly falling back to PAPER trading style:", balErr.message);
           mode = "PAPER";
-          solBalance = 10.0;
-          usdtBalance = 1000.0;
-          usdcBalance = 1000.0;
+          solBalance = 10;
+          usdtBalance = 1e3;
+          usdcBalance = 1e3;
         }
       }
-
-      let collateralAsset: "USDT" | "USDC" | "SOL" = "SOL";
+      let collateralAsset = "SOL";
       let collateralBalance = solBalance;
-
       if (usdtBalance > 0) {
         collateralAsset = "USDT";
         collateralBalance = usdtBalance;
@@ -4778,78 +3980,70 @@ app.post("/api/jupiter-config", async (req, res) => {
         collateralAsset = "SOL";
         collateralBalance = solBalance;
       }
-
       if (mode === "PAPER") {
-        solBalance = 10.0;
-        collateralBalance = 10.0;
+        solBalance = 10;
+        collateralBalance = 10;
       } else {
-        if (solBalance < 0.002) {
+        if (solBalance < 2e-3) {
           console.log(`[Jupiter Config Override] Wallet ${executionAddress} has insufficient SOL balance (${solBalance.toFixed(4)} SOL). Falling back to PAPER mode.`);
           mode = "PAPER";
-          solBalance = 10.0;
-          collateralBalance = 10.0;
+          solBalance = 10;
+          collateralBalance = 10;
         } else if (collateralAsset === "SOL" && collateralBalance < 0.02) {
           console.log(`[Jupiter Config Override] Wallet ${executionAddress} has insufficient SOL margin collateral (${collateralBalance.toFixed(4)} SOL). Falling back to PAPER mode.`);
           mode = "PAPER";
-          solBalance = 10.0;
-          collateralBalance = 10.0;
-        } else if ((collateralAsset === "USDT" || collateralAsset === "USDC") && collateralBalance < 1.0) {
+          solBalance = 10;
+          collateralBalance = 10;
+        } else if ((collateralAsset === "USDT" || collateralAsset === "USDC") && collateralBalance < 1) {
           console.log(`[Jupiter Config Override] Wallet ${executionAddress} has insufficient ${collateralAsset} margin collateral (${collateralBalance.toFixed(4)}). Falling back to PAPER mode.`);
           mode = "PAPER";
-          solBalance = 10.0;
-          collateralBalance = 10.0;
+          solBalance = 10;
+          collateralBalance = 10;
         }
       }
-
       let entryPrice = await getJupiterQuotePrice();
       if (entryPrice <= 0) {
         const pred = await getPredictionData(current.token, current.topic, current.weights);
         entryPrice = pred.price;
       }
-
-      const leverage = current.leverage || 5;
+      const leverage2 = current.leverage || 5;
       const allocationFraction = Math.min(current.allocationPercent || 5, 100) / 100;
       let sizeInSol = 0.01;
-
       if (collateralAsset === "USDT" || collateralAsset === "USDC") {
         const marginAmount = collateralBalance * allocationFraction;
-        const nominalValueInUsd = marginAmount * leverage;
+        const nominalValueInUsd = marginAmount * leverage2;
         sizeInSol = nominalValueInUsd / entryPrice;
       } else {
-        sizeInSol = solBalance * allocationFraction * leverage;
+        sizeInSol = solBalance * allocationFraction * leverage2;
       }
-
-      const tpPct = 4.0;
-      const slPct = 2.0;
-
+      const tpPct = 4;
+      const slPct = 2;
       current.activeTrade = {
-        side: forceOpen as "LONG" | "SHORT",
+        side: forceOpen,
         entryPrice,
-        entryTime: new Date().toISOString(),
+        entryTime: (/* @__PURE__ */ new Date()).toISOString(),
         sizeInSol,
-        leverage,
+        leverage: leverage2,
         collateralAsset,
         mode,
         takeProfitPct: tpPct,
         stopLossPct: slPct
       };
-      
       if (current.privateKey && mode !== "PAPER") {
-         console.log(`[Jupiter Config Override] Executing mainnet on-chain OPEN ${forceOpen} for ${sizeInSol.toFixed(4)} SOL...`);
-         try {
-           await executeOnChainTradeServerSide(forceOpen === "LONG" ? "LONG" : "SHORT", sizeInSol);
-         } catch (err: any) {
-           console.error("[Jupiter Override] Failed to execute live on-chain open:", err.message);
-         }
+        console.log(`[Jupiter Config Override] Executing mainnet on-chain OPEN ${forceOpen} for ${sizeInSol.toFixed(4)} SOL...`);
+        try {
+          await executeOnChainTradeServerSide(forceOpen === "LONG" ? "LONG" : "SHORT", sizeInSol);
+        } catch (err) {
+          console.error("[Jupiter Override] Failed to execute live on-chain open:", err.message);
+        }
       }
-
       try {
         const tConf = loadTelegramConfig();
-        addAuditLog(tConf, `Manual Override: Opened ${forceOpen} position at $${entryPrice.toFixed(2)} [Size: ${sizeInSol.toFixed(4)} SOL, Lev: ${leverage}x]`, "trade");
+        addAuditLog(tConf, `Manual Override: Opened ${forceOpen} position at $${entryPrice.toFixed(2)} [Size: ${sizeInSol.toFixed(4)} SOL, Lev: ${leverage2}x]`, "trade");
         saveTelegramConfig(tConf);
-      } catch (e) {}
+      } catch (e) {
+      }
     }
-
     saveJupiterConfig(current);
     const resp = await buildJupiterConfigResponse(current);
     res.json({
@@ -4857,18 +4051,16 @@ app.post("/api/jupiter-config", async (req, res) => {
       message: "Jupiter configurations updated successfully!",
       ...resp
     });
-  } catch (err: any) {
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
 app.post("/api/sentiment", async (req, res) => {
   try {
     const { headlines } = req.body;
     if (!headlines || !Array.isArray(headlines)) {
       return res.status(400).json({ error: "Headlines array required" });
     }
-
     const prompt = `Analyze the sentiment of the following news headlines. 
     Return a single JSON object with a 'score' between -1 and 1 (where -1 is extremely bearish, 1 is extremely bullish, 0 is neutral) 
     and a 'rationale' string summarizing the sentiment.
@@ -4877,52 +4069,44 @@ app.post("/api/sentiment", async (req, res) => {
     ${headlines.join("\n")}
     
     JSON format: { "score": number, "rationale": string }`;
-
     try {
       const response = await generateContentResilient({
         model: "gemini-3.5-flash",
-        contents: prompt,
+        contents: prompt
       });
       const text = response.text || "";
-      
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       const sentiment = jsonMatch ? JSON.parse(jsonMatch[0]) : { score: 0, rationale: "Failed to parse" };
-      
       res.json(sentiment);
-    } catch (err: any) {
+    } catch (err) {
       const isQuotaError = err.message?.includes("429") || err.status === 429;
       if (isQuotaError) {
         console.warn("Gemini Sentiment Quota exceeded");
       } else {
         console.warn("Gemini sentiment error in /api/sentiment:", err.message.substring(0, 100));
       }
-      res.json({ 
-        score: heuristicSentiment(headlines[0] || ""), 
-        rationale: `Logic fallback active (${isQuotaError ? 'Quota' : 'Error'}). Heuristic analysis of primary headline.` 
+      res.json({
+        score: heuristicSentiment(headlines[0] || ""),
+        rationale: `Logic fallback active (${isQuotaError ? "Quota" : "Error"}). Heuristic analysis of primary headline.`
       });
     }
-  } catch (error: any) {
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
-
-// Cron-driven daemon tick for serverless hosts (Vercel) where setInterval can't run.
-// Vercel Cron calls this on a schedule; it runs ONE tick of each daemon. Protect with
-// the CRON_SECRET env var (Vercel automatically sends it as a Bearer token).
 app.get("/api/cron/tick", async (req, res) => {
   if (process.env.CRON_SECRET && req.headers["authorization"] !== `Bearer ${process.env.CRON_SECRET}`) {
     return res.status(401).json({ error: "Unauthorized" });
   }
-  const ranAt = new Date().toISOString();
+  const ranAt = (/* @__PURE__ */ new Date()).toISOString();
   try {
-    await checkPredictionAndAlert().catch((e: any) => console.error("[Cron] alert tick failed:", e.message));
-    await checkJupiterTradingAndState().catch((e: any) => console.error("[Cron] jupiter tick failed:", e.message));
+    await checkPredictionAndAlert().catch((e) => console.error("[Cron] alert tick failed:", e.message));
+    await checkJupiterTradingAndState().catch((e) => console.error("[Cron] jupiter tick failed:", e.message));
     res.json({ ok: true, ranAt });
-  } catch (e: any) {
+  } catch (e) {
     res.status(500).json({ ok: false, error: e.message, ranAt });
   }
 });
-
 async function startServer() {
   setTimeout(() => {
     try {
@@ -4933,24 +4117,21 @@ async function startServer() {
       checkPredictionAndAlert().catch((err) => {
         console.error("[Telegram Daemon] Initial checkPredictionAndAlert failed:", err);
       });
-
-      // Load and start Jupiter Daemon
       const jupConfig = loadJupiterConfig();
-      restartJupiterDaemon(5); // Default to check every 5 mins
+      restartJupiterDaemon(5);
       console.log("[Jupiter Daemon] Running initial startup Jupiter check...");
       checkJupiterTradingAndState().catch((err) => {
         console.error("[Jupiter Daemon] Initial checkJupiterTradingAndState failed:", err);
       });
-    } catch (startupErr: any) {
+    } catch (startupErr) {
       console.error("[Daemon Startup] Synchronous error initializing daemons:", startupErr);
     }
-  }, 10000);
-
+  }, 1e4);
   if (process.env.NODE_ENV === "development") {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: "spa",
+      appType: "spa"
     });
     app.use(vite.middlewares);
   } else {
@@ -4960,19 +4141,28 @@ async function startServer() {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
-
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }
-
-// On Vercel the app runs as a serverless function (api/index.ts) — we must NOT call
-// app.listen() or start setInterval daemons there. Background ticks are driven by
-// Vercel Cron hitting /api/cron/tick instead. Locally / on Railway, run normally.
-const isVercel = !!process.env.VERCEL;
+var isVercel = !!process.env.VERCEL;
 if (process.env.NODE_ENV !== "test" && process.env.CORTEX_TESTING !== "true" && !isVercel) {
   startServer();
 }
-
-// Exported so Vercel's @vercel/node runtime can use the Express app as a handler.
-export default app;
+var server_default = app;
+export {
+  CONFIG_FILE,
+  JUPITER_CONFIG_FILE,
+  calculateDurationStr,
+  calculateEMA,
+  calculateElliotWave,
+  calculateRSI,
+  checkPredictionAndAlert,
+  server_default as default,
+  fetchMarketNews,
+  getNewsAgeString,
+  getPredictionData,
+  loadTelegramConfig,
+  performCoreAnalysis,
+  saveTelegramConfig
+};

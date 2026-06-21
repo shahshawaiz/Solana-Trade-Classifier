@@ -1,17 +1,17 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "vite build",
+  "buildCommand": "vite build && esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=api/index.js",
   "outputDirectory": "dist",
   "functions": {
-    "api/index.ts": {
-      "maxDuration": 60,
-      "memory": 1024
+    "api/index.js": {
+      "maxDuration": 10
     }
   },
   "rewrites": [
+    { "source": "/get-strategy-output", "destination": "/api/index" },
     { "source": "/api/(.*)", "destination": "/api/index" }
   ],
   "crons": [
-    { "path": "/api/cron/tick", "schedule": "*/5 * * * *" }
+    { "path": "/api/cron/tick", "schedule": "0 0 * * *" }
   ]
 }
