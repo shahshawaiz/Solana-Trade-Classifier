@@ -5031,7 +5031,41 @@ app.get("/api/cron/tick", async (req, res) => {
   }
 });
 
+// On a fresh deployment, wipe accumulated trade stats so each deploy starts from zero.
+// Detected via the platform's per-deploy id (Railway sets RAILWAY_DEPLOYMENT_ID). The id is
+// stored in config; when it changes we reset once. Without a deploy id (e.g. local dev) we
+// preserve state. Set DEPLOYMENT_ID manually to force a reset on any host.
+function resetStatsOnFreshDeploy() {
+  const deployId = process.env.RAILWAY_DEPLOYMENT_ID || process.env.RAILWAY_GIT_COMMIT_SHA || process.env.DEPLOYMENT_ID || "";
+  if (!deployId) return;
+  try {
+    const j = loadJupiterConfig();
+    if ((j as any).deploymentId !== deployId) {
+      console.log(`[Startup] Fresh deployment detected (${deployId}) — resetting trade stats to zero.`);
+      j.cumulativePnL = 0;
+      j.lastTradePnL = 0;
+      j.tradesHistory = [];
+      (j as any).consecutiveLosses = 0;
+      j.activeTrade = null;
+      (j as any).deploymentId = deployId;
+      saveJupiterConfig(j);
+
+      const t = loadTelegramConfig();
+      t.cumulativePnL = 0;
+      t.lastTradePnL = 0;
+      t.tradesHistory = [];
+      t.activeTrade = null;
+      (t as any).auditLogs = [];
+      (t as any).deploymentId = deployId;
+      saveTelegramConfig(t);
+    }
+  } catch (e: any) {
+    console.error("[Startup] Failed to reset stats on fresh deploy:", e.message);
+  }
+}
+
 async function startServer() {
+  resetStatsOnFreshDeploy();
   setTimeout(() => {
     try {
       const initialConfig = loadTelegramConfig();
