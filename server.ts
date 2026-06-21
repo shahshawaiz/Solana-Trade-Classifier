@@ -111,6 +111,79 @@ try {
 }
 
 
+// --- Resilient OHLC source ---
+// Yahoo Finance frequently hangs or is blocked from serverless/datacenter IPs (e.g. Vercel),
+// which kills the function with FUNCTION_INVOCATION_FAILED. We fetch crypto candles from
+// CryptoCompare first (no cookies/crumb, works from any IP), with a *timed* Yahoo fallback so
+// a hang can never crash the function. Returns the same `{ quotes: [...] }` shape as yf.chart.
+function withTimeout<T>(p: Promise<T>, ms: number, label = "op"): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
+  ]);
+}
+
+function ccHistoParams(interval: string): { path: string; aggregate: number } {
+  switch (interval) {
+    case "1m": return { path: "histominute", aggregate: 1 };
+    case "2m": return { path: "histominute", aggregate: 2 };
+    case "5m": return { path: "histominute", aggregate: 5 };
+    case "15m": return { path: "histominute", aggregate: 15 };
+    case "30m": return { path: "histominute", aggregate: 30 };
+    case "90m": return { path: "histominute", aggregate: 90 };
+    case "60m":
+    case "1h": return { path: "histohour", aggregate: 1 };
+    case "1d": return { path: "histoday", aggregate: 1 };
+    case "5d": return { path: "histoday", aggregate: 5 };
+    case "1wk": return { path: "histoday", aggregate: 7 };
+    case "1mo": return { path: "histoday", aggregate: 30 };
+    case "3mo": return { path: "histoday", aggregate: 90 };
+    default: return { path: "histominute", aggregate: 15 };
+  }
+}
+
+async function chartResilient(symbol: string, queryOptions: any = {}, _opts?: any): Promise<{ quotes: any[] }> {
+  const token = String(symbol).split("-")[0].toUpperCase();
+  const interval = queryOptions.interval || "15m";
+  const period1: Date | undefined = queryOptions.period1 instanceof Date ? queryOptions.period1 : (queryOptions.period1 ? new Date(queryOptions.period1) : undefined);
+  const period2: Date | undefined = queryOptions.period2 instanceof Date ? queryOptions.period2 : (queryOptions.period2 ? new Date(queryOptions.period2) : undefined);
+
+  // 1) CryptoCompare — serverless-friendly primary source.
+  try {
+    const { path: ccPath, aggregate } = ccHistoParams(interval);
+    const url = `https://min-api.cryptocompare.com/data/v2/${ccPath}?fsym=${token}&tsym=USD&limit=300&aggregate=${aggregate}`;
+    const res = await withTimeout(fetch(url), 8000, "cryptocompare");
+    if (res.ok) {
+      const json: any = await res.json();
+      const rows = json?.Data?.Data;
+      if (Array.isArray(rows) && rows.length) {
+        let quotes = rows
+          .filter((r: any) => r && typeof r.close === "number" && r.close > 0)
+          .map((r: any) => ({
+            date: new Date(r.time * 1000),
+            open: r.open, high: r.high, low: r.low, close: r.close,
+            volume: r.volumefrom ?? 0,
+          }));
+        if (period1) quotes = quotes.filter((q: any) => q.date.getTime() >= period1!.getTime());
+        if (period2) quotes = quotes.filter((q: any) => q.date.getTime() <= period2!.getTime());
+        if (quotes.length) return { quotes };
+      }
+    }
+  } catch (e: any) {
+    console.warn("[OHLC] CryptoCompare failed:", e.message);
+  }
+
+  // 2) Yahoo Finance fallback — timed so it can never hang the function.
+  try {
+    const result: any = await withTimeout((yf.chart as any)(symbol, queryOptions, { validateResult: false }), 8000, "yahoo");
+    if (result && Array.isArray(result.quotes)) return { quotes: result.quotes };
+  } catch (e: any) {
+    console.warn("[OHLC] Yahoo fallback failed:", e.message);
+  }
+
+  return { quotes: [] };
+}
+
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -273,7 +346,7 @@ app.get("/api/historical", async (req, res) => {
       queryOptions.period2 = period2;
     }
 
-    const result = await yf.chart(symbol, queryOptions, { validateResult: false });
+    const result = await chartResilient(symbol, queryOptions, { validateResult: false });
 
     if (!result || !result.quotes || result.quotes.length === 0) {
       throw new Error("No data returned from Yahoo Finance");
@@ -313,7 +386,7 @@ app.get("/api/price", async (req, res) => {
 
     // Fallback 1: try latest chart candle
     try {
-      const chart = await yf.chart(symbol, { period1: subDays(new Date(), 2) }, { validateResult: false });
+      const chart = await chartResilient(symbol, { period1: subDays(new Date(), 2) }, { validateResult: false });
       if (chart && chart.quotes && chart.quotes.length > 0) {
         const validQuotes = chart.quotes.filter((x: any) => x && x.close !== null);
         if (validQuotes.length > 0) {
@@ -1142,7 +1215,7 @@ export async function getPredictionData(token: string, topic: string, weights: a
   const allowedIntervals = ["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"];
   const validInterval = allowedIntervals.includes(interval) ? interval : "15m";
 
-  const chart = await yf.chart(symbol, { period1, interval: validInterval as any }, { validateResult: false });
+  const chart = await chartResilient(symbol, { period1, interval: validInterval as any }, { validateResult: false });
   const quotes = chart.quotes.filter((q: any) => q && q.close !== null);
   if (quotes.length < 2) throw new Error("Insufficient price data for prediction");
   
@@ -2066,7 +2139,7 @@ async function getJupiterQuotePrice(): Promise<number> {
     // If the raw Jupiter DEX aggregator API fails (e.g., inside restricted container sandbox network routing),
     // we resolve the pricing quietly using Yahoo Finance SOL data.
     try {
-      const chart = await yf.chart("SOL-USD", { period1: subDays(new Date(), 1), interval: "1h" }, { validateResult: false });
+      const chart = await chartResilient("SOL-USD", { period1: subDays(new Date(), 1), interval: "1h" }, { validateResult: false });
       if (chart && chart.quotes && chart.quotes.length > 0) {
         const validQuotes = chart.quotes.filter((q: any) => q && q.close !== null);
         if (validQuotes.length > 0) {
@@ -3330,7 +3403,7 @@ app.post("/api/backtest", async (req, res) => {
       queryOptions.period2 = period2;
     }
     
-    const chart = await yf.chart(symbol, queryOptions, { validateResult: false });
+    const chart = await chartResilient(symbol, queryOptions, { validateResult: false });
     const quotes = chart.quotes.filter((q: any) => q && q.close !== null);
     
     if (quotes.length < 15) {
