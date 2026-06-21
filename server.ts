@@ -989,7 +989,71 @@ export function calculateElliotWave(closes: number[]): { score: number; phase: s
   };
 }
 
-export function performCoreAnalysis(closes: number[], headlines: string[] = [], weights: any, historicalSentimentOverride?: number) {
+// --- Additional technical signals: Supertrend, Fair Value Gap, DCA mean-reversion ---
+type Bar = { high?: number; low?: number; close: number; volume?: number };
+
+// Supertrend: ATR-band trend follower. Returns +1 (uptrend) / -1 (downtrend) / 0 (n/a).
+function supertrendScore(bars: Bar[], period = 10, mult = 3): number {
+  if (bars.length < period + 2) return 0;
+  const atr = calculateATR(bars as any[], period);
+  if (!isFinite(atr) || atr <= 0) return 0;
+  let trendUp = true;
+  let finalUpper = Infinity;
+  let finalLower = -Infinity;
+  for (let i = 1; i < bars.length; i++) {
+    const h = bars[i].high ?? bars[i].close;
+    const l = bars[i].low ?? bars[i].close;
+    const c = bars[i].close;
+    const mid = (h + l) / 2;
+    const basicUpper = mid + mult * atr;
+    const basicLower = mid - mult * atr;
+    finalUpper = (basicUpper < finalUpper || bars[i - 1].close > finalUpper) ? basicUpper : finalUpper;
+    finalLower = (basicLower > finalLower || bars[i - 1].close < finalLower) ? basicLower : finalLower;
+    if (c > finalUpper) trendUp = true;
+    else if (c < finalLower) trendUp = false;
+  }
+  return trendUp ? 1 : -1;
+}
+
+// Fair Value Gap (ICT): a 3-candle imbalance. Bullish FVG = low[i] > high[i-2] (gap up, leaves
+// support below); bearish = high[i] < low[i-2] (gap down, leaves resistance above). Bias long when
+// price sits just above an unfilled bullish gap, short when just below an unfilled bearish gap.
+function fvgScore(bars: Bar[], lookback = 30): number {
+  if (bars.length < 3) return 0;
+  const n = bars.length;
+  const price = bars[n - 1].close;
+  if (!price) return 0;
+  let bullSupport: number | null = null;
+  let bearResist: number | null = null;
+  for (let i = Math.max(2, n - lookback); i < n; i++) {
+    const h2 = bars[i - 2].high ?? bars[i - 2].close;
+    const l2 = bars[i - 2].low ?? bars[i - 2].close;
+    const hi = bars[i].high ?? bars[i].close;
+    const lo = bars[i].low ?? bars[i].close;
+    if (lo > h2 && price > h2) bullSupport = h2;      // unfilled bullish gap below price
+    if (hi < l2 && price < l2) bearResist = l2;        // unfilled bearish gap above price
+  }
+  let score = 0;
+  const band = price * 0.03; // within 3% counts as "near"
+  if (bullSupport !== null) score += Math.max(0, 1 - (price - bullSupport) / band);
+  if (bearResist !== null) score -= Math.max(0, 1 - (bearResist - price) / band);
+  return Math.max(-1, Math.min(1, score));
+}
+
+// DCA / mean-reversion: z-score of price vs its rolling average. Below average -> positive
+// ("accumulate cheaply", the directional essence of dollar-cost averaging); above -> negative.
+function dcaMeanReversionScore(closes: number[], period = 50): number {
+  if (closes.length < period) return 0;
+  const slice = closes.slice(-period);
+  const mean = slice.reduce((a, b) => a + b, 0) / slice.length;
+  const variance = slice.reduce((a, b) => a + (b - mean) ** 2, 0) / slice.length;
+  const sd = Math.sqrt(variance);
+  if (sd <= 0) return 0;
+  const z = (closes[closes.length - 1] - mean) / sd;
+  return Math.max(-1, Math.min(1, -z / 2));
+}
+
+export function performCoreAnalysis(closes: number[], headlines: string[] = [], weights: any, historicalSentimentOverride?: number, bars?: Bar[]) {
   // 1. Rigorous Elliott Wave Oscillator & Wave Count Calculation
   const waveInfo = calculateElliotWave(closes);
   const elliotWaveScore = waveInfo.score;
@@ -1043,15 +1107,26 @@ export function performCoreAnalysis(closes: number[], headlines: string[] = [], 
   let technicalW = weights?.technical !== undefined ? weights.technical : 0.85;
   let liquidityW = weights?.liquidity !== undefined ? weights.liquidity : 0.85;
   let elliottW = weights?.elliottWave !== undefined ? weights.elliottWave : 0.85;
+  // New optional signals (default 0 = off): Supertrend (ATR trend), Fair Value Gap, DCA mean-reversion.
+  let supertrendW = weights?.supertrend !== undefined ? weights.supertrend : 0;
+  let fvgW = weights?.fvg !== undefined ? weights.fvg : 0;
+  let dcaW = weights?.dca !== undefined ? weights.dca : 0;
 
-  let totalWeights = sentimentW + technicalW + liquidityW + elliottW;
+  const stScore = supertrendW > 0 && bars ? supertrendScore(bars) : 0;
+  const fvScore = fvgW > 0 && bars ? fvgScore(bars) : 0;
+  const dcScore = dcaW > 0 ? dcaMeanReversionScore(closes) : 0;
+
+  let totalWeights = sentimentW + technicalW + liquidityW + elliottW + supertrendW + fvgW + dcaW;
   if (totalWeights === 0) totalWeights = 1; // Prevent division by zero
 
   let compositeScore = (
     (sentimentScore * sentimentW) +
     (macdScore * technicalW) +
     (rsiScore * liquidityW) +
-    (elliotWaveScore * elliottW)
+    (elliotWaveScore * elliottW) +
+    (stScore * supertrendW) +
+    (fvScore * fvgW) +
+    (dcScore * dcaW)
   ) / totalWeights;
 
   // SEMANTIC CATALYST OVERRULE: extreme sentiment (>= 0.85 / <= -0.85) is authoritative —
@@ -1327,7 +1402,7 @@ export async function getPredictionData(token: string, topic: string, weights: a
   }
 
   // 3. Evaluate Strategy
-  const strategyData = performCoreAnalysis(closes, headlines, weights, llmScore);
+  const strategyData = performCoreAnalysis(closes, headlines, weights, llmScore, quotes);
   const { compositeScore, emaScore, rsiScore, elliottWaveScore, headlineSentimentFinal, elliotWavePhase } = strategyData;
 
   // Decision is driven purely by the Composite Bias Σ (which now includes the Elliott Wave
@@ -1335,7 +1410,7 @@ export async function getPredictionData(token: string, topic: string, weights: a
   // the Cortex Alpha spec. No separate Elliott-Wave veto and no 200-EMA suppression gate:
   // those were undocumented filters that blocked spec-valid signals and broke the catalyst overrule.
   function evaluateSignal(priceCloses: number[], rsiVal: number, hls: string[], llmVal?: number) {
-      const sData = performCoreAnalysis(priceCloses, hls, weights, llmVal);
+      const sData = performCoreAnalysis(priceCloses, hls, weights, llmVal, quotes.slice(0, priceCloses.length));
 
       let pSide = "HOLD";
       let aRec = sData.isChop ? "Hold Chop Zone" : "Hold";
@@ -1646,7 +1721,7 @@ export function loadTelegramConfig(): TelegramConfig {
     enabled: true,
     token: "SOL",
     topic: "crypto,war",
-    weights: { sentiment: 0.90, technical: 0.85, liquidity: 0.85, elliottWave: 0.85 },
+    weights: { sentiment: 0, technical: 0.9, liquidity: 0.85, elliottWave: 0, supertrend: 0.9, fvg: 0, dca: 0 },
     lastAction: "Hold",
     lastSentDirection: "HOLD",
     frequency: 5,
@@ -1699,7 +1774,7 @@ export interface JupiterConfig {
   lastTradeAddedAt?: string;
   token: string;
   topic: string;
-  weights: { sentiment: number; technical: number; liquidity: number; elliottWave?: number; };
+  weights: { sentiment: number; technical: number; liquidity: number; elliottWave?: number; supertrend?: number; fvg?: number; dca?: number; };
   lastTradePnL: number;
   cumulativePnL: number;
   interval?: string;
@@ -1840,7 +1915,7 @@ function loadJupiterConfig(): JupiterConfig {
     lastTradeAddedAt: "",
     token: "SOL",
     topic: "crypto,war",
-    weights: { sentiment: 0.90, technical: 0.85, liquidity: 0.85, elliottWave: 0.85 },
+    weights: { sentiment: 0, technical: 0.9, liquidity: 0.85, elliottWave: 0, supertrend: 0.9, fvg: 0, dca: 0 },
     lastTradePnL: 0,
     cumulativePnL: 0,
     interval: "15m",
@@ -2813,15 +2888,17 @@ async function executeOnChainTradeServerSide(direction: "LONG" | "SHORT" | "CLOS
     const notionalUsd = executeSizeSol * assetPrice;
     const collateralUsd = notionalUsd / leverage;
 
-    let input = String((config as any).collateralAsset || "USDC").toUpperCase();
-    if (input === "USDT") input = "USDC";
+    // Use the position's NATIVE collateral token as --input to avoid an embedded swap that
+    // would push the open past Solana's max transaction size. Jupiter Perps collateralizes
+    // longs in the traded asset (e.g. SOL) and shorts in USDC — feeding any other token makes
+    // the CLI bundle a swap into the open instruction.
+    const input = direction === "SHORT" ? "USDC" : asset;
     let amount: number;
-    if (input === "SOL") {
-      const solPrice = asset === "SOL" ? assetPrice : await getPerpMarketPrice("SOL");
-      amount = solPrice ? collateralUsd / solPrice : 0;
+    if (input === "USDC" || input === "USDT") {
+      amount = collateralUsd; // ~1 USD each
     } else {
-      // USDC collateral is ~1 USD.
-      amount = collateralUsd;
+      const inputPrice = input === asset ? assetPrice : await getPerpMarketPrice(input);
+      amount = inputPrice ? collateralUsd / inputPrice : 0;
     }
     amount = Number(amount.toFixed(6));
     if (!amount || amount <= 0) throw new Error("Computed collateral amount is zero");
@@ -2839,7 +2916,7 @@ async function executeOnChainTradeServerSide(direction: "LONG" | "SHORT" | "CLOS
     const tpStr = tpPrice.toFixed(6);
     const slStr = slPrice.toFixed(6);
 
-    console.log(`[Jupiter Perps CLI] OPEN ${side} ${asset}: collateral ~${amount} ${input}, ${leverage}x (notional ~$${notionalUsd.toFixed(2)}) | TP $${tpStr} / SL $${slStr}`);
+    console.log(`[Jupiter Perps CLI] OPEN ${side} ${asset}: collateral ~${amount} ${input}, ${leverage}x (notional ~$${notionalUsd.toFixed(2)})`);
     const res = await runJupCli([
       "perps", "open",
       "--asset", asset,
@@ -2847,12 +2924,27 @@ async function executeOnChainTradeServerSide(direction: "LONG" | "SHORT" | "CLOS
       "--amount", String(amount),
       "--input", input,
       "--leverage", String(leverage),
-      "--tp", tpStr,
-      "--sl", slStr,
       "--key", keyName,
     ]);
     const sig = (res && res.signature) || null;
-    console.log(`[Jupiter Perps CLI] OPEN submitted. Position: ${res && res.positionPubkey} Tx: ${sig}`);
+    const positionPubkey = res && res.positionPubkey;
+    console.log(`[Jupiter Perps CLI] OPEN submitted. Position: ${positionPubkey} Tx: ${sig}`);
+
+    if (positionPubkey) {
+      console.log(`[Jupiter Perps CLI] Setting TP $${tpStr} / SL $${slStr} for position ${positionPubkey}...`);
+      try {
+        const setRes = await runJupCli([
+          "perps", "set",
+          "--position", positionPubkey,
+          "--tp", tpStr,
+          "--sl", slStr,
+          "--key", keyName,
+        ]);
+        console.log(`[Jupiter Perps CLI] TP/SL set successfully.`, setRes);
+      } catch (err: any) {
+        console.error(`[Jupiter Perps CLI] Failed to set TP/SL for position ${positionPubkey}: ${err.message}`);
+      }
+    }
     return sig;
   } catch (e: any) {
     // Surface the real reason (e.g. "Collateral size must be at least $10 for new positions").
@@ -3189,20 +3281,18 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           }
         }
 
-        // 2. Select margin collateral token based on active balances / config (Auto prefer USDT for USDT perpetuals requested)
-        let collateralAsset: "USDT" | "USDC" | "SOL" = "SOL";
-        let collateralBalance = solBalance;
-
-        if (usdtBalance > 0) {
-          collateralAsset = "USDT";
-          collateralBalance = usdtBalance;
-        } else if (usdcBalance > 0) {
+        // 2. Native collateral by side (matches on-chain custody, avoids tx-bloating swaps):
+        //    longs collateralize in the traded asset (SOL), shorts in USDC.
+        let collateralAsset: string;
+        let collateralBalance: number;
+        if (enterSide === "SHORT") {
           collateralAsset = "USDC";
           collateralBalance = usdcBalance;
         } else {
           collateralAsset = "SOL";
           collateralBalance = solBalance;
         }
+        void usdtBalance;
 
         if (mode === "PAPER") {
           solBalance = 10.0;
@@ -3218,7 +3308,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             mode = "PAPER";
             solBalance = 10.0;
             collateralBalance = 10.0;
-          } else if ((collateralAsset === "USDT" || collateralAsset === "USDC") && collateralBalance < 1.0) {
+          } else if (collateralAsset === "USDC" && collateralBalance < 1.0) {
             console.log(`[Jupiter Daemon] Wallet ${executionAddress} has insufficient ${collateralAsset} margin collateral (${collateralBalance.toFixed(4)}). Seamlessly falling back to PAPER (Simulated) trading.`);
             mode = "PAPER";
             solBalance = 10.0;
@@ -3543,7 +3633,8 @@ app.post("/api/strategy/signal", handleGetStrategyOutput);
 
 app.post("/api/backtest", async (req, res) => {
   try {
-    const { token = "SOL", interval = "1h", lookbackDays = 7, weights, initialCapital = 10000, startDate, endDate, leverage = 5, takeProfitPct = 4.0, stopLossPct = 2.0 } = req.body;
+    const { token = "SOL", interval = "1h", lookbackDays = 7, weights, initialCapital = 10000, startDate, endDate, leverage = 5, takeProfitPct = 4.0, stopLossPct = 2.0, signalThreshold = 0.25, useRegimeFilter = true } = req.body;
+    const sigThreshold = Math.max(0, Number(signalThreshold) || 0.08);
     const symbol = `${token.toUpperCase()}-USD`;
     
     let period1: Date | undefined = parseQueryDate(startDate);
@@ -3646,7 +3737,7 @@ app.post("/api/backtest", async (req, res) => {
         const mom = (closes[tickIdx] - prPrice) / (prPrice || 1);
         const calcSent = Math.min(Math.max(mom * 30, -1), 1);
         
-        const sData = performCoreAnalysis(closes.slice(0, tickIdx + 1), [], weights, calcSent);
+        const sData = performCoreAnalysis(closes.slice(0, tickIdx + 1), [], weights, calcSent, quotes.slice(0, tickIdx + 1));
         const fScore = sData.compositeScore;
         
         const tickCloses = closes.slice(0, tickIdx + 1);
@@ -3661,9 +3752,13 @@ app.post("/api/backtest", async (req, res) => {
         let pSide = "HOLD";
         let trnd = "SIDEWAYS";
 
-        if (fScore > 0.08) {
+        // Trend regime filter: only take longs above the trend EMA, shorts below it.
+        // Reduces counter-trend whipsaw (a key driver of the low baseline win-rate).
+        const regimeUp = !useRegimeFilter || tickClose > tickEma200;
+        const regimeDn = !useRegimeFilter || tickClose < tickEma200;
+        if (fScore > sigThreshold && regimeUp) {
             pSide = "LONG"; aRec = cRsi < 30 ? "Long Buy (Oversold)" : "Long Buy"; trnd = "UP";
-        } else if (fScore < -0.08) {
+        } else if (fScore < -sigThreshold && regimeDn) {
             pSide = "SHORT"; aRec = cRsi > 70 ? "Short Sell (Overbought)" : "Short Sell"; trnd = "DOWN";
         }
 
@@ -3972,7 +4067,35 @@ app.post("/api/backtest", async (req, res) => {
       const dd = ((maxEq - p.equity) / maxEq) * 100;
       if (dd > maxDd) maxDd = dd;
     });
-    
+
+    // --- Risk-adjusted metrics (Sharpe / Sortino / profit factor / expectancy) ---
+    // Per-trade equity returns from the equity curve, annualized by trades/year.
+    const eqSeries = equityCurve.map((p: any) => p.equity);
+    const eqRets: number[] = [];
+    for (let k = 1; k < eqSeries.length; k++) {
+      if (eqSeries[k - 1] > 0) eqRets.push((eqSeries[k] - eqSeries[k - 1]) / eqSeries[k - 1]);
+    }
+    const n = eqRets.length;
+    const mean = n ? eqRets.reduce((a, b) => a + b, 0) / n : 0;
+    const variance = n > 1 ? eqRets.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1) : 0;
+    const sd = Math.sqrt(variance);
+    const dnRets = eqRets.filter((r) => r < 0);
+    const dDev = dnRets.length ? Math.sqrt(dnRets.reduce((a, b) => a + b * b, 0) / dnRets.length) : 0;
+    const periodYears = Math.max((Number(lookbackDays) || 7) / 365, 1 / 365);
+    const tradesPerYear = n > 0 ? n / periodYears : 0;
+    const annFactor = Math.sqrt(Math.max(tradesPerYear, 1));
+    const sharpeRatio = sd > 0 ? (mean / sd) * annFactor : 0;
+    const sortinoRatio = dDev > 0 ? (mean / dDev) * annFactor : 0;
+
+    // Profit factor + expectancy from realized (closed) trades.
+    const closedTrades = trades.filter((t: any) => typeof t.pnl === "number");
+    const grossWin = closedTrades.filter((t: any) => t.pnl > 0).reduce((a: number, t: any) => a + t.pnl, 0);
+    const grossLoss = Math.abs(closedTrades.filter((t: any) => t.pnl < 0).reduce((a: number, t: any) => a + t.pnl, 0));
+    const profitFactor = grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? 99 : 0);
+    const avgWin = wins > 0 ? grossWin / wins : 0;
+    const avgLoss = losses > 0 ? grossLoss / losses : 0;
+    const expectancyUsd = closedTrades.length ? closedTrades.reduce((a: number, t: any) => a + t.pnl, 0) / closedTrades.length : 0;
+
     res.json({
       metrics: {
         initialCapital,
@@ -3983,6 +4106,12 @@ app.post("/api/backtest", async (req, res) => {
         winRate,
         pnlPct,
         maxDrawdownPct: maxDd,
+        sharpeRatio: Number(sharpeRatio.toFixed(2)),
+        sortinoRatio: Number(sortinoRatio.toFixed(2)),
+        profitFactor: Number(profitFactor.toFixed(2)),
+        avgWinUsd: Number(avgWin.toFixed(2)),
+        avgLossUsd: Number(avgLoss.toFixed(2)),
+        expectancyUsd: Number(expectancyUsd.toFixed(2)),
         predictionQualityPct,
         averageErrorPct,
         backtestAccuracyPct

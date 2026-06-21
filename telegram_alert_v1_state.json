@@ -23,38 +23,7 @@
   "interval": "15m",
   "activeTrade": null,
   "tradesHistory": [],
-  "auditLogs": [
-    {
-      "id": "at85233",
-      "timestamp": "2026-06-20T20:58:35.483Z",
-      "message": "Automated Open: LONG at $71.80 [Size: 0.0348 SOL, Lev: 5x]",
-      "type": "trade"
-    },
-    {
-      "id": "1q4zwhg",
-      "timestamp": "2026-06-20T21:13:23.243Z",
-      "message": "Automated Close: 🟢 at $72.12. Take Profit Pool Hit ($71.95). PnL: 🔵 +2.18%",
-      "type": "trade"
-    },
-    {
-      "id": "ipvs4df",
-      "timestamp": "2026-06-20T21:13:31.627Z",
-      "message": "Automated Open: LONG at $72.13 [Size: 0.0347 SOL, Lev: 5x]",
-      "type": "trade"
-    },
-    {
-      "id": "2qjgtao",
-      "timestamp": "2026-06-21T16:46:51.776Z",
-      "message": "Automated Close: 🟢 at $73.96. Take Profit Pool Hit ($72.28). PnL: 🔵 +12.67%",
-      "type": "trade"
-    },
-    {
-      "id": "xljpcg9",
-      "timestamp": "2026-06-21T17:33:27.443Z",
-      "message": "Automated Open: LONG at $74.23 [Size: 0.6736 SOL, Lev: 5x]",
-      "type": "trade"
-    }
-  ],
+  "auditLogs": [],
   "newsTelegramChannel": "https://t.me/+1C0c6rUVmjo3Y2Y8",
-  "lastCheckedAt": "2026-06-21T17:47:12.186Z"
+  "lastCheckedAt": "2026-06-21T20:40:05.638Z"
 }
