@@ -1,6 +1,6 @@
 var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
   get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
-}) : x)(function (x) {
+}) : x)(function(x) {
   if (typeof require !== "undefined") return require.apply(this, arguments);
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
@@ -3550,7 +3550,7 @@ app.post("/api/backtest", async (req, res) => {
     let lastSentDirection = "HOLD";
     const startIndex = Math.min(26, Math.floor(closes.length / 3));
     for (let i = startIndex; i < closes.length; i++) {
-      let getTickSignal = function (tickIdx) {
+      let getTickSignal = function(tickIdx) {
         if (tickIdx < 0) {
           return {
             positionSide: "HOLD",

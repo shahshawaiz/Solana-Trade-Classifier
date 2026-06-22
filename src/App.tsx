@@ -6462,7 +6462,7 @@ export default function App() {
                         <li><strong className="text-text-heading">Same-tick reversal re-entry.</strong> A direction flip now closes and opens the opposite position on the same tick.</li>
                         <li><strong className="text-text-heading">Real news only.</strong> All synthetic/LLM-fabricated "Telegram posts" and hardcoded sample signals were deleted. With no real headlines, sentiment is neutral (0) — never fabricated.</li>
                         <li><strong className="text-text-heading">Telegram news source fixed.</strong> Switched from an unreadable private invite link to a public, scrapeable channel; light relevance filtering keeps sentiment on-topic.</li>
-                        <li><strong className="text-text-heading">Risk circuit breaker.</strong> After <code>maxConsecutiveLosses</code> consecutive losing trades (default 4) new entries pause while exits still work; a win resets the streak. Set to 0 to disable.</li>
+                        <li><strong className="text-text-heading">Risk circuit breaker.</strong> After <code>maxConsecutiveLosses</code> consecutive losing trades (default 8) new entries pause while exits still work; a win resets the streak. Set to 0 to disable.</li>
                         <li><strong className="text-text-heading">Real perps execution.</strong> Automated on-chain trades now route through the official Jupiter CLI (<code>jup perps open/close</code>) — actual leveraged positions, not spot swaps or memos. Defaults to PAPER mode; failed opens roll back (no phantom positions).</li>
                       </ul>
                     </div>

@@ -3789,7 +3789,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
 
       // Risk circuit breaker: after N consecutive losing trades, pause NEW entries (exits still
       // work) until the streak is manually reset. Set maxConsecutiveLosses to 0 to disable.
-      const maxConsecLosses = (config as any).maxConsecutiveLosses ?? 4;
+      const maxConsecLosses = (config as any).maxConsecutiveLosses ?? 8;
       if (canEnter && maxConsecLosses > 0 && (((config as any).consecutiveLosses || 0) >= maxConsecLosses)) {
         canEnter = false;
         config.error = `Circuit breaker active: ${(config as any).consecutiveLosses} consecutive losses (limit ${maxConsecLosses}). New entries paused; reset consecutiveLosses to resume.`;
