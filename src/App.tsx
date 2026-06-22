@@ -720,11 +720,12 @@ export default function App() {
   const downloadJournalCSV = () => {
     const trades = journalData?.trades || [];
     if (!trades.length) return;
-    const header = ["Source", "Side", "Leverage", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Realized PnL %", "Size (SOL)", "TP %", "SL %", "Duration (min)"];
+    const header = ["Source", "Side", "Leverage", "Mode", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Realized PnL %", "Size (SOL)", "TP %", "SL %", "Duration (min)", "Sentiment", "Technical", "News Catalysts"];
     const rows = trades.map((t: any) => [
       t.source ?? "",
       t.side ?? "",
       t.leverage ?? "",
+      t.mode ?? "",
       t.entryTime ?? "",
       t.exitTime ?? "",
       t.entryPrice ?? "",
@@ -734,6 +735,9 @@ export default function App() {
       t.takeProfitPct ?? "",
       t.stopLossPct ?? "",
       t.durationMins ?? "",
+      t.sentiment !== undefined && t.sentiment !== null ? t.sentiment : "",
+      t.technicalScore !== undefined && t.technicalScore !== null ? t.technicalScore : "",
+      (t.news || []).map((n: any) => (n && typeof n === "object" ? n.title : n)).filter(Boolean).join(" | "),
     ]);
     const csv = [header, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -5520,7 +5524,45 @@ export default function App() {
                             {trade.takeProfitPct !== undefined && (
                               <span>TP <span className="text-sol-green font-semibold">+{Number(trade.takeProfitPct).toFixed(1)}%</span> · SL <span className="text-red-400 font-semibold">-{Number(trade.stopLossPct ?? 0).toFixed(1)}%</span></span>
                             )}
+                            {trade.mode && (
+                              <span className="text-[8px] uppercase tracking-wider px-1 py-0.5 rounded bg-bg-input border border-border-dim">{trade.mode}</span>
+                            )}
                           </div>
+                          {/* Signal breakdown — why this trade was executed */}
+                          {(trade.sentiment !== undefined && trade.sentiment !== null) || (trade.technicalScore !== undefined && trade.technicalScore !== null) ? (
+                            <div className="flex items-center gap-4 text-[9.5px] text-text-dim border-t border-border-dim/15 pt-1.5 flex-wrap gap-y-1">
+                              <span className="font-sans font-bold text-[7.5px] uppercase tracking-wider text-text-dim">Signal breakdown:</span>
+                              {trade.sentiment !== undefined && trade.sentiment !== null && (
+                                <span>Sentiment <span className={cn("font-semibold", trade.sentiment > 0 ? "text-sol-green" : trade.sentiment < 0 ? "text-red-400" : "text-sol-purple")}>{(trade.sentiment >= 0 ? "+" : "") + Number(trade.sentiment).toFixed(2)}</span></span>
+                              )}
+                              {trade.technicalScore !== undefined && trade.technicalScore !== null && (
+                                <span>Technical <span className={cn("font-semibold", trade.technicalScore > 0 ? "text-sol-green" : trade.technicalScore < 0 ? "text-red-400" : "text-sol-purple")}>{(trade.technicalScore >= 0 ? "+" : "") + Number(trade.technicalScore).toFixed(2)}</span></span>
+                              )}
+                            </div>
+                          ) : null}
+                          {trade.news && trade.news.length > 0 && (
+                            <div className="text-left font-mono text-[8.5px] text-text-dim/85 border-t border-border-dim/10 pt-1.5 space-y-0.5">
+                              <span className="font-sans font-bold block text-[7.5px] uppercase tracking-wider text-text-dim mb-0.5">News catalysts at entry:</span>
+                              {trade.news.slice(0, 5).map((item: any, nIdx: number) => {
+                                const isObj = item && typeof item === "object";
+                                const title = isObj ? item.title : item;
+                                const score = isObj && item.sentiment !== undefined ? item.sentiment : null;
+                                return (
+                                  <div key={nIdx} className="flex flex-col border-b border-border-dim/5 last:border-0 pb-0.5">
+                                    <div className="truncate font-serif text-[9px] text-text-heading/90" title={title}>📰 {nIdx + 1}. {title}</div>
+                                    {(score !== null || (isObj && item.source)) && (
+                                      <div className="flex gap-2 items-center text-[7px] text-text-dim font-mono tracking-wider pl-4 uppercase">
+                                        {score !== null && (
+                                          <span className={cn("font-semibold", score > 0.1 ? "text-sol-green" : score < -0.1 ? "text-red-400" : "text-text-dim")}>Score: {score > 0 ? "+" : ""}{Number(score).toFixed(2)}</span>
+                                        )}
+                                        {isObj && item.source && <span>• {item.source}</span>}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
                         </div>
                       );
                     })}

@@ -611,6 +611,11 @@ app.get("/api/journal", async (_req, res) => {
         stopLossPct: t.stopLossPct,
         leverage: t.leverage,
         sizeInSol: t.sizeInSol,
+        mode: t.mode,
+        // Signal breakdown / rationale captured at trade time:
+        sentiment: t.sentiment,
+        technicalScore: t.technicalScore,
+        news: t.news || [],
       };
     }).sort((a, b) => new Date(b.exitTime || 0).getTime() - new Date(a.exitTime || 0).getTime());
 

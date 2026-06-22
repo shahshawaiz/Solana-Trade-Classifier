@@ -173,3 +173,48 @@ funding-free** numbers on a period that was largely favourable — the absolute 
 persist and are inflated by leverage. What is robust is the **direction and consistency**: the macro
 gate helped in *every* market/window with no exceptions, which is exactly the failure mode the live
 trade log exhibited (counter-macro longs). Validate walk-forward and with costs before trusting the size.
+
+## 9. Short-term scalping benchmark — 5-minute candles, 5x, $10 size, WITH fees
+Same core, but **5m candles**, **$10 fixed position size**, **5x leverage**, and a **6 bps taker fee
+per side** (open + close, on notional — the optimistic floor; excludes price impact, borrow/funding,
+slippage). Windows 7d / 30d (Yahoo caps 5m history at ~60d). Reproduce:
+`INTERVAL=5m LEVERAGE=5 POSITION_USD=10 FEE_BPS=6 WINDOWS=7,30 npx tsx scripts/macro-benchmark.ts`.
+
+### Macro filter OFF
+| Market/Window | Sharpe | Win% | Trades | Gross P&L | Fees | Net P&L ($10@5x) |
+|---|---:|---:|---:|---:|---:|---:|
+| SOL / 7d | −16.43 | 39.7 | 68 | −$3.75 | $4.08 | −$7.83 |
+| SOL / 30d | −6.90 | 44.6 | 276 | +$0.55 | $16.56 | −$16.01 |
+| BTC / 7d | −7.58 | 45.6 | 68 | +$1.85 | $4.08 | −$2.23 |
+| BTC / 30d | −13.64 | 47.0 | 283 | −$2.96 | $16.98 | −$19.94 |
+| ETH / 7d | −28.77 | 32.9 | 76 | −$4.94 | $4.56 | −$9.50 |
+| ETH / 30d | −9.64 | 43.5 | 285 | −$1.42 | $17.10 | −$18.52 |
+| **Total** | med −11.6 | — | 1056 | **−$10.66** | **$63.36** | **−$74.02** |
+
+### Macro filter ON
+| Market/Window | Sharpe | Win% | Trades | Gross P&L | Fees | Net P&L ($10@5x) |
+|---|---:|---:|---:|---:|---:|---:|
+| SOL / 7d | −19.55 | 40.0 | 55 | −$4.71 | $3.30 | −$8.01 |
+| SOL / 30d | −4.47 | 46.1 | 193 | +$2.04 | $11.58 | −$9.54 |
+| BTC / 7d | −1.58 | 52.9 | 51 | +$2.62 | $3.06 | −$0.44 |
+| BTC / 30d | −7.78 | 49.7 | 189 | +$1.68 | $11.34 | −$9.66 |
+| ETH / 7d | −24.59 | 36.5 | 63 | −$3.36 | $3.78 | −$7.14 |
+| ETH / 30d | −8.01 | 44.8 | 194 | −$1.51 | $11.64 | −$13.15 |
+| **Total** | med −7.9 | — | 745 | **−$3.24** | **$44.70** | **−$47.94** |
+
+**Verdict — 5-minute scalping does NOT work here:**
+1. **No gross edge at 5m.** Even *before fees*, total gross P&L is **negative** (OFF −$10.66, ON −$3.24).
+   The MACD+RSI trend core that was strongly positive at 1h is **just noise at 5m** — the timeframe is
+   too fast for this signal. Win rates sit at 33–53% (coin-flip), unlike the cleaner 1h behaviour.
+2. **Fees bury it.** On $10 positions the per-trade edge is ~$0.00–0.01 while each round trip costs
+   ~$0.06 (6 bps × $50 notional × 2). Over ~1,000 trades that's **$63 of fees** — the fees are an order
+   of magnitude larger than any gross edge. Real costs (price impact + Jupiter borrow/funding +
+   slippage) are **higher still**, so the true result is worse than shown.
+3. **The macro filter helps but cannot rescue it.** It improved Sharpe in 5/6 windows and roughly
+   **halved the net loss** (−$74 → −$48 total) by cutting ~30% of the counter-macro trades — but a
+   smaller loss is still a loss.
+
+**Takeaway:** keep the engine on **1h** (or 15m at most). 5-minute, $10, 5x is a structurally
+losing configuration: tiny per-trade edge × high trade count × fixed fees = guaranteed bleed. If you
+must trade faster, you need a real microstructure edge and maker-rebate-level fees, neither of which
+this strategy has.
