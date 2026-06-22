@@ -1690,6 +1690,26 @@ export default function App() {
     }
   };
 
+  const handleResetCircuitBreaker = async () => {
+    setJupLoading(true);
+    setJupStatusMsg(null);
+    try {
+      const res = await fetch("/api/jupiter-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resetConsecutiveLosses: true })
+      });
+      if (res.ok) {
+        setJupStatusMsg({ type: "success", text: "Circuit breaker consecutive losses reset!" });
+        fetchJupiterConfig();
+      }
+    } catch (err: any) {
+      setJupStatusMsg({ type: "err", text: err.message });
+    } finally {
+      setJupLoading(false);
+    }
+  };
+
   const getReliableConnection = () => {
     return new Connection("https://solana-rpc.publicnode.com");
   };
@@ -4365,6 +4385,16 @@ export default function App() {
                         <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-500 rounded text-[10px] leading-relaxed">
                           <p className="font-bold mb-1">Last Daemon Error:</p>
                           <p className="break-words font-mono font-normal">{jupiterConfig.error}</p>
+                          {jupiterConfig.error.includes("Circuit breaker") && (
+                            <button
+                              type="button"
+                              onClick={handleResetCircuitBreaker}
+                              disabled={jupLoading}
+                              className="mt-2 w-full text-center text-[9px] font-bold uppercase tracking-wider py-1.5 px-2 rounded bg-red-500/20 hover:bg-red-500/35 text-red-300 border border-red-500/30 active:scale-95 transition-all cursor-pointer"
+                            >
+                              Reset Circuit Breaker (Resume Entries)
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>

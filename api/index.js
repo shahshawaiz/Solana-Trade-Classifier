@@ -3703,6 +3703,7 @@ app.post("/api/jupiter-config", async (req, res) => {
       weights,
       interval,
       resetStats,
+      resetConsecutiveLosses,
       forceClose,
       forceOpen,
       // side: "LONG" | "SHORT"
@@ -3740,6 +3741,9 @@ app.post("/api/jupiter-config", async (req, res) => {
     }
     const current = loadJupiterConfig();
     if (!triggerAutoTrade && !forceOpen && !forceClose) {
+      if (current.error && current.error.includes("Circuit breaker")) {
+        current.consecutiveLosses = 0;
+      }
       delete current.error;
     }
     if (disconnect) {
@@ -3827,6 +3831,16 @@ app.post("/api/jupiter-config", async (req, res) => {
       current.activeTrade = null;
       current.tradesHistory = [];
       current.lastTradeAddedAt = "";
+      current.consecutiveLosses = 0;
+      if (current.error && current.error.includes("Circuit breaker")) {
+        delete current.error;
+      }
+    }
+    if (resetConsecutiveLosses) {
+      current.consecutiveLosses = 0;
+      if (current.error && current.error.includes("Circuit breaker")) {
+        delete current.error;
+      }
     }
     restartJupiterDaemon(current.frequencyMinutes || 5);
     if (forceClose && current.activeTrade) {

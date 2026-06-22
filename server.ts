@@ -5378,6 +5378,7 @@ app.post("/api/jupiter-config", async (req, res) => {
       weights, 
       interval,
       resetStats,
+      resetConsecutiveLosses,
       forceClose,
       forceOpen, // side: "LONG" | "SHORT"
       disconnect,
@@ -5423,6 +5424,9 @@ app.post("/api/jupiter-config", async (req, res) => {
 
     // Clear stale errors when updating any standard settings or inputs to unblock the dashboard immediately!
     if (!triggerAutoTrade && !forceOpen && !forceClose) {
+      if (current.error && current.error.includes("Circuit breaker")) {
+        (current as any).consecutiveLosses = 0;
+      }
       delete current.error;
     }
 
@@ -5527,6 +5531,17 @@ app.post("/api/jupiter-config", async (req, res) => {
       current.activeTrade = null;
       current.tradesHistory = [];
       current.lastTradeAddedAt = "";
+      (current as any).consecutiveLosses = 0;
+      if (current.error && current.error.includes("Circuit breaker")) {
+        delete current.error;
+      }
+    }
+
+    if (resetConsecutiveLosses) {
+      (current as any).consecutiveLosses = 0;
+      if (current.error && current.error.includes("Circuit breaker")) {
+        delete current.error;
+      }
     }
     
     restartJupiterDaemon(current.frequencyMinutes || 5);
