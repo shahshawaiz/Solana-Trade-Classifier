@@ -99,6 +99,108 @@ export function calculateATR(quotes: any[], period: number = 14): number {
   return atr;
 }
 
+// Average Directional Index (Wilder). Measures trend STRENGTH only (not direction):
+// ADX < 20 = ranging / no-trend (trend + momentum indicators misfire here), > 25 = trending.
+// Used as a hard no-trade gate — the single biggest filter against chop-zone losses.
+export function calculateADX(quotes: any[], period: number = 14): number {
+  if (!Array.isArray(quotes) || quotes.length < period * 2 + 1) return 0;
+  const plusDM: number[] = [], minusDM: number[] = [], tr: number[] = [];
+  for (let i = 1; i < quotes.length; i++) {
+    const h = quotes[i].high ?? quotes[i].close;
+    const l = quotes[i].low ?? quotes[i].close;
+    const ph = quotes[i - 1].high ?? quotes[i - 1].close;
+    const pl = quotes[i - 1].low ?? quotes[i - 1].close;
+    const pc = quotes[i - 1].close;
+    const up = h - ph, dn = pl - l;
+    plusDM.push(up > dn && up > 0 ? up : 0);
+    minusDM.push(dn > up && dn > 0 ? dn : 0);
+    tr.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  if (tr.length < period) return 0;
+  // Wilder running sum (seed = SMA over first `period`).
+  const smooth = (arr: number[]) => {
+    let s = arr.slice(0, period).reduce((a, b) => a + b, 0);
+    const out: number[] = [s];
+    for (let i = period; i < arr.length; i++) { s = s - s / period + arr[i]; out.push(s); }
+    return out;
+  };
+  const trS = smooth(tr), pdmS = smooth(plusDM), mdmS = smooth(minusDM);
+  const dx: number[] = [];
+  for (let i = 0; i < trS.length; i++) {
+    const pdi = trS[i] ? 100 * pdmS[i] / trS[i] : 0;
+    const mdi = trS[i] ? 100 * mdmS[i] / trS[i] : 0;
+    const sum = pdi + mdi;
+    dx.push(sum ? 100 * Math.abs(pdi - mdi) / sum : 0);
+  }
+  if (dx.length < period) return dx.length ? dx[dx.length - 1] : 0;
+  let adx = dx.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < dx.length; i++) adx = (adx * (period - 1) + dx[i]) / period;
+  return adx;
+}
+
+// Check if RSI (period 21) crossed back above 35 (LONG bounce) or below 65 (SHORT rejection)
+export function checkRsiTimingGate(rsis: number[], side: "LONG" | "SHORT"): boolean {
+  if (rsis.length < 3) return false;
+  const currentRsi = rsis[rsis.length - 1];
+  const prevRsi = rsis[rsis.length - 2];
+  const prev2Rsi = rsis[rsis.length - 3];
+  
+  if (side === "LONG") {
+    const crossedNow = currentRsi >= 35 && prevRsi < 35;
+    const crossedPrev = prevRsi >= 35 && prev2Rsi < 35;
+    return crossedNow || crossedPrev;
+  } else if (side === "SHORT") {
+    const crossedNow = currentRsi <= 65 && prevRsi > 65;
+    const crossedPrev = prevRsi <= 65 && prev2Rsi > 65;
+    return crossedNow || crossedPrev;
+  }
+  return false;
+}
+
+// Check if MACD histogram is > 0 and rising for 2 candles (LONG) or < 0 and falling for 2 candles (SHORT)
+export function checkMacdGate(closes: number[], side: "LONG" | "SHORT"): boolean {
+  if (closes.length < 35) return false;
+  const fastEma = calculateEMA(closes, 12);
+  const slowEma = calculateEMA(closes, 26);
+  const macdLine = fastEma.map((f, i) => f - slowEma[i]);
+  const signalLine = calculateEMA(macdLine, 9);
+  
+  const h = macdLine.map((m, i) => m - signalLine[i]);
+  const n = h.length;
+  if (n < 3) return false;
+  
+  const histCurr = h[n - 1];
+  const histPrev1 = h[n - 2];
+  const histPrev2 = h[n - 3];
+  
+  if (side === "LONG") {
+    return histCurr > 0 && histCurr > histPrev1 && histPrev1 > histPrev2;
+  } else if (side === "SHORT") {
+    return histCurr < 0 && histCurr < histPrev1 && histPrev1 < histPrev2;
+  }
+  return false;
+}
+
+// Helper to resample 5m quotes into 15m candles
+export function resampleTo15mQuotes(quotes5m: any[]): any[] {
+  const quotes15m: any[] = [];
+  for (let idx = 0; idx < quotes5m.length; idx += 3) {
+    const chunk = quotes5m.slice(idx, idx + 3);
+    if (chunk.length === 0) continue;
+    const closes = chunk.map(q => q.close);
+    const highs = chunk.map(q => q.high ?? q.close);
+    const lows = chunk.map(q => q.low ?? q.close);
+    quotes15m.push({
+      date: chunk[chunk.length - 1].date,
+      close: closes[closes.length - 1],
+      high: Math.max(...highs),
+      low: Math.min(...lows),
+      volume: chunk.reduce((sum, q) => sum + (q.volume ?? 0), 0)
+    });
+  }
+  return quotes15m;
+}
+
 // Standard initialization for yahoo-finance2 v3.
 const imported = yahooFinanceModule as any;
 const YfClass = imported.default?.default || imported.default || imported;
@@ -1258,7 +1360,9 @@ export function calculateElliotWave(closes: number[]): { score: number; phase: s
 type Bar = { high?: number; low?: number; close: number; volume?: number };
 
 // Supertrend: ATR-band trend follower. Returns +1 (uptrend) / -1 (downtrend) / 0 (n/a).
-function supertrendScore(bars: Bar[], period = 10, mult = 3): number {
+// Period 20 / mult 4 (was 10 / 3): on fast candles a 10-bar band flips on every wick;
+// the wider 4x band only flips on genuine reversals, not noise spikes.
+function supertrendScore(bars: Bar[], period = 20, mult = 4): number {
   if (bars.length < period + 2) return 0;
   const atr = calculateATR(bars as any[], period);
   if (!isFinite(atr) || atr <= 0) return 0;
@@ -1324,7 +1428,7 @@ export function performCoreAnalysis(closes: number[], headlines: string[] = [], 
   const elliotWaveScore = waveInfo.score;
 
   // 2. RSI
-  const rsisList = calculateRSI(closes, 14);
+  const rsisList = calculateRSI(closes, 21);
   const currentRsi = rsisList.length > 0 ? rsisList[rsisList.length - 1] : 50;
   let rsiScore = 0;
   if (currentRsi < 30) rsiScore = 1.0;
@@ -1585,7 +1689,7 @@ export async function getPredictionData(token: string, topic: string, weights: a
   const closes = quotes.map((q: any) => q.close);
   const emaFastList = calculateEMA(closes, 12);
   const emaSlowList = calculateEMA(closes, 26);
-  const rsisList = calculateRSI(closes, 14);
+  const rsisList = calculateRSI(closes, 21);
   
   const currentRsi = rsisList[rsisList.length - 1];
   const currentEmaFast = emaFastList[emaFastList.length - 1];
@@ -1675,7 +1779,8 @@ export async function getPredictionData(token: string, topic: string, weights: a
   // the Cortex Alpha spec. No separate Elliott-Wave veto and no 200-EMA suppression gate:
   // those were undocumented filters that blocked spec-valid signals and broke the catalyst overrule.
   function evaluateSignal(priceCloses: number[], rsiVal: number, hls: string[], llmVal?: number) {
-      const sData = performCoreAnalysis(priceCloses, hls, weights, llmVal, quotes.slice(0, priceCloses.length));
+      const localQuotes = quotes.slice(0, priceCloses.length);
+      const sData = performCoreAnalysis(priceCloses, hls, weights, llmVal, localQuotes);
 
       let pSide = "HOLD";
       let aRec = sData.isChop ? "Hold Chop Zone" : "Hold";
@@ -1694,6 +1799,59 @@ export async function getPredictionData(token: string, topic: string, weights: a
           trnd = "CHOP/HOLD";
           aRec = sData.isChop ? "Hold Chop Zone" : "Hold (Σ below threshold)";
       }
+
+      // Apply Technical and Momentum Gates to Entries
+      if (pSide === "LONG" || pSide === "SHORT") {
+          // 1. ADX(14) > 20 gate
+          const adxVal = calculateADX(localQuotes, 14);
+          if (adxVal <= 20) {
+              pSide = "HOLD";
+              aRec = `Hold (ADX is ranging: ${adxVal.toFixed(1)} <= 20)`;
+              trnd = "CHOP/HOLD";
+          }
+          
+          // 2. 15m Supertrend Direction Gate
+          if (pSide !== "HOLD") {
+              let st15 = 0;
+              if (validInterval === "5m") {
+                  const resampled = resampleTo15mQuotes(localQuotes);
+                  st15 = supertrendScore(resampled, 20, 4);
+              } else if (validInterval === "15m") {
+                  st15 = supertrendScore(localQuotes, 20, 4);
+              }
+              if (st15 === -1 && pSide === "LONG") {
+                  pSide = "HOLD";
+                  aRec = "Hold (15m Supertrend is Bearish)";
+                  trnd = "CHOP/HOLD";
+              } else if (st15 === 1 && pSide === "SHORT") {
+                  pSide = "HOLD";
+                  aRec = "Hold (15m Supertrend is Bullish)";
+                  trnd = "CHOP/HOLD";
+              }
+          }
+
+          // 3. MACD histogram direction filter
+          if (pSide !== "HOLD") {
+              const macdOk = checkMacdGate(priceCloses, pSide as any);
+              if (!macdOk) {
+                  pSide = "HOLD";
+                  aRec = pSide === "LONG" ? "Hold (MACD Histogram not positive/rising)" : "Hold (MACD Histogram not negative/falling)";
+                  trnd = "CHOP/HOLD";
+              }
+          }
+
+          // 4. RSI(21) timing tool confirmation
+          if (pSide !== "HOLD") {
+              const localRsis = calculateRSI(priceCloses, 21);
+              const rsiOk = checkRsiTimingGate(localRsis, pSide as any);
+              if (!rsiOk) {
+                  pSide = "HOLD";
+                  aRec = pSide === "LONG" ? "Hold (Waiting for RSI to cross above 35)" : "Hold (Waiting for RSI to cross below 65)";
+                  trnd = "CHOP/HOLD";
+              }
+          }
+      }
+
       return { pSide, aRec, trnd, overrule: sData.overrule };
   }
 
@@ -1959,9 +2117,9 @@ export function loadTelegramConfig(): TelegramConfig {
       // Ensure default values for trade tracking are present
       if (parsed.lastTradePnL === undefined) parsed.lastTradePnL = 0;
        if (parsed.cumulativePnL === undefined) parsed.cumulativePnL = 0;
-      if (parsed.takeProfitPct === undefined) parsed.takeProfitPct = 4;
-      if (parsed.stopLossPct === undefined) parsed.stopLossPct = 2;
-      if (parsed.leverage === undefined) parsed.leverage = 5;
+      if (parsed.takeProfitPct === undefined) parsed.takeProfitPct = 3.25;
+      if (parsed.stopLossPct === undefined) parsed.stopLossPct = 1.625;
+      if (parsed.leverage === undefined) parsed.leverage = 3;
       if (parsed.interval === undefined || parsed.interval === "5m") parsed.interval = "15m";
       if (parsed.frequency === undefined) parsed.frequency = 5;
       if (parsed.activeTrade === undefined) parsed.activeTrade = null;
@@ -2005,9 +2163,9 @@ export function loadTelegramConfig(): TelegramConfig {
     lastTradeAddedAt: "",
     lastTradePnL: 0,
     cumulativePnL: 0,
-    takeProfitPct: 4,
-    stopLossPct: 2,
-    leverage: 5,
+    takeProfitPct: 3.25,
+    stopLossPct: 1.625,
+    leverage: 3,
     interval: "1h",
     activeTrade: null,
     tradesHistory: [],
@@ -2119,9 +2277,9 @@ function loadJupiterConfig(): JupiterConfig {
       if (parsed.rpcUrl === undefined) parsed.rpcUrl = "";
       if (parsed.lastTradePnL === undefined) parsed.lastTradePnL = 0;
       if (parsed.cumulativePnL === undefined) parsed.cumulativePnL = 0;
-      if (parsed.takeProfitPct === undefined) parsed.takeProfitPct = 4;
-      if (parsed.stopLossPct === undefined) parsed.stopLossPct = 2;
-      if (parsed.leverage === undefined) parsed.leverage = 5;
+      if (parsed.takeProfitPct === undefined) parsed.takeProfitPct = 3.25;
+      if (parsed.stopLossPct === undefined) parsed.stopLossPct = 1.625;
+      if (parsed.leverage === undefined) parsed.leverage = 3;
       if (parsed.allocationPercent === undefined) parsed.allocationPercent = 5;
       if (parsed.interval === undefined || parsed.interval === "5m") parsed.interval = "15m";
       if (parsed.activeTrade === undefined) parsed.activeTrade = null;
@@ -2191,11 +2349,11 @@ function loadJupiterConfig(): JupiterConfig {
     privateKeyIsAutoGenerated: true,
     enabled: true,
     tradingMode: "REAL",
-    leverage: 5,
+    leverage: 3,
     allocationPercent: 5,
     positionSizeUsd: 0,
-    takeProfitPct: 4,
-    stopLossPct: 2,
+    takeProfitPct: 3.25,
+    stopLossPct: 1.625,
     frequencyMinutes: 5,
     cooldownMinutes: 30,
     lastTradeAddedAt: "",
@@ -2625,7 +2783,7 @@ export async function checkPredictionAndAlert(forceAlert = false) {
       
       const entryPrice = activeTrade.entryPrice;
       const exitPrice = pred.price;
-      const leverage = (activeTrade as any).leverage || config.leverage || 5;
+      const leverage = (activeTrade as any).leverage || config.leverage || 3;
 
       let pnlPercent = 0;
       if (activeTrade.side === "LONG") {
@@ -2635,8 +2793,8 @@ export async function checkPredictionAndAlert(forceAlert = false) {
       }
 
       // Check TP/SL based strictly on the liquidity pools calculated at entry
-      const currentTpPct = activeTrade.takeProfitPct || 4;
-      const currentSlPct = activeTrade.stopLossPct || 2;
+      const currentTpPct = activeTrade.takeProfitPct || 3.25;
+      const currentSlPct = activeTrade.stopLossPct || 1.625;
       const tpPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 + (currentTpPct / 100) / leverage) : entryPrice * (1 - (currentTpPct / 100) / leverage);
       const slPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 - (currentSlPct / 100) / leverage) : entryPrice * (1 + (currentSlPct / 100) / leverage);
 
@@ -2679,8 +2837,8 @@ export async function checkPredictionAndAlert(forceAlert = false) {
         const exitTimeStr = new Date().toISOString();
         const durationText = calculateDurationStr(activeTrade.entryTime, exitTimeStr);
 
-        const tpPct = activeTrade.takeProfitPct ?? (config.takeProfitPct || 4);
-        const slPct = activeTrade.stopLossPct ?? (config.stopLossPct || 2);
+        const tpPct = activeTrade.takeProfitPct ?? (config.takeProfitPct || 3.25);
+        const slPct = activeTrade.stopLossPct ?? (config.stopLossPct || 1.625);
 
         const closedTradeLog = {
           id: closedId,
@@ -2700,7 +2858,7 @@ export async function checkPredictionAndAlert(forceAlert = false) {
         if (tradesHistory.length > 25) tradesHistory.shift();
         appendJournalEntry("Alert Daemon", closedTradeLog); // permanent, never reset
 
-        const levClosed = config.leverage || 5;
+        const levClosed = config.leverage || 3;
         const tpPriceClosed = activeTrade.side === "LONG" ? entryPrice * (1 + (closedTradeLog.takeProfitPct / 100) / levClosed) : entryPrice * (1 - (closedTradeLog.takeProfitPct / 100) / levClosed);
         const slPriceClosed = activeTrade.side === "LONG" ? entryPrice * (1 - (closedTradeLog.stopLossPct / 100) / levClosed) : entryPrice * (1 + (closedTradeLog.stopLossPct / 100) / levClosed);
 
@@ -2736,43 +2894,83 @@ export async function checkPredictionAndAlert(forceAlert = false) {
           config.error = `Macro filter: ${enterSide} entry suppressed — macro regime is ${macroRegimeT}.`;
           console.log(`[Telegram Daemon] ${config.error}`);
         } else if (enterSide !== config.lastSentDirection) {
-        const lev = config.leverage || 5;
-        let tpPct = 4.0;
-        let slPct = 2.0;
-        if (pred.suggestedTpPrice) {
-          tpPct = (Math.abs(pred.suggestedTpPrice - pred.price) / pred.price) * 100 * lev;
+          // Check consecutive loss cooldown (45 minutes after 2 losses)
+          let onLossCooldown = false;
+          if (tradesHistory.length >= 2) {
+            const last1 = tradesHistory[tradesHistory.length - 1];
+            const last2 = tradesHistory[tradesHistory.length - 2];
+            if (last1.pnl < 0 && last2.pnl < 0) {
+              const lastExitTime = new Date(last1.exitTime).getTime();
+              const diffMs = Date.now() - lastExitTime;
+              const cooldownMs = 45 * 60000;
+              if (diffMs < cooldownMs) {
+                onLossCooldown = true;
+                const remainingMin = Math.ceil((cooldownMs - diffMs) / 60000);
+                config.error = `Loss cooldown: Entry suppressed on consecutive losses. Paused for another ${remainingMin} mins.`;
+                console.log(`[Telegram Daemon] ${config.error}`);
+                addAuditLog(config, `Entry suppressed on consecutive losses. Cooldown active for ${remainingMin}m.`, "cooldown");
+              }
+            }
+          }
+
+          // Check daily trade cap (4 trades max in last 24h)
+          let dailyCapReached = false;
+          if (!onLossCooldown) {
+            const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+            let tradesInLast24h = 0;
+            tradesHistory.forEach((t: any) => {
+              if (new Date(t.entryTime).getTime() >= oneDayAgo) {
+                tradesInLast24h++;
+              }
+            });
+            if (tradesInLast24h >= 4) {
+              dailyCapReached = true;
+              config.error = `Daily cap: Entry suppressed. Already executed ${tradesInLast24h} trades in the last 24 hours (Cap: 4).`;
+              console.log(`[Telegram Daemon] ${config.error}`);
+              addAuditLog(config, `Entry suppressed: Daily cap of 4 trades reached.`, "hold");
+            }
+          }
+
+          if (onLossCooldown || dailyCapReached) {
+            // Entry is suppressed, do not enter position
+          } else {
+            const lev = config.leverage || 3;
+            let tpPct = 3.25;
+            let slPct = 1.625;
+            if (pred.suggestedTpPrice) {
+              tpPct = (Math.abs(pred.suggestedTpPrice - pred.price) / pred.price) * 100 * lev;
+            }
+            if (pred.suggestedSlPrice) {
+              slPct = (Math.abs(pred.suggestedSlPrice - pred.price) / pred.price) * 100 * lev;
+            }
+
+            activeTrade = {
+              side: enterSide,
+              entryPrice: pred.price,
+              entryTime: new Date().toISOString(),
+              takeProfitPct: tpPct,
+              stopLossPct: slPct,
+              sentiment: pred.sentiment,
+              technicalScore: pred.strategyDetails?.technicalScore,
+              news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
+            };
+            config.lastTradeAddedAt = new Date().toISOString();
+
+            const tpPrice = enterSide === "LONG" ? pred.price * (1 + (tpPct / 100) / lev) : pred.price * (1 - (tpPct / 100) / lev);
+            const slPrice = enterSide === "LONG" ? pred.price * (1 - (slPct / 100) / lev) : pred.price * (1 + (slPct / 100) / lev);
+
+            tradeOpenedMsg = `🚀 *Cortex Alpha - New Position Entered* 🚀\n` +
+              `• *Direction*: ${enterSide === "LONG" ? "🟢 LONG" : "🔴 SHORT"}\n` +
+              `• *Entry Price*: $${pred.price.toFixed(2)}\n` +
+              `• *Take Profit Limit*: +${tpPct.toFixed(1)}% ($${tpPrice.toFixed(2)})\n` +
+              `• *Stop Loss Limit*: -${slPct.toFixed(1)}% ($${slPrice.toFixed(2)})\n` +
+              `• *Target Catalyst*: "${config.topic}"\n\n`;
+
+            addAuditLog(config, `Opened new ${enterSide} position at entering price $${pred.price.toFixed(2)} (Limits: TP: +${tpPct}%, SL: -${slPct})`, "trade");
+          }
         }
-        if (pred.suggestedSlPrice) {
-          slPct = (Math.abs(pred.suggestedSlPrice - pred.price) / pred.price) * 100 * lev;
-        }
-
-        activeTrade = {
-          side: enterSide,
-          entryPrice: pred.price,
-          entryTime: new Date().toISOString(),
-          takeProfitPct: tpPct,
-          stopLossPct: slPct,
-          sentiment: pred.sentiment,
-          technicalScore: pred.strategyDetails?.technicalScore,
-          news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
-        };
-
-        config.lastTradeAddedAt = new Date().toISOString();
-
-        const tpPrice = enterSide === "LONG" ? pred.price * (1 + (tpPct / 100) / lev) : pred.price * (1 - (tpPct / 100) / lev);
-        const slPrice = enterSide === "LONG" ? pred.price * (1 - (slPct / 100) / lev) : pred.price * (1 + (slPct / 100) / lev);
-
-        tradeOpenedMsg = `🚀 *Cortex Alpha - New Position Entered* 🚀\n` +
-          `• *Direction*: ${enterSide === "LONG" ? "🟢 LONG" : "🔴 SHORT"}\n` +
-          `• *Entry Price*: $${pred.price.toFixed(2)}\n` +
-          `• *Take Profit Limit*: +${tpPct.toFixed(1)}% ($${tpPrice.toFixed(2)})\n` +
-          `• *Stop Loss Limit*: -${slPct.toFixed(1)}% ($${slPrice.toFixed(2)})\n` +
-          `• *Target Catalyst*: "${config.topic}"\n\n`;
-
-        addAuditLog(config, `Opened new ${enterSide} position at entering price $${pred.price.toFixed(2)} (Limits: TP: +${tpPct}%, SL: -${slPct})`, "trade");
       }
     }
-  }
 
   config.activeTrade = activeTrade;
     config.lastTradePnL = lastTradePnL;
@@ -4017,7 +4215,7 @@ app.post("/api/strategy/signal", handleGetStrategyOutput);
 
 app.post("/api/backtest", async (req, res) => {
   try {
-    const { token = "SOL", interval = "1h", lookbackDays = 7, weights, initialCapital = 10000, startDate, endDate, leverage = 5, takeProfitPct = 4.0, stopLossPct = 2.0, signalThreshold = 0.25, useRegimeFilter = true, useMacroFilter = true } = req.body;
+    const { token = "SOL", interval = "1h", lookbackDays = 7, weights, initialCapital = 10000, startDate, endDate, leverage = 3, takeProfitPct = 3.25, stopLossPct = 1.625, signalThreshold = 0.25, useRegimeFilter = true, useMacroFilter = true } = req.body;
     const sigThreshold = Math.max(0, Number(signalThreshold) || 0.08);
     const symbol = `${token.toUpperCase()}-USD`;
     
@@ -4056,7 +4254,7 @@ app.post("/api/backtest", async (req, res) => {
     const dates = quotes.map((q: any) => q.date);
     const emaFast = calculateEMA(closes, 12);
     const emaSlow = calculateEMA(closes, 26);
-    const rsis = calculateRSI(closes, 14);
+    const rsis = calculateRSI(closes, 21);
 
     // Macro regime overlay for the backtest window (one label per bar). When enabled,
     // counter-macro entries are suppressed below, mirroring the live trading filter.
@@ -4163,6 +4361,59 @@ app.post("/api/backtest", async (req, res) => {
           trnd = "CHOP/HOLD";
           aRec = sData.isChop ? "Hold Chop Zone" : "Hold (Σ below threshold)";
         }
+
+        // Apply Technical and Momentum Gates to Entries in Backtesting
+        if (pSide === "LONG" || pSide === "SHORT") {
+          const tickQuotes = quotes.slice(0, tickIdx + 1);
+          // 1. ADX(14) > 20 gate
+          const adxVal = calculateADX(tickQuotes, 14);
+          if (adxVal <= 20) {
+            pSide = "HOLD";
+            aRec = `Hold (ADX is ranging: ${adxVal.toFixed(1)} <= 20)`;
+            trnd = "CHOP/HOLD";
+          }
+          
+          // 2. 15m Supertrend Direction Gate
+          if (pSide !== "HOLD") {
+            let st15 = 0;
+            if (interval === "5m") {
+              const resampled = resampleTo15mQuotes(tickQuotes);
+              st15 = supertrendScore(resampled, 20, 4);
+            } else if (interval === "15m") {
+              st15 = supertrendScore(tickQuotes, 20, 4);
+            }
+            if (st15 === -1 && pSide === "LONG") {
+              pSide = "HOLD";
+              aRec = "Hold (15m Supertrend is Bearish)";
+              trnd = "CHOP/HOLD";
+            } else if (st15 === 1 && pSide === "SHORT") {
+              pSide = "HOLD";
+              aRec = "Hold (15m Supertrend is Bullish)";
+              trnd = "CHOP/HOLD";
+            }
+          }
+
+          // 3. MACD histogram direction filter
+          if (pSide !== "HOLD") {
+            const macdOk = checkMacdGate(tickCloses, pSide as any);
+            if (!macdOk) {
+              pSide = "HOLD";
+              aRec = pSide === "LONG" ? "Hold (MACD Histogram not positive/rising)" : "Hold (MACD Histogram not negative/falling)";
+              trnd = "CHOP/HOLD";
+            }
+          }
+
+          // 4. RSI(21) timing tool confirmation
+          if (pSide !== "HOLD") {
+            const tickRsis = calculateRSI(tickCloses, 21);
+            const rsiOk = checkRsiTimingGate(tickRsis, pSide as any);
+            if (!rsiOk) {
+              pSide = "HOLD";
+              aRec = pSide === "LONG" ? "Hold (Waiting for RSI to cross above 35)" : "Hold (Waiting for RSI to cross below 65)";
+              trnd = "CHOP/HOLD";
+            }
+          }
+        }
         
         return { 
           positionSide: pSide, 
@@ -4238,8 +4489,46 @@ app.post("/api/backtest", async (req, res) => {
           }
         }
         
+        // Check consecutive loss cooldown in backtesting (45 minutes pause after 2 losses)
+        let onLossCooldown = false;
+        const closedTrades = trades.filter(t => t.type === "CLOSE_LONG" || t.type === "CLOSE_SHORT");
+        if (closedTrades.length >= 2) {
+          const last1 = closedTrades[closedTrades.length - 1];
+          const last2 = closedTrades[closedTrades.length - 2];
+          if (last1.pnl < 0 && last2.pnl < 0) {
+            const lastExitTime = new Date(last1.date).getTime();
+            const currentBarTime = new Date(dateStr).getTime();
+            const diffMin = (currentBarTime - lastExitTime) / 60000;
+            if (diffMin < 45) {
+              onLossCooldown = true;
+            }
+          }
+        }
+
+        // Check daily trade cap (4 trades max in last 24h) in backtesting
+        let dailyCapReached = false;
+        if (!onLossCooldown) {
+          const currentBarTime = new Date(dateStr).getTime();
+          const oneDayAgoBt = currentBarTime - 24 * 60 * 60 * 1000;
+          let uniqueOpensIn24h = 0;
+          const seenOpenDates = new Set<string>();
+          trades.forEach(t => {
+            const oDate = t.openDate || (t.type.startsWith("OPEN") ? t.date : null);
+            if (oDate) {
+              const openTime = new Date(oDate).getTime();
+              if (openTime >= oneDayAgoBt && !seenOpenDates.has(oDate)) {
+                seenOpenDates.add(oDate);
+                uniqueOpensIn24h++;
+              }
+            }
+          });
+          if (uniqueOpensIn24h >= 4) {
+            dailyCapReached = true;
+          }
+        }
+
         const macroOkBt = !macroRegimeArr || macroAllowsEntry(positionSide, macroRegimeArr[i]);
-        if (positionSide !== "HOLD" && positionSide !== lastSentDirection && isTrendConfirmed3x && currentSig.trnd !== "SIDEWAYS" && macroOkBt) {
+        if (positionSide !== "HOLD" && positionSide !== lastSentDirection && isTrendConfirmed3x && currentSig.trnd !== "SIDEWAYS" && macroOkBt && !onLossCooldown && !dailyCapReached) {
           // Calculate dynamic TP/SL
           const recentHighs = closes.slice(Math.max(0, i - 20), i).map((c: number) => c);
           const recentLows = closes.slice(Math.max(0, i - 20), i).map((c: number) => c);

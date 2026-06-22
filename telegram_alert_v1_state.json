@@ -17,63 +17,17 @@
   "lastSentDirection": "HOLD",
   "frequency": 5,
   "cooldownMinutes": 30,
-  "lastTradeAddedAt": "2026-06-22T20:13:06.584Z",
-  "lastTradePnL": -0.4128650947552693,
-  "cumulativePnL": -0.4128650947552693,
-  "takeProfitPct": 4,
-  "stopLossPct": 2,
-  "leverage": 5,
+  "lastTradeAddedAt": "",
+  "lastTradePnL": 0,
+  "cumulativePnL": 0,
+  "takeProfitPct": 3.25,
+  "stopLossPct": 1.625,
+  "leverage": 3,
   "interval": "1h",
   "useMacroFilter": true,
-  "activeTrade": {
-    "side": "SHORT",
-    "entryPrice": 72.72000122070312,
-    "entryTime": "2026-06-22T20:13:06.584Z",
-    "takeProfitPct": 6.35072958546628,
-    "stopLossPct": 3.1753647927330917,
-    "sentiment": -0.3333333333333333,
-    "technicalScore": 1,
-    "news": [
-      "Why the banking industry is fighting a crypto bill - Cryptonews.net",
-      "Bitwise brings crypto model portfolios to retail apps as issuers seek demand beyond ticker picking - Cryptonews.net"
-    ]
-  },
-  "tradesHistory": [
-    {
-      "id": "uruwmpp",
-      "side": "SHORT",
-      "entryPrice": 72.66000366210938,
-      "exitPrice": 72.72000122070312,
-      "pnl": -0.4128650947552693,
-      "entryTime": "2026-06-21T21:10:33.778Z",
-      "exitTime": "2026-06-22T20:13:06.583Z",
-      "takeProfitPct": 6.596664311448585,
-      "stopLossPct": 3.2983321557242924,
-      "sentiment": 0,
-      "technicalScore": -0.5,
-      "news": []
-    }
-  ],
-  "auditLogs": [
-    {
-      "id": "k060jc4",
-      "timestamp": "2026-06-21T21:10:33.778Z",
-      "message": "Opened new SHORT position at entering price $72.66 (Limits: TP: +6.596664311448585%, SL: -3.2983321557242924)",
-      "type": "trade"
-    },
-    {
-      "id": "1bwp5nq",
-      "timestamp": "2026-06-22T20:13:06.584Z",
-      "message": "Position settled (PnL Threshold Time Limit Exceeded (Duration: 1383 mins, PnL: -0.41% < +0.5%)): SHORT at exit price $72.72 with PnL -0.41% (TP: +6.596664311448585%, SL: -3.2983321557242924%, duration: 23h 2m)",
-      "type": "trade"
-    },
-    {
-      "id": "wowpyug",
-      "timestamp": "2026-06-22T20:13:06.584Z",
-      "message": "Opened new SHORT position at entering price $72.72 (Limits: TP: +6.35072958546628%, SL: -3.1753647927330917)",
-      "type": "trade"
-    }
-  ],
+  "activeTrade": null,
+  "tradesHistory": [],
+  "auditLogs": [],
   "newsTelegramChannel": "https://t.me/+1C0c6rUVmjo3Y2Y8",
   "lastCheckedAt": "2026-06-22T20:38:15.407Z",
   "error": "Telegram response error: {\"ok\":false,\"error_code\":404,\"description\":\"Not Found\"}"

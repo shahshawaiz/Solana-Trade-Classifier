@@ -1234,10 +1234,10 @@ export default function App() {
       walletAddress: "",
       enabled: false,
       tradingMode: "REAL",
-      leverage: 5,
+      leverage: 3,
       allocationPercent: 5,
-      takeProfitPct: 4,
-      stopLossPct: 2,
+      takeProfitPct: 3.25,
+      stopLossPct: 1.625,
       frequencyMinutes: 5,
       cooldownMinutes: 30,
       interval: "15m",
@@ -1454,9 +1454,9 @@ export default function App() {
           topic: topic,         // ALWAYS use active main screen's topic
           frequency: telegramConfig.frequency || 5,
           cooldownMinutes: telegramConfig.cooldownMinutes !== undefined ? telegramConfig.cooldownMinutes : 30,
-          takeProfitPct: telegramConfig.takeProfitPct !== undefined ? telegramConfig.takeProfitPct : 4,
-          stopLossPct: telegramConfig.stopLossPct !== undefined ? telegramConfig.stopLossPct : 2,
-          leverage: telegramConfig.leverage !== undefined ? telegramConfig.leverage : 5,
+          takeProfitPct: telegramConfig.takeProfitPct !== undefined ? telegramConfig.takeProfitPct : 3.25,
+          stopLossPct: telegramConfig.stopLossPct !== undefined ? telegramConfig.stopLossPct : 1.625,
+          leverage: telegramConfig.leverage !== undefined ? telegramConfig.leverage : 3,
           interval: interval,
           weights: weights,     // ALWAYS use active main screen's weights
           testAlert: isTest,
@@ -6259,22 +6259,22 @@ export default function App() {
                         <strong className="text-text-heading">1. Elliott Wave Score (EWO)</strong>: Computes the oscillator mathematically as `SMA(5) - SMA(34)` over the most recent 34 periods. The system normalizes the current EWO value into strict `[-1.0, 1.0]` bounds scale and cross-references this with Price highs to detect specific structural phases like <i>Wave 3 Impulses</i> or <i>Wave 5 Bearish Divergences</i>.
                       </li>
                       <li>
-                        <strong className="text-text-heading">2. RSI Score (Reversals)</strong>: Computes standard 14-period RSI. It outputs a scaled signal bound `[-1.0, 1.0]`. If <strong>RSI &lt; 30</strong> (Oversold), score is `+1.0`. If <strong>RSI &gt; 70</strong> (Overbought), score is `-1.0`. It utilizes `±0.5` intermediate tiers for RSI values crossing the 45/55 momentum thresholds.
+                        <strong className="text-text-heading">2. RSI Timing Tool (Period 21)</strong>: Computes standard 21-period RSI to reduce lower timeframe noise. Serves as a final entry timing filter: only enter a Long when RSI crosses back above 35 (oversold bounce) and a Short when RSI crosses back below 65 (overbought rejection).
                       </li>
                       <li>
-                        <strong className="text-text-heading">3. MACD Score (Trend)</strong>: Evaluates MACD (12, 26, 9) histogram direction. A recent bullish crossover crossing the zero line outputs `+1.0`, while a maintained positive momentum outputs `+0.5`. Bearish crosses output `-1.0`, and maintained negative trends output `-0.5`.
+                        <strong className="text-text-heading">3. MACD Histogram Filter (Direction)</strong>: Operates as a direction filter rather than a crossover trigger to prevent entering at exhaustion points. Longs are only allowed if MACD histogram is positive and has been rising for 2 consecutive candles; Shorts only if negative and falling for 2 consecutive candles.
                       </li>
                       <li>
                         <strong className="text-text-heading">4. Semantic Catalyst Score (News)</strong>: Evaluates recent market headlines using localized CPU NLP heuristics and Gemini LLM verification. Extreme political or catalyst sentiment (<code>&gt;= 0.85</code> or <code>&lt;= -0.85</code>) triggers an authoritative system overrule, forcing the Composite Bias Score to fully mirror the catalyst direction and bypass downstream verification rules.
                       </li>
                       <li>
-                        <strong className="text-text-heading">5. Supertrend ATR Score</strong>: Integrates ATR-band trend-following. Returns `+1.0` (bullish trend confirmation) when price is above the upper band, and `-1.0` (bearish trend confirmation) when below it.
+                        <strong className="text-text-heading">5. Supertrend ATR (Period 20, Mult 4.0)</strong>: Integrates ATR-band trend-following. Period is increased to 20 and multiplier to 4.0 to filter noise spikes. A 15m Supertrend filter is also fetched: entries must align with the 15m Supertrend direction.
                       </li>
                       <li>
-                        <strong className="text-text-heading">6. Fair Value Gap Score</strong>: Detects 3-candle imbalance ranges. Bullish unfilled gaps below price provide support (positive scaling), while bearish unfilled gaps above price act as resistance (negative scaling).
+                        <strong className="text-text-heading">6. ADX(14) Trend Gate</strong>: A hard no-trade gate. Entries are completely suppressed unless ADX(14) &gt; 20, indicating the presence of a strong trending market and preventing range-bound whipsaws.
                       </li>
                       <li>
-                        <strong className="text-text-heading">7. DCA Mean-Reversion Score</strong>: Computes the rolling z-score of the current price against its 50-period average. Lower relative z-scores reflect positive values to recommend Dollar-Cost Averaging accumulation, while high z-scores trigger negative biases.
+                        <strong className="text-text-heading">7. Risk, Cooldown, & Leverage</strong>: Leveraged take-profit is capped at 3–3.5% (default 3.25%) and stop-loss at 1.5–1.75% (default 1.625%) at a default optimization leverage of 3x. Features a hard daily cap of 4 trades max and a 45-minute cooldown/pause after 2 consecutive losses.
                       </li>
                     </ul>
                     <div className="pt-2">
