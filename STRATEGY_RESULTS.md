@@ -218,3 +218,23 @@ slippage). Windows 7d / 30d (Yahoo caps 5m history at ~60d). Reproduce:
 losing configuration: tiny per-trade edge × high trade count × fixed fees = guaranteed bleed. If you
 must trade faster, you need a real microstructure edge and maker-rebate-level fees, neither of which
 this strategy has.
+
+## 10. Macro filter shipped to LIVE trading + backtest (was backtest-only)
+The macro regime filter is now wired into the running system, not just the offline benchmark:
+
+- **Automated trading (live):** both daemons (Jupiter on-chain auto-trader + the shared Telegram
+  alert engine) call `getMacroRegimeCached()` before opening a position and **skip counter-macro
+  entries** — no new LONGs while RISK-OFF, no new SHORTs while RISK-ON. Controlled by
+  `useMacroFilter` (default **on**); a macro/Yahoo outage resolves to NEUTRAL so it can never block
+  trading entirely. The regime read is cached (5 min) and shared with the `/api/macro` UI panel.
+- **Backtest (`/api/backtest`):** accepts `useMacroFilter` (default **on**); it fetches real daily
+  macro history for the window via `buildHistoricalMacroRegime()` and suppresses counter-macro
+  entries in the simulation, mirroring live. Quick live check (SOL/30d/1h/5x): OFF → 29 trades,
+  −0.58%, Sharpe −0.37; **ON → 23 trades, −0.04%, Sharpe +0.04** (fewer, better trades).
+- **Config:** auto-trader timeframe moved from 15m → **1h** per §9. Disable the filter per engine
+  with `"useMacroFilter": false` in the respective state JSON, or per backtest via the request body.
+
+### Trade journal — permanent, never reset
+The 8 real trades from the live log are seeded into `trade_journal.json` (append-only store).
+Every close now writes straight to it (`appendJournalEntry`), and **no reset path** — build script,
+fresh-deploy reset, manual reset, or circuit breaker — touches it. Real history is never overwritten.

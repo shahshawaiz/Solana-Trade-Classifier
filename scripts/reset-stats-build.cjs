@@ -1,6 +1,12 @@
 const fs = require('fs');
 const path = require('path');
 
+// IMPORTANT: This build-time reset zeroes the daemons' live PnL counters and their
+// capped (25-entry) tradesHistory ONLY. It deliberately DOES NOT touch
+// trade_journal.json — the permanent, append-only trade journal is the immutable
+// record of real trade history and must NEVER be reset/overwritten by any process
+// (build, deploy, manual reset, or circuit breaker). Do not add it here.
+
 const jupiterPath = path.join(__dirname, '../jupiter_config_state.json');
 const telegramPath = path.join(__dirname, '../telegram_alert_v1_state.json');
 

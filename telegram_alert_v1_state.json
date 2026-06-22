@@ -23,7 +23,8 @@
   "takeProfitPct": 4,
   "stopLossPct": 2,
   "leverage": 5,
-  "interval": "15m",
+  "interval": "1h",
+  "useMacroFilter": true,
   "activeTrade": {
     "side": "SHORT",
     "entryPrice": 72.72000122070312,

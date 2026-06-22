@@ -451,71 +451,107 @@ const MACRO_INDICATORS: Array<{ key: string; symbol: string; name: string; short
   { key: "vix",  symbol: "^VIX",     name: "Volatility Index", short: "VIX", risingIsBullishForCrypto: false, decimals: 2, unit: "", desc: "Equity market 'fear gauge'. Spikes signal risk-off sentiment that typically spills into crypto." },
 ];
 
+type MacroRegime = "RISK-ON" | "RISK-OFF" | "NEUTRAL";
+
+// Compute the live macro snapshot + crypto risk regime (cached). Used by the
+// /api/macro endpoint, the live trading daemons, and (indirectly) the UI.
+async function computeMacroData(): Promise<{ indicators: any[]; regime: MacroRegime; regimeNote: string; updatedAt: string }> {
+  const cached = macroCache.get("macro");
+  if (cached && (Date.now() - cached.timestamp) < MACRO_CACHE_TTL_MS) return cached.data;
+
+  const indicators = await Promise.all(
+    MACRO_INDICATORS.map(async (cfg) => {
+      let price: number | null = null;
+      let change: number | null = null;
+      let changePercent: number | null = null;
+      try {
+        const q: any = await withTimeout(yf.quote(cfg.symbol, {}, { validateResult: false }), 8000, `yahoo:${cfg.symbol}`);
+        if (q && q.regularMarketPrice !== undefined && q.regularMarketPrice !== null) {
+          price = Number(q.regularMarketPrice);
+          change = q.regularMarketChange !== undefined && q.regularMarketChange !== null ? Number(q.regularMarketChange) : null;
+          changePercent = q.regularMarketChangePercent !== undefined && q.regularMarketChangePercent !== null ? Number(q.regularMarketChangePercent) : null;
+        }
+      } catch (e: any) {
+        console.warn(`[Macro] Failed to fetch ${cfg.symbol}:`, e.message);
+      }
+
+      // How this reading impacts crypto right now, given its direction.
+      let cryptoImpact: "BULLISH" | "BEARISH" | "NEUTRAL" = "NEUTRAL";
+      if (changePercent !== null && Math.abs(changePercent) >= 0.05) {
+        const rising = changePercent > 0;
+        cryptoImpact = (rising === cfg.risingIsBullishForCrypto) ? "BULLISH" : "BEARISH";
+      }
+
+      return { key: cfg.key, symbol: cfg.symbol, name: cfg.name, short: cfg.short, unit: cfg.unit, desc: cfg.desc, price, change, changePercent, cryptoImpact };
+    })
+  );
+
+  // Aggregate the three into a single risk-regime read for crypto.
+  const bullish = indicators.filter((i) => i.cryptoImpact === "BULLISH").length;
+  const bearish = indicators.filter((i) => i.cryptoImpact === "BEARISH").length;
+  let regime: MacroRegime = "NEUTRAL";
+  if (bullish - bearish >= 2) regime = "RISK-ON";
+  else if (bearish - bullish >= 2) regime = "RISK-OFF";
+
+  const regimeNote =
+    regime === "RISK-ON" ? "Macro tailwind for crypto — falling dollar / yields / volatility favour risk assets."
+    : regime === "RISK-OFF" ? "Macro headwind for crypto — rising dollar / yields / volatility pressure risk assets."
+    : "Mixed macro backdrop — no decisive risk-on / risk-off bias for crypto.";
+
+  const payload = { indicators, regime, regimeNote, updatedAt: new Date().toISOString() };
+  macroCache.set("macro", { timestamp: Date.now(), data: payload });
+  return payload;
+}
+
+// Live regime for the trading daemons — cached, and NEVER throws (returns NEUTRAL
+// on any failure so a macro outage can never block trading entirely).
+async function getMacroRegimeCached(): Promise<MacroRegime> {
+  try { return (await computeMacroData()).regime || "NEUTRAL"; }
+  catch { return "NEUTRAL"; }
+}
+
+// Should a new entry of `side` be allowed under the current/given regime?
+// RISK-OFF blocks new LONGs; RISK-ON blocks new SHORTs; NEUTRAL allows both.
+function macroAllowsEntry(side: string, regime: MacroRegime): boolean {
+  if (side === "LONG") return regime !== "RISK-OFF";
+  if (side === "SHORT") return regime !== "RISK-ON";
+  return true;
+}
+
+// Build a per-bar regime series for a backtest window from daily macro history
+// (each indicator's 5-day trend), aligned to the supplied bar timestamps.
+async function buildHistoricalMacroRegime(barDates: number[], period1: Date): Promise<MacroRegime[]> {
+  const FIVE_D = 5 * 24 * 60 * 60 * 1000;
+  const start = new Date(period1.getTime() - 12 * 24 * 60 * 60 * 1000);
+  const series: Record<string, Array<{ t: number; close: number }>> = {};
+  await Promise.all(MACRO_INDICATORS.map(async (cfg) => {
+    try {
+      const chart: any = await withTimeout((yf.chart as any)(cfg.symbol, { period1: start, interval: "1d" }, { validateResult: false }), 8000, `yahoo:${cfg.symbol}`);
+      series[cfg.symbol] = (chart?.quotes || []).filter((q: any) => q && q.close != null).map((q: any) => ({ t: new Date(q.date).getTime(), close: Number(q.close) }));
+    } catch { series[cfg.symbol] = []; }
+  }));
+  const valAtOrBefore = (arr: Array<{ t: number; close: number }>, t: number) => { let v: number | null = null; for (const s of arr) { if (s.t <= t) v = s.close; else break; } return v; };
+  return barDates.map((t) => {
+    let off = 0, on = 0, have = 0;
+    for (const cfg of MACRO_INDICATORS) {
+      const arr = series[cfg.symbol]; if (!arr || !arr.length) continue;
+      const now = valAtOrBefore(arr, t), past = valAtOrBefore(arr, t - FIVE_D);
+      if (now == null || past == null || past === 0) continue;
+      have++;
+      const chg = (now - past) / past;
+      if (chg > 0.001) { if (cfg.risingIsBullishForCrypto) on++; else off++; }
+      else if (chg < -0.001) { if (cfg.risingIsBullishForCrypto) off++; else on++; }
+    }
+    if (have < 2) return "NEUTRAL";
+    if (off - on >= 2) return "RISK-OFF";
+    if (on - off >= 2) return "RISK-ON";
+    return "NEUTRAL";
+  });
+}
+
 app.get("/api/macro", async (_req, res) => {
   try {
-    const cached = macroCache.get("macro");
-    if (cached && (Date.now() - cached.timestamp) < MACRO_CACHE_TTL_MS) {
-      return res.json(cached.data);
-    }
-
-    const indicators = await Promise.all(
-      MACRO_INDICATORS.map(async (cfg) => {
-        let price: number | null = null;
-        let change: number | null = null;
-        let changePercent: number | null = null;
-        try {
-          const q: any = await withTimeout(yf.quote(cfg.symbol, {}, { validateResult: false }), 8000, `yahoo:${cfg.symbol}`);
-          if (q && q.regularMarketPrice !== undefined && q.regularMarketPrice !== null) {
-            price = Number(q.regularMarketPrice);
-            change = q.regularMarketChange !== undefined && q.regularMarketChange !== null ? Number(q.regularMarketChange) : null;
-            changePercent = q.regularMarketChangePercent !== undefined && q.regularMarketChangePercent !== null ? Number(q.regularMarketChangePercent) : null;
-          }
-        } catch (e: any) {
-          console.warn(`[Macro] Failed to fetch ${cfg.symbol}:`, e.message);
-        }
-
-        // How this reading impacts crypto right now, given its direction.
-        let cryptoImpact: "BULLISH" | "BEARISH" | "NEUTRAL" = "NEUTRAL";
-        if (changePercent !== null && Math.abs(changePercent) >= 0.05) {
-          const rising = changePercent > 0;
-          cryptoImpact = (rising === cfg.risingIsBullishForCrypto) ? "BULLISH" : "BEARISH";
-        }
-
-        return {
-          key: cfg.key,
-          symbol: cfg.symbol,
-          name: cfg.name,
-          short: cfg.short,
-          unit: cfg.unit,
-          desc: cfg.desc,
-          price,
-          change,
-          changePercent,
-          cryptoImpact,
-        };
-      })
-    );
-
-    // Aggregate the three into a single risk-regime read for crypto.
-    const bullish = indicators.filter((i) => i.cryptoImpact === "BULLISH").length;
-    const bearish = indicators.filter((i) => i.cryptoImpact === "BEARISH").length;
-    let regime: "RISK-ON" | "RISK-OFF" | "NEUTRAL" = "NEUTRAL";
-    if (bullish - bearish >= 2) regime = "RISK-ON";
-    else if (bearish - bullish >= 2) regime = "RISK-OFF";
-
-    const regimeNote =
-      regime === "RISK-ON" ? "Macro tailwind for crypto — falling dollar / yields / volatility favour risk assets."
-      : regime === "RISK-OFF" ? "Macro headwind for crypto — rising dollar / yields / volatility pressure risk assets."
-      : "Mixed macro backdrop — no decisive risk-on / risk-off bias for crypto.";
-
-    const payload = {
-      indicators,
-      regime,
-      regimeNote,
-      updatedAt: new Date().toISOString(),
-    };
-    macroCache.set("macro", { timestamp: Date.now(), data: payload });
-    return res.json(payload);
+    return res.json(await computeMacroData());
   } catch (error: any) {
     return res.status(200).json({ indicators: [], regime: "NEUTRAL", regimeNote: "Macro data unavailable.", error: error?.message || "macro error" });
   }
@@ -573,6 +609,15 @@ function syncJournalStore(incoming: Array<{ source: string; trade: any }>): any[
   const trimmed = store.length > JOURNAL_MAX ? store.slice(store.length - JOURNAL_MAX) : store;
   if (changed || trimmed.length !== store.length) saveJournalStore(trimmed);
   return trimmed;
+}
+
+// Immediately persist a single closed trade to the immutable journal. Called at
+// every close site so the trade survives even if the daemon's capped tradesHistory
+// is reset (build, fresh deploy, manual reset, circuit breaker) before /api/journal
+// is next read. Append-only + deduped by source+id — it NEVER overwrites history.
+function appendJournalEntry(source: string, trade: any) {
+  try { syncJournalStore([{ source, trade }]); }
+  catch (e: any) { console.error("[Journal] Failed to append closed trade:", e?.message || e); }
 }
 
 // --- Trade journal ----------------------------------------------------------
@@ -1963,7 +2008,7 @@ export function loadTelegramConfig(): TelegramConfig {
     takeProfitPct: 4,
     stopLossPct: 2,
     leverage: 5,
-    interval: "15m",
+    interval: "1h",
     activeTrade: null,
     tradesHistory: [],
     auditLogs: [],
@@ -2159,7 +2204,7 @@ function loadJupiterConfig(): JupiterConfig {
     weights: { sentiment: 0, technical: 0.9, liquidity: 0.85, elliottWave: 0, supertrend: 0.9, fvg: 0, dca: 0 },
     lastTradePnL: 0,
     cumulativePnL: 0,
-    interval: "15m",
+    interval: "1h",
     activeTrade: null,
     tradesHistory: [],
     lastAction: "Hold"
@@ -2653,6 +2698,7 @@ export async function checkPredictionAndAlert(forceAlert = false) {
         };
         tradesHistory.push(closedTradeLog);
         if (tradesHistory.length > 25) tradesHistory.shift();
+        appendJournalEntry("Alert Daemon", closedTradeLog); // permanent, never reset
 
         const levClosed = config.leverage || 5;
         const tpPriceClosed = activeTrade.side === "LONG" ? entryPrice * (1 + (closedTradeLog.takeProfitPct / 100) / levClosed) : entryPrice * (1 - (closedTradeLog.takeProfitPct / 100) / levClosed);
@@ -2682,8 +2728,14 @@ export async function checkPredictionAndAlert(forceAlert = false) {
         console.log(`[Telegram Daemon] Trade entrance suppressed: Market direction is SIDEWAYS.`);
         config.error = "Trade entrance suppressed: Market direction is sideways.";
       } else if (enterSide && pred.isTrendConfirmed3x) {
+        // Macro regime filter (shared alert daemon): block counter-macro entries —
+        // no new LONGs while RISK-OFF, no new SHORTs while RISK-ON. useMacroFilter:false disables.
+        const macroRegimeT: "RISK-ON" | "RISK-OFF" | "NEUTRAL" = (config as any).useMacroFilter !== false ? await getMacroRegimeCached() : "NEUTRAL";
         // Only enter if direction trend has changed (is different from lastSentDirection)
-        if (enterSide !== config.lastSentDirection) {
+        if (enterSide !== config.lastSentDirection && !macroAllowsEntry(enterSide, macroRegimeT)) {
+          config.error = `Macro filter: ${enterSide} entry suppressed — macro regime is ${macroRegimeT}.`;
+          console.log(`[Telegram Daemon] ${config.error}`);
+        } else if (enterSide !== config.lastSentDirection) {
         const lev = config.leverage || 5;
         let tpPct = 4.0;
         let slPct = 2.0;
@@ -3440,6 +3492,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         };
         tradesHistory.push(closedTradeLog);
         if (tradesHistory.length > 25) tradesHistory.shift();
+        appendJournalEntry("Auto-Trade (Jupiter)", closedTradeLog); // permanent, never reset
 
         activeTrade = null;
         closedThisTick = true;
@@ -3543,6 +3596,18 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         canEnter = false;
         config.error = `Circuit breaker active: ${(config as any).consecutiveLosses} consecutive losses (limit ${maxConsecLosses}). New entries paused; reset consecutiveLosses to resume.`;
         console.log(`[Jupiter Daemon] ${config.error}`);
+      }
+
+      // Macro regime filter: block counter-macro entries — no new LONGs while the
+      // dollar/yields/volatility backdrop is RISK-OFF, no new SHORTs while RISK-ON.
+      // Disable with useMacroFilter:false. A macro outage resolves to NEUTRAL (no effect).
+      if (canEnter && (config as any).useMacroFilter !== false) {
+        const macroRegime = await getMacroRegimeCached();
+        if (!macroAllowsEntry(enterSide, macroRegime)) {
+          canEnter = false;
+          config.error = `Macro filter: ${enterSide} entry suppressed — macro regime is ${macroRegime}.`;
+          console.log(`[Jupiter Daemon] ${config.error}`);
+        }
       }
 
       if (canEnter) {
@@ -3952,7 +4017,7 @@ app.post("/api/strategy/signal", handleGetStrategyOutput);
 
 app.post("/api/backtest", async (req, res) => {
   try {
-    const { token = "SOL", interval = "1h", lookbackDays = 7, weights, initialCapital = 10000, startDate, endDate, leverage = 5, takeProfitPct = 4.0, stopLossPct = 2.0, signalThreshold = 0.25, useRegimeFilter = true } = req.body;
+    const { token = "SOL", interval = "1h", lookbackDays = 7, weights, initialCapital = 10000, startDate, endDate, leverage = 5, takeProfitPct = 4.0, stopLossPct = 2.0, signalThreshold = 0.25, useRegimeFilter = true, useMacroFilter = true } = req.body;
     const sigThreshold = Math.max(0, Number(signalThreshold) || 0.08);
     const symbol = `${token.toUpperCase()}-USD`;
     
@@ -3992,7 +4057,19 @@ app.post("/api/backtest", async (req, res) => {
     const emaFast = calculateEMA(closes, 12);
     const emaSlow = calculateEMA(closes, 26);
     const rsis = calculateRSI(closes, 14);
-    
+
+    // Macro regime overlay for the backtest window (one label per bar). When enabled,
+    // counter-macro entries are suppressed below, mirroring the live trading filter.
+    let macroRegimeArr: MacroRegime[] | null = null;
+    if (useMacroFilter) {
+      try {
+        macroRegimeArr = await buildHistoricalMacroRegime(dates.map((d: any) => new Date(d).getTime()), period1);
+      } catch (e: any) {
+        console.warn("[Backtest] Macro regime build failed; running without macro filter:", e?.message);
+        macroRegimeArr = null;
+      }
+    }
+
     let capital = Number(initialCapital) || 10000;
     let activePosition: any = null;
     const trades: any[] = [];
@@ -4161,7 +4238,8 @@ app.post("/api/backtest", async (req, res) => {
           }
         }
         
-        if (positionSide !== "HOLD" && positionSide !== lastSentDirection && isTrendConfirmed3x && currentSig.trnd !== "SIDEWAYS") {
+        const macroOkBt = !macroRegimeArr || macroAllowsEntry(positionSide, macroRegimeArr[i]);
+        if (positionSide !== "HOLD" && positionSide !== lastSentDirection && isTrendConfirmed3x && currentSig.trnd !== "SIDEWAYS" && macroOkBt) {
           // Calculate dynamic TP/SL
           const recentHighs = closes.slice(Math.max(0, i - 20), i).map((c: number) => c);
           const recentLows = closes.slice(Math.max(0, i - 20), i).map((c: number) => c);
@@ -5190,7 +5268,7 @@ app.post("/api/jupiter-config", async (req, res) => {
       const tpPct = 4.0;
       const slPct = 2.0;
 
-      current.tradesHistory.push({
+      const manualClosedLog = {
         id: closedId,
         side: current.activeTrade.side,
         entryPrice,
@@ -5202,8 +5280,10 @@ app.post("/api/jupiter-config", async (req, res) => {
         exitTime: exitTimeStr,
         takeProfitPct: current.activeTrade.takeProfitPct !== undefined ? current.activeTrade.takeProfitPct : tpPct,
         stopLossPct: current.activeTrade.stopLossPct !== undefined ? current.activeTrade.stopLossPct : slPct
-      });
-      
+      };
+      current.tradesHistory.push(manualClosedLog);
+      appendJournalEntry("Auto-Trade (Jupiter)", manualClosedLog); // permanent, never reset
+
       if (current.privateKey) {
          console.log(`[Jupiter Config Override] Executing mainnet on-chain CLOSE for ${current.activeTrade.sizeInSol} SOL...`);
          try {
@@ -5253,7 +5333,7 @@ app.post("/api/jupiter-config", async (req, res) => {
         const tpPct = 4.0;
         const slPct = 2.0;
 
-        current.tradesHistory.push({
+        const manualSettleLog = {
           id: closedId,
           side: current.activeTrade.side,
           entryPrice,
@@ -5266,7 +5346,9 @@ app.post("/api/jupiter-config", async (req, res) => {
           takeProfitPct: current.activeTrade.takeProfitPct !== undefined ? current.activeTrade.takeProfitPct : tpPct,
           stopLossPct: current.activeTrade.stopLossPct !== undefined ? current.activeTrade.stopLossPct : slPct,
           mode: current.activeTrade.mode
-        });
+        };
+        current.tradesHistory.push(manualSettleLog);
+        appendJournalEntry("Auto-Trade (Jupiter)", manualSettleLog); // permanent, never reset
         if (current.privateKey && current.activeTrade?.mode !== "PAPER") {
            console.log(`[Jupiter Config Override] Executing mainnet on-chain CLOSE first for ${current.activeTrade.sizeInSol} SOL...`);
            try {
