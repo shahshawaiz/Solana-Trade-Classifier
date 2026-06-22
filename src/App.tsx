@@ -713,7 +713,6 @@ export default function App() {
   useEffect(() => {
     if (currentView === 'journal') {
       fetchJournal();
-      fetchMacro();
     }
   }, [currentView]);
 
@@ -5358,18 +5357,18 @@ export default function App() {
                   <span className="text-[10px] font-mono font-bold text-sol-purple uppercase tracking-[0.2em] flex items-center gap-2">
                     <BookOpen className="w-3 h-3" /> Cortex Trade Journal
                   </span>
-                  <h2 className="text-xl font-serif italic text-text-heading">Performance Ledger & Macro Context</h2>
+                  <h2 className="text-xl font-serif italic text-text-heading">Performance Ledger & Trade Journal</h2>
                   <p className="text-[11px] text-text-dim max-w-xl leading-relaxed">
-                    Every closed position from both autonomous engines, consolidated with the macro backdrop that framed each trade.
+                    Every closed position from both autonomous engines recorded in a trade journal ledger.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => { fetchJournal(); fetchMacro(); }}
+                    onClick={() => { fetchJournal(); }}
                     className="text-[10px] font-bold uppercase tracking-wider py-2 px-3 rounded bg-bg-input hover:bg-bg-card text-text-dim border border-border-dim flex items-center gap-1.5 cursor-pointer transition-colors"
                   >
-                    <RefreshCw className={cn("w-3 h-3", (journalLoading || macroLoading) && "animate-spin")} /> Refresh
+                    <RefreshCw className={cn("w-3 h-3", journalLoading && "animate-spin")} /> Refresh
                   </button>
                   <button
                     type="button"
@@ -5382,69 +5381,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Macro indicators */}
-              <section className="space-y-3">
-                <div className="flex items-center justify-between border-b border-border-dim/60 pb-2">
-                  <span className="text-[10px] font-mono font-bold text-text-heading uppercase tracking-[0.2em] flex items-center gap-2">
-                    <Activity className="w-3 h-3 text-sol-purple" /> Macro Risk Regime
-                  </span>
-                  {macroData?.regime && (
-                    <span className={cn(
-                      "text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full border",
-                      macroData.regime === "RISK-ON" ? "bg-sol-green/10 text-sol-green border-sol-green/30"
-                        : macroData.regime === "RISK-OFF" ? "bg-red-500/10 text-red-400 border-red-500/30"
-                        : "bg-bg-input text-text-dim border-border-dim"
-                    )}>
-                      {macroData.regime}
-                    </span>
-                  )}
-                </div>
-                {macroData?.regimeNote && (
-                  <p className="text-[11px] text-text-dim italic leading-relaxed">{macroData.regimeNote}</p>
-                )}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  {(macroData?.indicators || []).map((ind: any) => {
-                    const up = (ind.changePercent ?? 0) > 0;
-                    const down = (ind.changePercent ?? 0) < 0;
-                    return (
-                      <div key={ind.key} className="p-4 bg-bg-card border border-border-dim rounded-lg space-y-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-text-heading flex items-center gap-1.5">
-                            {ind.key === "dxy" ? <DollarSign className="w-3 h-3 text-sol-purple" /> : <Activity className="w-3 h-3 text-sol-purple" />}
-                            {ind.short}
-                          </span>
-                          <span className={cn(
-                            "text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded",
-                            ind.cryptoImpact === "BULLISH" ? "bg-sol-green/10 text-sol-green"
-                              : ind.cryptoImpact === "BEARISH" ? "bg-red-500/10 text-red-400"
-                              : "bg-bg-input text-text-dim"
-                          )}>
-                            {ind.cryptoImpact === "BULLISH" ? "Crypto +" : ind.cryptoImpact === "BEARISH" ? "Crypto −" : "Neutral"}
-                          </span>
-                        </div>
-                        <div className="flex items-end justify-between">
-                          <span className="text-xl font-black tracking-tight text-text-heading">
-                            {ind.price !== null && ind.price !== undefined ? ind.price.toFixed(2) : "—"}{ind.unit}
-                          </span>
-                          {ind.changePercent !== null && ind.changePercent !== undefined && (
-                            <span className={cn(
-                              "text-[11px] font-bold flex items-center gap-0.5",
-                              up ? "text-sol-green" : down ? "text-red-400" : "text-text-dim"
-                            )}>
-                              {up ? <TrendingUp className="w-3 h-3" /> : down ? <TrendingDown className="w-3 h-3" /> : null}
-                              {up ? "+" : ""}{ind.changePercent.toFixed(2)}%
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[9px] text-text-dim/80 leading-snug">{ind.name}</p>
-                      </div>
-                    );
-                  })}
-                  {!macroLoading && (!macroData?.indicators || macroData.indicators.length === 0) && (
-                    <div className="col-span-full text-center text-[11px] text-text-dim py-4">Macro data unavailable right now.</div>
-                  )}
-                </div>
-              </section>
+
 
               {/* Performance stats */}
               {journalData?.stats && journalData.stats.total > 0 && (
@@ -5488,7 +5425,7 @@ export default function App() {
                     No closed trades recorded yet. Positions appear here once the autonomous engines settle them.
                   </div>
                 ) : (
-                  <div className="space-y-2">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     {journalData.trades.map((trade: any) => {
                       const durationStr = trade.durationMins !== null && trade.durationMins !== undefined
                         ? (trade.durationMins >= 60 ? `${Math.floor(trade.durationMins / 60)}h ${trade.durationMins % 60}m` : `${trade.durationMins}m`)
@@ -5496,71 +5433,93 @@ export default function App() {
                       let exitStr = "";
                       try { exitStr = trade.exitTime ? etFormat(new Date(trade.exitTime), "MMM d, HH:mm") : ""; } catch (e) {}
                       return (
-                        <div key={trade.id} className="flex flex-col p-3 bg-bg-card border border-border-dim/60 rounded-lg text-[11px] space-y-2">
+                        <div key={trade.id} className={cn(
+                          "flex flex-col p-4 bg-bg-card border rounded-xl text-[11px] space-y-3 transition-all hover:scale-[1.01] hover:shadow-md",
+                          trade.pnl >= 0 
+                            ? "border-sol-green/20 hover:border-sol-green/40 bg-gradient-to-br from-bg-card to-sol-green/[0.03]" 
+                            : "border-red-500/15 hover:border-red-500/35 bg-gradient-to-br from-bg-card to-red-500/[0.02]"
+                        )}>
                           <div className="flex justify-between items-center flex-wrap gap-2">
                             <div className="flex items-center gap-2">
                               <span className={cn(
-                                "px-1.5 py-0.5 rounded text-[8px] font-bold uppercase text-white",
+                                "px-1.5 py-0.5 rounded text-[8px] font-black uppercase text-white",
                                 trade.side === "LONG" ? "bg-sol-green" : trade.side === "SHORT" ? "bg-red-500" : "bg-text-dim"
                               )}>
                                 {trade.side}{trade.leverage ? ` (${trade.leverage}x)` : ""}
                               </span>
                               <span className="text-[8.5px] uppercase tracking-wider text-text-dim font-bold px-1.5 py-0.5 rounded bg-bg-input border border-border-dim">{trade.source}</span>
-                              {exitStr && <span className="text-[9px] text-text-dim font-mono">{exitStr} {tzAbbr}</span>}
                             </div>
                             <span className={cn(
-                              "font-black tracking-tight text-sm",
+                              "font-black tracking-tight text-base font-mono",
                               trade.pnl >= 0 ? "text-sol-green" : "text-red-500"
                             )}>
                               {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}%
                             </span>
                           </div>
-                          <div className="flex justify-between items-center text-[9.5px] text-text-dim border-t border-border-dim/15 pt-1.5 flex-wrap gap-x-4 gap-y-1">
-                            <span>${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)}</span>
-                            {trade.sizeInSol !== undefined && trade.sizeInSol !== null && (
-                              <span>Size: <span className="text-text-heading font-semibold">{Number(trade.sizeInSol).toFixed(3)} SOL</span></span>
-                            )}
-                            <span>Duration: <span className="text-text-heading font-semibold">{durationStr}</span></span>
-                            {trade.takeProfitPct !== undefined && (
-                              <span>TP <span className="text-sol-green font-semibold">+{Number(trade.takeProfitPct).toFixed(1)}%</span> · SL <span className="text-red-400 font-semibold">-{Number(trade.stopLossPct ?? 0).toFixed(1)}%</span></span>
-                            )}
+                          
+                          <div className="text-[9px] text-text-dim font-mono flex justify-between items-center">
+                            {exitStr && <span>Settled: {exitStr} {tzAbbr}</span>}
                             {trade.mode && (
-                              <span className="text-[8px] uppercase tracking-wider px-1 py-0.5 rounded bg-bg-input border border-border-dim">{trade.mode}</span>
+                              <span className="text-[8px] uppercase tracking-wider px-1 py-0.2 rounded bg-bg-input border border-border-dim">{trade.mode}</span>
                             )}
                           </div>
-                          {/* Signal breakdown — why this trade was executed */}
-                          {(trade.sentiment !== undefined && trade.sentiment !== null) || (trade.technicalScore !== undefined && trade.technicalScore !== null) ? (
-                            <div className="flex items-center gap-4 text-[9.5px] text-text-dim border-t border-border-dim/15 pt-1.5 flex-wrap gap-y-1">
-                              <span className="font-sans font-bold text-[7.5px] uppercase tracking-wider text-text-dim">Signal breakdown:</span>
-                              {trade.sentiment !== undefined && trade.sentiment !== null && (
-                                <span>Sentiment <span className={cn("font-semibold", trade.sentiment > 0 ? "text-sol-green" : trade.sentiment < 0 ? "text-red-400" : "text-sol-purple")}>{(trade.sentiment >= 0 ? "+" : "") + Number(trade.sentiment).toFixed(2)}</span></span>
-                              )}
-                              {trade.technicalScore !== undefined && trade.technicalScore !== null && (
-                                <span>Technical <span className={cn("font-semibold", trade.technicalScore > 0 ? "text-sol-green" : trade.technicalScore < 0 ? "text-red-400" : "text-sol-purple")}>{(trade.technicalScore >= 0 ? "+" : "") + Number(trade.technicalScore).toFixed(2)}</span></span>
-                              )}
-                            </div>
-                          ) : null}
-                          {trade.news && trade.news.length > 0 && (
-                            <div className="text-left font-mono text-[8.5px] text-text-dim/85 border-t border-border-dim/10 pt-1.5 space-y-0.5">
-                              <span className="font-sans font-bold block text-[7.5px] uppercase tracking-wider text-text-dim mb-0.5">News catalysts at entry:</span>
-                              {trade.news.slice(0, 5).map((item: any, nIdx: number) => {
-                                const isObj = item && typeof item === "object";
-                                const title = isObj ? item.title : item;
-                                const score = isObj && item.sentiment !== undefined ? item.sentiment : null;
-                                return (
-                                  <div key={nIdx} className="flex flex-col border-b border-border-dim/5 last:border-0 pb-0.5">
-                                    <div className="truncate font-serif text-[9px] text-text-heading/90" title={title}>📰 {nIdx + 1}. {title}</div>
-                                    {(score !== null || (isObj && item.source)) && (
-                                      <div className="flex gap-2 items-center text-[7px] text-text-dim font-mono tracking-wider pl-4 uppercase">
-                                        {score !== null && (
-                                          <span className={cn("font-semibold", score > 0.1 ? "text-sol-green" : score < -0.1 ? "text-red-400" : "text-text-dim")}>Score: {score > 0 ? "+" : ""}{Number(score).toFixed(2)}</span>
-                                        )}
-                                        {isObj && item.source && <span>• {item.source}</span>}
-                                      </div>
-                                    )}
+
+                          <div className="space-y-1 text-text-dim border-t border-border-dim/20 pt-2 font-mono">
+                            <div className="flex justify-between"><span>Price Swap:</span><span className="text-text-heading font-medium">${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)}</span></div>
+                            {trade.sizeInSol !== undefined && trade.sizeInSol !== null && (
+                              <div className="flex justify-between"><span>Sizing:</span><span className="text-text-heading font-medium">{Number(trade.sizeInSol).toFixed(3)} SOL</span></div>
+                            )}
+                            <div className="flex justify-between"><span>Duration:</span><span className="text-text-heading font-medium">{durationStr}</span></div>
+                            {trade.takeProfitPct !== undefined && (
+                              <div className="flex justify-between"><span>Limits:</span><span>TP: <span className="text-sol-green font-semibold">+{Number(trade.takeProfitPct).toFixed(1)}%</span> · SL: <span className="text-red-400 font-semibold">-{Number(trade.stopLossPct ?? 0).toFixed(1)}%</span></span></div>
+                            )}
+                          </div>
+
+                          {/* Signal breakdown */}
+                          {((trade.sentiment !== undefined && trade.sentiment !== null) || (trade.technicalScore !== undefined && trade.technicalScore !== null)) && (
+                            <div className="flex flex-col text-[9.5px] text-text-dim border-t border-border-dim/20 pt-2 space-y-1">
+                              <span className="font-sans font-bold text-[7.5px] uppercase tracking-wider text-text-dim">Signal breakdown</span>
+                              <div className="grid grid-cols-2 gap-2 font-mono text-[9px]">
+                                {trade.sentiment !== undefined && trade.sentiment !== null && (
+                                  <div className="flex justify-between bg-bg-input/40 px-1.5 py-0.5 rounded">
+                                    <span className="text-text-dim">Sent:</span>
+                                    <span className={cn("font-bold", trade.sentiment > 0 ? "text-sol-green" : trade.sentiment < 0 ? "text-red-400" : "text-text-heading")}>
+                                      {(trade.sentiment >= 0 ? "+" : "") + Number(trade.sentiment).toFixed(2)}
+                                    </span>
                                   </div>
-                                );
-                              })}
+                                )}
+                                {trade.technicalScore !== undefined && trade.technicalScore !== null && (
+                                  <div className="flex justify-between bg-bg-input/40 px-1.5 py-0.5 rounded">
+                                    <span className="text-text-dim">Tech:</span>
+                                    <span className={cn("font-bold", trade.technicalScore > 0 ? "text-sol-green" : trade.technicalScore < 0 ? "text-red-400" : "text-text-heading")}>
+                                      {(trade.technicalScore >= 0 ? "+" : "") + Number(trade.technicalScore).toFixed(2)}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {trade.news && trade.news.length > 0 && (
+                            <div className="text-left font-mono text-[8.5px] text-text-dim/85 border-t border-border-dim/20 pt-2 space-y-1">
+                              <span className="font-sans font-bold block text-[7.5px] uppercase tracking-wider text-text-dim">News Catalysts</span>
+                              <div className="space-y-1 max-h-[80px] overflow-y-auto custom-scrollbar pr-0.5">
+                                {trade.news.slice(0, 3).map((item: any, nIdx: number) => {
+                                  const isObj = item && typeof item === "object";
+                                  const title = isObj ? item.title : item;
+                                  const score = isObj && item.sentiment !== undefined ? item.sentiment : null;
+                                  return (
+                                    <div key={nIdx} className="border-b border-border-dim/5 last:border-0 pb-1 flex flex-col">
+                                      <div className="truncate font-serif text-[8.5px] text-text-heading/90" title={title}>📰 {title}</div>
+                                      {score !== null && (
+                                        <span className={cn("text-[7.5px] font-mono tracking-wider uppercase font-semibold", score > 0.1 ? "text-sol-green" : score < -0.1 ? "text-red-400" : "text-text-dim")}>
+                                          Score: {score > 0 ? "+" : ""}{Number(score).toFixed(2)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
                             </div>
                           )}
                         </div>
