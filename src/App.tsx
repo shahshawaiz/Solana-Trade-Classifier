@@ -20,7 +20,8 @@ import {
   Shield,
   Coins,
   Download,
-  Table
+  Table,
+  BookOpen
 } from "lucide-react";
 import { 
   LineChart, 
@@ -565,7 +566,11 @@ export default function App() {
   });
   const [token, setToken] = useState("SOL");
   const [predictionHeadlines, setPredictionHeadlines] = useState<any[]>([]);
-  const [currentView, setCurrentView] = useState<'dashboard' | 'apiDocs' | 'about' | 'alerts' | 'jupiter' | 'forecast' | 'liquidation'>('forecast');
+  const [currentView, setCurrentView] = useState<'dashboard' | 'apiDocs' | 'about' | 'alerts' | 'jupiter' | 'forecast' | 'liquidation' | 'journal'>('forecast');
+  const [journalData, setJournalData] = useState<any | null>(null);
+  const [journalLoading, setJournalLoading] = useState(false);
+  const [macroData, setMacroData] = useState<any | null>(null);
+  const [macroLoading, setMacroLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
@@ -679,9 +684,71 @@ export default function App() {
     topic
   ]);
 
+  const fetchJournal = async () => {
+    setJournalLoading(true);
+    try {
+      const res = await fetch("/api/journal");
+      const json = await res.json();
+      setJournalData(json);
+    } catch (e) {
+      setJournalData({ trades: [], stats: null });
+    } finally {
+      setJournalLoading(false);
+    }
+  };
+
+  const fetchMacro = async () => {
+    setMacroLoading(true);
+    try {
+      const res = await fetch("/api/macro");
+      const json = await res.json();
+      setMacroData(json);
+    } catch (e) {
+      setMacroData(null);
+    } finally {
+      setMacroLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (currentView === 'journal') {
+      fetchJournal();
+      fetchMacro();
+    }
+  }, [currentView]);
+
+  const downloadJournalCSV = () => {
+    const trades = journalData?.trades || [];
+    if (!trades.length) return;
+    const header = ["Source", "Side", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "PnL %", "Duration (min)", "TP %", "SL %", "Leverage", "Sentiment", "Technical"];
+    const rows = trades.map((t: any) => [
+      t.source ?? "",
+      t.side ?? "",
+      t.entryTime ?? "",
+      t.exitTime ?? "",
+      t.entryPrice ?? "",
+      t.exitPrice ?? "",
+      typeof t.pnl === "number" ? t.pnl.toFixed(2) : "",
+      t.durationMins ?? "",
+      t.takeProfitPct ?? "",
+      t.stopLossPct ?? "",
+      t.leverage ?? "",
+      t.sentiment !== undefined ? t.sentiment : "",
+      t.technicalScore !== undefined ? t.technicalScore : "",
+    ]);
+    const csv = [header, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `trade-journal-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const generateInterpolatedPoints = () => {
     if (!forecastData) return [];
-    
+
     const points: any[] = [];
     
     // 1. Add historical price points
@@ -2181,11 +2248,17 @@ export default function App() {
           >
             Alerts Hub
           </button>
-          <button 
-            onClick={() => setCurrentView('jupiter')} 
+          <button
+            onClick={() => setCurrentView('jupiter')}
             className={cn("hover:text-sol-purple transition-colors", currentView === 'jupiter' && "text-sol-purple")}
           >
             Automated Trading
+          </button>
+          <button
+            onClick={() => setCurrentView('journal')}
+            className={cn("hover:text-sol-purple transition-colors", currentView === 'journal' && "text-sol-purple")}
+          >
+            Trade Journal
           </button>
           <button 
             onClick={() => setCurrentView('apiDocs')} 
@@ -5271,6 +5344,206 @@ export default function App() {
                 </div>
               </div>
 
+            </div>
+          </main>
+        ) : currentView === 'journal' ? (
+          <main className="flex-1 flex flex-col p-8 bg-bg-main overflow-y-auto custom-scrollbar animate-fade-in text-text-body">
+            <div className="max-w-6xl mx-auto w-full space-y-8">
+              {/* Header */}
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div className="space-y-1">
+                  <span className="text-[10px] font-mono font-bold text-sol-purple uppercase tracking-[0.2em] flex items-center gap-2">
+                    <BookOpen className="w-3 h-3" /> Cortex Trade Journal
+                  </span>
+                  <h2 className="text-xl font-serif italic text-text-heading">Performance Ledger & Macro Context</h2>
+                  <p className="text-[11px] text-text-dim max-w-xl leading-relaxed">
+                    Every closed position from both autonomous engines, consolidated with the macro backdrop that framed each trade.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { fetchJournal(); fetchMacro(); }}
+                    className="text-[10px] font-bold uppercase tracking-wider py-2 px-3 rounded bg-bg-input hover:bg-bg-card text-text-dim border border-border-dim flex items-center gap-1.5 cursor-pointer transition-colors"
+                  >
+                    <RefreshCw className={cn("w-3 h-3", (journalLoading || macroLoading) && "animate-spin")} /> Refresh
+                  </button>
+                  <button
+                    type="button"
+                    onClick={downloadJournalCSV}
+                    disabled={!journalData?.trades?.length}
+                    className="text-[10px] font-bold uppercase tracking-wider py-2 px-3 rounded bg-sol-purple/10 hover:bg-sol-purple/20 text-sol-purple border border-sol-purple/30 flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Download className="w-3 h-3" /> Export CSV
+                  </button>
+                </div>
+              </div>
+
+              {/* Macro indicators */}
+              <section className="space-y-3">
+                <div className="flex items-center justify-between border-b border-border-dim/60 pb-2">
+                  <span className="text-[10px] font-mono font-bold text-text-heading uppercase tracking-[0.2em] flex items-center gap-2">
+                    <Activity className="w-3 h-3 text-sol-purple" /> Macro Risk Regime
+                  </span>
+                  {macroData?.regime && (
+                    <span className={cn(
+                      "text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full border",
+                      macroData.regime === "RISK-ON" ? "bg-sol-green/10 text-sol-green border-sol-green/30"
+                        : macroData.regime === "RISK-OFF" ? "bg-red-500/10 text-red-400 border-red-500/30"
+                        : "bg-bg-input text-text-dim border-border-dim"
+                    )}>
+                      {macroData.regime}
+                    </span>
+                  )}
+                </div>
+                {macroData?.regimeNote && (
+                  <p className="text-[11px] text-text-dim italic leading-relaxed">{macroData.regimeNote}</p>
+                )}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {(macroData?.indicators || []).map((ind: any) => {
+                    const up = (ind.changePercent ?? 0) > 0;
+                    const down = (ind.changePercent ?? 0) < 0;
+                    return (
+                      <div key={ind.key} className="p-4 bg-bg-card border border-border-dim rounded-lg space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-text-heading flex items-center gap-1.5">
+                            {ind.key === "dxy" ? <DollarSign className="w-3 h-3 text-sol-purple" /> : <Activity className="w-3 h-3 text-sol-purple" />}
+                            {ind.short}
+                          </span>
+                          <span className={cn(
+                            "text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded",
+                            ind.cryptoImpact === "BULLISH" ? "bg-sol-green/10 text-sol-green"
+                              : ind.cryptoImpact === "BEARISH" ? "bg-red-500/10 text-red-400"
+                              : "bg-bg-input text-text-dim"
+                          )}>
+                            {ind.cryptoImpact === "BULLISH" ? "Crypto +" : ind.cryptoImpact === "BEARISH" ? "Crypto −" : "Neutral"}
+                          </span>
+                        </div>
+                        <div className="flex items-end justify-between">
+                          <span className="text-xl font-black tracking-tight text-text-heading">
+                            {ind.price !== null && ind.price !== undefined ? ind.price.toFixed(2) : "—"}{ind.unit}
+                          </span>
+                          {ind.changePercent !== null && ind.changePercent !== undefined && (
+                            <span className={cn(
+                              "text-[11px] font-bold flex items-center gap-0.5",
+                              up ? "text-sol-green" : down ? "text-red-400" : "text-text-dim"
+                            )}>
+                              {up ? <TrendingUp className="w-3 h-3" /> : down ? <TrendingDown className="w-3 h-3" /> : null}
+                              {up ? "+" : ""}{ind.changePercent.toFixed(2)}%
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[9px] text-text-dim/80 leading-snug">{ind.name}</p>
+                      </div>
+                    );
+                  })}
+                  {!macroLoading && (!macroData?.indicators || macroData.indicators.length === 0) && (
+                    <div className="col-span-full text-center text-[11px] text-text-dim py-4">Macro data unavailable right now.</div>
+                  )}
+                </div>
+              </section>
+
+              {/* Performance stats */}
+              {journalData?.stats && journalData.stats.total > 0 && (
+                <section className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                  {[
+                    { label: "Total Trades", value: journalData.stats.total, tone: "neutral" },
+                    { label: "Win Rate", value: `${journalData.stats.winRate.toFixed(1)}%`, tone: journalData.stats.winRate >= 50 ? "pos" : "neg" },
+                    { label: "Total PnL", value: `${journalData.stats.totalPnL >= 0 ? "+" : ""}${journalData.stats.totalPnL.toFixed(2)}%`, tone: journalData.stats.totalPnL >= 0 ? "pos" : "neg" },
+                    { label: "Avg PnL", value: `${journalData.stats.avgPnL >= 0 ? "+" : ""}${journalData.stats.avgPnL.toFixed(2)}%`, tone: journalData.stats.avgPnL >= 0 ? "pos" : "neg" },
+                    { label: "Best / Worst", value: `${journalData.stats.best ? (journalData.stats.best.pnl >= 0 ? "+" : "") + journalData.stats.best.pnl.toFixed(1) : "—"} / ${journalData.stats.worst ? journalData.stats.worst.pnl.toFixed(1) : "—"}%`, tone: "neutral" },
+                    { label: "Avg Duration", value: journalData.stats.avgDurationMins >= 60 ? `${Math.floor(journalData.stats.avgDurationMins / 60)}h ${journalData.stats.avgDurationMins % 60}m` : `${journalData.stats.avgDurationMins}m`, tone: "neutral" },
+                  ].map((s) => (
+                    <div key={s.label} className="p-3 bg-bg-card border border-border-dim rounded-lg">
+                      <span className="text-[8.5px] uppercase tracking-wider text-text-dim font-bold block mb-1">{s.label}</span>
+                      <span className={cn(
+                        "text-base font-black tracking-tight",
+                        s.tone === "pos" ? "text-sol-green" : s.tone === "neg" ? "text-red-400" : "text-text-heading"
+                      )}>{s.value}</span>
+                    </div>
+                  ))}
+                  <div className="col-span-2 sm:col-span-3 lg:col-span-6 flex gap-4 text-[10px] text-text-dim font-mono pt-1">
+                    <span>🟢 LONG: <span className="text-text-heading font-bold">{journalData.stats.longCount}</span></span>
+                    <span>🔴 SHORT: <span className="text-text-heading font-bold">{journalData.stats.shortCount}</span></span>
+                    <span>Wins: <span className="text-sol-green font-bold">{journalData.stats.wins}</span></span>
+                    <span>Losses: <span className="text-red-400 font-bold">{journalData.stats.losses}</span></span>
+                  </div>
+                </section>
+              )}
+
+              {/* Trade ledger */}
+              <section className="space-y-3">
+                <span className="text-[10px] font-mono font-bold text-text-heading uppercase tracking-[0.2em] flex items-center gap-2 border-b border-border-dim/60 pb-2">
+                  <Table className="w-3 h-3 text-sol-purple" /> Trade Ledger
+                </span>
+                {journalLoading ? (
+                  <div className="text-center text-[11px] text-text-dim py-10 flex items-center justify-center gap-2">
+                    <RefreshCw className="w-3 h-3 animate-spin" /> Loading journal…
+                  </div>
+                ) : (journalData?.trades || []).length === 0 ? (
+                  <div className="text-center text-[11px] text-text-dim py-10">
+                    No closed trades recorded yet. Positions appear here once the autonomous engines settle them.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {journalData.trades.map((trade: any) => {
+                      const durationStr = trade.durationMins !== null && trade.durationMins !== undefined
+                        ? (trade.durationMins >= 60 ? `${Math.floor(trade.durationMins / 60)}h ${trade.durationMins % 60}m` : `${trade.durationMins}m`)
+                        : "—";
+                      let exitStr = "";
+                      try { exitStr = trade.exitTime ? etFormat(new Date(trade.exitTime), "MMM d, HH:mm") : ""; } catch (e) {}
+                      return (
+                        <div key={trade.id} className="flex flex-col p-3 bg-bg-card border border-border-dim/60 rounded-lg text-[11px] space-y-2">
+                          <div className="flex justify-between items-center flex-wrap gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className={cn(
+                                "px-1.5 py-0.5 rounded text-[8px] font-bold uppercase text-white",
+                                trade.side === "LONG" ? "bg-sol-green" : trade.side === "SHORT" ? "bg-red-500" : "bg-text-dim"
+                              )}>
+                                {trade.side}{trade.leverage ? ` (${trade.leverage}x)` : ""}
+                              </span>
+                              <span className="text-[8.5px] uppercase tracking-wider text-text-dim font-bold px-1.5 py-0.5 rounded bg-bg-input border border-border-dim">{trade.source}</span>
+                              {exitStr && <span className="text-[9px] text-text-dim font-mono">{exitStr} {tzAbbr}</span>}
+                            </div>
+                            <span className={cn(
+                              "font-black tracking-tight text-sm",
+                              trade.pnl >= 0 ? "text-sol-green" : "text-red-500"
+                            )}>
+                              {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}%
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center text-[9.5px] text-text-dim border-t border-border-dim/15 pt-1.5 flex-wrap gap-x-4 gap-y-1">
+                            <span>${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)}</span>
+                            <span>Duration: <span className="text-text-heading font-semibold">{durationStr}</span></span>
+                            {trade.takeProfitPct !== undefined && (
+                              <span>TP <span className="text-sol-green font-semibold">+{Number(trade.takeProfitPct).toFixed(1)}%</span> · SL <span className="text-red-400 font-semibold">-{Number(trade.stopLossPct ?? 0).toFixed(1)}%</span></span>
+                            )}
+                            {trade.sentiment !== undefined && trade.sentiment !== null && (
+                              <span>Sentiment <span className="text-sol-purple font-semibold">{Number(trade.sentiment).toFixed(2)}</span></span>
+                            )}
+                            {trade.technicalScore !== undefined && trade.technicalScore !== null && (
+                              <span>Technical <span className="text-sol-purple font-semibold">{(trade.technicalScore >= 0 ? "+" : "") + Number(trade.technicalScore).toFixed(2)}</span></span>
+                            )}
+                          </div>
+                          {trade.news && trade.news.length > 0 && (
+                            <div className="text-left font-mono text-[8.5px] text-text-dim/85 border-t border-border-dim/10 pt-1.5 space-y-0.5">
+                              <span className="font-sans font-bold block text-[7.5px] uppercase tracking-wider text-text-dim mb-0.5">News catalysts at entry:</span>
+                              {trade.news.slice(0, 3).map((item: any, nIdx: number) => {
+                                const title = item && typeof item === "object" ? item.title : item;
+                                return (
+                                  <div key={nIdx} className="truncate font-serif text-[9px] text-text-heading/90" title={title}>
+                                    📰 {title}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
             </div>
           </main>
         ) : currentView === 'alerts' ? (

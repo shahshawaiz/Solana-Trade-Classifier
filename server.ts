@@ -438,6 +438,167 @@ app.get("/api/price", async (req, res) => {
   }
 });
 
+// --- Macro indicators -------------------------------------------------------
+// Three strong macro gauges that drive crypto / risk-asset regimes, pulled from
+// Yahoo Finance (yahoo-finance2). For each we tag how a *rising* reading tends to
+// affect crypto so the UI can paint the colour correctly:
+//   • US Dollar Index (DXY)  — DX-Y.NYB — strength of USD; rising = liquidity drain = bearish crypto
+//   • US 10Y Treasury Yield  — ^TNX     — risk-free rate; rising = tighter conditions = bearish crypto
+//   • Volatility Index (VIX) — ^VIX     — equity "fear gauge"; rising = risk-off = bearish crypto
+const MACRO_INDICATORS: Array<{ key: string; symbol: string; name: string; short: string; risingIsBullishForCrypto: boolean; decimals: number; unit: string; desc: string }> = [
+  { key: "dxy",  symbol: "DX-Y.NYB", name: "US Dollar Index", short: "DXY", risingIsBullishForCrypto: false, decimals: 2, unit: "",  desc: "Strength of the USD vs a basket of major currencies. A stronger dollar usually pulls liquidity out of risk assets." },
+  { key: "us10y", symbol: "^TNX",     name: "US 10Y Treasury Yield", short: "US10Y", risingIsBullishForCrypto: false, decimals: 2, unit: "%", desc: "The benchmark risk-free rate. Rising yields tighten financial conditions and weigh on long-duration / risk assets." },
+  { key: "vix",  symbol: "^VIX",     name: "Volatility Index", short: "VIX", risingIsBullishForCrypto: false, decimals: 2, unit: "", desc: "Equity market 'fear gauge'. Spikes signal risk-off sentiment that typically spills into crypto." },
+];
+
+app.get("/api/macro", async (_req, res) => {
+  try {
+    const cached = macroCache.get("macro");
+    if (cached && (Date.now() - cached.timestamp) < MACRO_CACHE_TTL_MS) {
+      return res.json(cached.data);
+    }
+
+    const indicators = await Promise.all(
+      MACRO_INDICATORS.map(async (cfg) => {
+        let price: number | null = null;
+        let change: number | null = null;
+        let changePercent: number | null = null;
+        try {
+          const q: any = await withTimeout(yf.quote(cfg.symbol, {}, { validateResult: false }), 8000, `yahoo:${cfg.symbol}`);
+          if (q && q.regularMarketPrice !== undefined && q.regularMarketPrice !== null) {
+            price = Number(q.regularMarketPrice);
+            change = q.regularMarketChange !== undefined && q.regularMarketChange !== null ? Number(q.regularMarketChange) : null;
+            changePercent = q.regularMarketChangePercent !== undefined && q.regularMarketChangePercent !== null ? Number(q.regularMarketChangePercent) : null;
+          }
+        } catch (e: any) {
+          console.warn(`[Macro] Failed to fetch ${cfg.symbol}:`, e.message);
+        }
+
+        // How this reading impacts crypto right now, given its direction.
+        let cryptoImpact: "BULLISH" | "BEARISH" | "NEUTRAL" = "NEUTRAL";
+        if (changePercent !== null && Math.abs(changePercent) >= 0.05) {
+          const rising = changePercent > 0;
+          cryptoImpact = (rising === cfg.risingIsBullishForCrypto) ? "BULLISH" : "BEARISH";
+        }
+
+        return {
+          key: cfg.key,
+          symbol: cfg.symbol,
+          name: cfg.name,
+          short: cfg.short,
+          unit: cfg.unit,
+          desc: cfg.desc,
+          price,
+          change,
+          changePercent,
+          cryptoImpact,
+        };
+      })
+    );
+
+    // Aggregate the three into a single risk-regime read for crypto.
+    const bullish = indicators.filter((i) => i.cryptoImpact === "BULLISH").length;
+    const bearish = indicators.filter((i) => i.cryptoImpact === "BEARISH").length;
+    let regime: "RISK-ON" | "RISK-OFF" | "NEUTRAL" = "NEUTRAL";
+    if (bullish - bearish >= 2) regime = "RISK-ON";
+    else if (bearish - bullish >= 2) regime = "RISK-OFF";
+
+    const regimeNote =
+      regime === "RISK-ON" ? "Macro tailwind for crypto — falling dollar / yields / volatility favour risk assets."
+      : regime === "RISK-OFF" ? "Macro headwind for crypto — rising dollar / yields / volatility pressure risk assets."
+      : "Mixed macro backdrop — no decisive risk-on / risk-off bias for crypto.";
+
+    const payload = {
+      indicators,
+      regime,
+      regimeNote,
+      updatedAt: new Date().toISOString(),
+    };
+    macroCache.set("macro", { timestamp: Date.now(), data: payload });
+    return res.json(payload);
+  } catch (error: any) {
+    return res.status(200).json({ indicators: [], regime: "NEUTRAL", regimeNote: "Macro data unavailable.", error: error?.message || "macro error" });
+  }
+});
+
+// --- Trade journal ----------------------------------------------------------
+// Consolidates the closed-trade history from both autonomous daemons (the shared
+// Telegram alert engine and the on-chain Jupiter auto-trader) into a single
+// reviewable journal, with aggregate performance analytics.
+app.get("/api/journal", async (_req, res) => {
+  try {
+    const sources: Array<{ source: string; trades: any[] }> = [];
+    try {
+      const tg = loadTelegramConfig();
+      sources.push({ source: "Alert Daemon", trades: tg.tradesHistory || [] });
+    } catch (e) {}
+    try {
+      const jup = loadJupiterConfig();
+      sources.push({ source: "Auto-Trade (Jupiter)", trades: jup.tradesHistory || [] });
+    } catch (e) {}
+
+    const trades = sources.flatMap(({ source, trades }) =>
+      (trades || []).map((t: any) => {
+        const durationMins = (t.entryTime && t.exitTime)
+          ? Math.max(0, Math.round((new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime()) / 60000))
+          : null;
+        return {
+          id: t.id,
+          source,
+          side: t.side,
+          entryPrice: t.entryPrice,
+          exitPrice: t.exitPrice,
+          pnl: typeof t.pnl === "number" ? t.pnl : 0,
+          entryTime: t.entryTime,
+          exitTime: t.exitTime,
+          durationMins,
+          takeProfitPct: t.takeProfitPct,
+          stopLossPct: t.stopLossPct,
+          leverage: t.leverage,
+          sizeInSol: t.sizeInSol,
+          sentiment: t.sentiment,
+          technicalScore: t.technicalScore,
+          news: t.news || [],
+        };
+      })
+    ).sort((a, b) => new Date(b.exitTime || 0).getTime() - new Date(a.exitTime || 0).getTime());
+
+    // Aggregate analytics.
+    const total = trades.length;
+    const wins = trades.filter((t) => t.pnl > 0);
+    const losses = trades.filter((t) => t.pnl < 0);
+    const totalPnL = trades.reduce((s, t) => s + (t.pnl || 0), 0);
+    const avgPnL = total ? totalPnL / total : 0;
+    const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
+    const avgLoss = losses.length ? losses.reduce((s, t) => s + t.pnl, 0) / losses.length : 0;
+    const durations = trades.map((t) => t.durationMins).filter((d): d is number => typeof d === "number");
+    const avgDurationMins = durations.length ? Math.round(durations.reduce((s, d) => s + d, 0) / durations.length) : 0;
+    const best = trades.reduce<any>((m, t) => (m === null || t.pnl > m.pnl ? t : m), null);
+    const worst = trades.reduce<any>((m, t) => (m === null || t.pnl < m.pnl ? t : m), null);
+
+    const stats = {
+      total,
+      wins: wins.length,
+      losses: losses.length,
+      winRate: total ? (wins.length / total) * 100 : 0,
+      totalPnL,
+      avgPnL,
+      avgWin,
+      avgLoss,
+      profitFactor: avgLoss !== 0 ? Math.abs((avgWin * wins.length) / (avgLoss * losses.length || 1)) : null,
+      avgDurationMins,
+      longCount: trades.filter((t) => t.side === "LONG").length,
+      shortCount: trades.filter((t) => t.side === "SHORT").length,
+      best: best ? { pnl: best.pnl, side: best.side, source: best.source, exitTime: best.exitTime } : null,
+      worst: worst ? { pnl: worst.pnl, side: worst.side, source: worst.source, exitTime: worst.exitTime } : null,
+    };
+
+    return res.json({ trades, stats, updatedAt: new Date().toISOString() });
+  } catch (error: any) {
+    return res.status(200).json({ trades: [], stats: null, error: error?.message || "journal error" });
+  }
+});
+
 async function fetchTelegramChannelFeed(channelUrl: string, token: string): Promise<any[]> {
   if (!channelUrl) return [];
 
@@ -897,6 +1058,9 @@ const NEWS_CACHE_TTL_MS = 15000; // Cache news feed for 15 seconds
 
 const predictCache = new Map<string, { timestamp: number; data: any }>();
 const PREDICT_CACHE_TTL_MS = 15000; // Cache AI predictions for 15 seconds
+
+const macroCache = new Map<string, { timestamp: number; data: any }>();
+const MACRO_CACHE_TTL_MS = 5 * 60 * 1000; // Cache macro indicators for 5 minutes (these move slowly + Yahoo is rate-limited)
 
 function heuristicSentiment(headline: string): number {
   if (!headline) return 0;
