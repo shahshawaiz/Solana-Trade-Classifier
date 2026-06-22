@@ -5888,6 +5888,9 @@ function resetStatsOnFreshDeploy() {
       j.tradesHistory = [];
       (j as any).consecutiveLosses = 0;
       j.activeTrade = null;
+      if (j.error && j.error.includes("Circuit breaker")) {
+        delete j.error;
+      }
       (j as any).deploymentId = deployId;
       saveJupiterConfig(j);
 
@@ -5897,6 +5900,9 @@ function resetStatsOnFreshDeploy() {
       t.tradesHistory = [];
       t.activeTrade = null;
       (t as any).auditLogs = [];
+      if (t.error && t.error.includes("Circuit breaker")) {
+        delete t.error;
+      }
       (t as any).deploymentId = deployId;
       saveTelegramConfig(t);
     }
