@@ -521,47 +521,98 @@ app.get("/api/macro", async (_req, res) => {
   }
 });
 
+// --- Persistent trade journal store -----------------------------------------
+// Both daemons cap their in-memory `tradesHistory` at 25 entries, so older trades
+// would otherwise scroll off forever. To RETAIN full history we mirror every
+// closed trade into an append-only journal file (deduped by source+id), persisted
+// to both tmpdir and the workspace root like the config files. The /api/journal
+// endpoint syncs the daemons' current tradesHistory into this store on every read,
+// so any close path (auto, manual override, cron tick) is captured.
+const JOURNAL_FILE = path.join(os.tmpdir(), "trade_journal.json");
+const JOURNAL_MAX = 5000; // hard backstop so the file can't grow without bound
+
+function loadJournalStore(): any[] {
+  const rootPath = path.join(process.cwd(), "trade_journal.json");
+  if (!fs.existsSync(JOURNAL_FILE) && fs.existsSync(rootPath)) {
+    try { fs.copyFileSync(rootPath, JOURNAL_FILE); } catch (e) {}
+  }
+  for (const p of [JOURNAL_FILE, rootPath]) {
+    try {
+      if (fs.existsSync(p)) {
+        const arr = JSON.parse(fs.readFileSync(p, "utf-8"));
+        if (Array.isArray(arr)) return arr;
+      }
+    } catch (e) {}
+  }
+  return [];
+}
+
+function saveJournalStore(entries: any[]) {
+  const rootPath = path.join(process.cwd(), "trade_journal.json");
+  const json = JSON.stringify(entries, null, 2);
+  try { fs.writeFileSync(JOURNAL_FILE, json, "utf-8"); } catch (e) { console.error("Failed to save journal to tmp", e); }
+  try { fs.writeFileSync(rootPath, json, "utf-8"); } catch (e: any) { console.error("Failed to save journal to root:", e.message); }
+}
+
+// Merge the daemons' capped tradesHistory into the persistent store. Returns the
+// full retained history (deduped by source+id), most-recent first.
+function syncJournalStore(incoming: Array<{ source: string; trade: any }>): any[] {
+  const store = loadJournalStore();
+  const seen = new Set(store.map((e: any) => `${e.source}:${e.id}`));
+  let changed = false;
+  for (const { source, trade } of incoming) {
+    if (!trade || !trade.id) continue;
+    const key = `${source}:${trade.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    store.push({ ...trade, source });
+    changed = true;
+  }
+  // oldest-first so trimming drops the oldest beyond the backstop
+  store.sort((a: any, b: any) => new Date(a.exitTime || 0).getTime() - new Date(b.exitTime || 0).getTime());
+  const trimmed = store.length > JOURNAL_MAX ? store.slice(store.length - JOURNAL_MAX) : store;
+  if (changed || trimmed.length !== store.length) saveJournalStore(trimmed);
+  return trimmed;
+}
+
 // --- Trade journal ----------------------------------------------------------
-// Consolidates the closed-trade history from both autonomous daemons (the shared
-// Telegram alert engine and the on-chain Jupiter auto-trader) into a single
-// reviewable journal, with aggregate performance analytics.
+// Returns the full retained closed-trade history from both autonomous daemons
+// (the shared Telegram alert engine and the on-chain Jupiter auto-trader),
+// consolidated with aggregate performance analytics.
 app.get("/api/journal", async (_req, res) => {
   try {
-    const sources: Array<{ source: string; trades: any[] }> = [];
+    const incoming: Array<{ source: string; trade: any }> = [];
     try {
       const tg = loadTelegramConfig();
-      sources.push({ source: "Alert Daemon", trades: tg.tradesHistory || [] });
+      (tg.tradesHistory || []).forEach((t: any) => incoming.push({ source: "Alert Daemon", trade: t }));
     } catch (e) {}
     try {
       const jup = loadJupiterConfig();
-      sources.push({ source: "Auto-Trade (Jupiter)", trades: jup.tradesHistory || [] });
+      (jup.tradesHistory || []).forEach((t: any) => incoming.push({ source: "Auto-Trade (Jupiter)", trade: t }));
     } catch (e) {}
 
-    const trades = sources.flatMap(({ source, trades }) =>
-      (trades || []).map((t: any) => {
-        const durationMins = (t.entryTime && t.exitTime)
-          ? Math.max(0, Math.round((new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime()) / 60000))
-          : null;
-        return {
-          id: t.id,
-          source,
-          side: t.side,
-          entryPrice: t.entryPrice,
-          exitPrice: t.exitPrice,
-          pnl: typeof t.pnl === "number" ? t.pnl : 0,
-          entryTime: t.entryTime,
-          exitTime: t.exitTime,
-          durationMins,
-          takeProfitPct: t.takeProfitPct,
-          stopLossPct: t.stopLossPct,
-          leverage: t.leverage,
-          sizeInSol: t.sizeInSol,
-          sentiment: t.sentiment,
-          technicalScore: t.technicalScore,
-          news: t.news || [],
-        };
-      })
-    ).sort((a, b) => new Date(b.exitTime || 0).getTime() - new Date(a.exitTime || 0).getTime());
+    const stored = syncJournalStore(incoming);
+
+    const trades = stored.map((t: any) => {
+      const durationMins = (t.entryTime && t.exitTime)
+        ? Math.max(0, Math.round((new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime()) / 60000))
+        : null;
+      return {
+        id: t.id,
+        source: t.source,
+        side: t.side,
+        entryPrice: t.entryPrice,
+        exitPrice: t.exitPrice,
+        pnl: typeof t.pnl === "number" ? t.pnl : 0,
+        entryTime: t.entryTime,
+        exitTime: t.exitTime,
+        durationMins,
+        takeProfitPct: t.takeProfitPct,
+        stopLossPct: t.stopLossPct,
+        leverage: t.leverage,
+        sizeInSol: t.sizeInSol,
+      };
+    }).sort((a, b) => new Date(b.exitTime || 0).getTime() - new Date(a.exitTime || 0).getTime());
 
     // Aggregate analytics.
     const total = trades.length;

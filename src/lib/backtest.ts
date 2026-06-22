@@ -63,7 +63,11 @@ export function runBacktest(
   tradeSize: number = 1.0,
   maxPositionSize: number = 1.0,
   takeProfitPct: number = 4.0,
-  stopLossPct: number = 2.0
+  stopLossPct: number = 2.0,
+  // Optional macro-regime overlay, one entry per bar ("RISK-ON" | "RISK-OFF" | "NEUTRAL").
+  // When supplied, counter-macro entries are suppressed: no new LONGs while RISK-OFF,
+  // no new SHORTs while RISK-ON. Omit (undefined) for the original macro-agnostic behaviour.
+  macroRegime?: Array<"RISK-ON" | "RISK-OFF" | "NEUTRAL">
 ): BacktestResult {
   let marketCum = 1;
   let strategyCum = 1;
@@ -258,9 +262,15 @@ export function runBacktest(
         signal = 2; // Force close short
       }
 
-      if (pSide === "LONG" && isTrendConfirmed3x && signal === 0 && lastExecutedTrend !== "LONG") {
+      // Macro regime gate: skip counter-macro entries. A risk-off backdrop
+      // (rising dollar / yields / volatility) blocks new longs; risk-on blocks new shorts.
+      const macroNow = macroRegime ? macroRegime[i] : undefined;
+      const macroAllowsLong = macroNow !== "RISK-OFF";
+      const macroAllowsShort = macroNow !== "RISK-ON";
+
+      if (pSide === "LONG" && isTrendConfirmed3x && signal === 0 && lastExecutedTrend !== "LONG" && macroAllowsLong) {
         signal = 1; // LONG BUY
-      } else if (pSide === "SHORT" && isTrendConfirmed3x && signal === 0 && lastExecutedTrend !== "SHORT") {
+      } else if (pSide === "SHORT" && isTrendConfirmed3x && signal === 0 && lastExecutedTrend !== "SHORT" && macroAllowsShort) {
         signal = -1; // SHORT SELL
       }
       

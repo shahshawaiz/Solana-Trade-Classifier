@@ -720,21 +720,20 @@ export default function App() {
   const downloadJournalCSV = () => {
     const trades = journalData?.trades || [];
     if (!trades.length) return;
-    const header = ["Source", "Side", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "PnL %", "Duration (min)", "TP %", "SL %", "Leverage", "Sentiment", "Technical"];
+    const header = ["Source", "Side", "Leverage", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Realized PnL %", "Size (SOL)", "TP %", "SL %", "Duration (min)"];
     const rows = trades.map((t: any) => [
       t.source ?? "",
       t.side ?? "",
+      t.leverage ?? "",
       t.entryTime ?? "",
       t.exitTime ?? "",
       t.entryPrice ?? "",
       t.exitPrice ?? "",
       typeof t.pnl === "number" ? t.pnl.toFixed(2) : "",
-      t.durationMins ?? "",
+      t.sizeInSol ?? "",
       t.takeProfitPct ?? "",
       t.stopLossPct ?? "",
-      t.leverage ?? "",
-      t.sentiment !== undefined ? t.sentiment : "",
-      t.technicalScore !== undefined ? t.technicalScore : "",
+      t.durationMins ?? "",
     ]);
     const csv = [header, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -5514,30 +5513,14 @@ export default function App() {
                           </div>
                           <div className="flex justify-between items-center text-[9.5px] text-text-dim border-t border-border-dim/15 pt-1.5 flex-wrap gap-x-4 gap-y-1">
                             <span>${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)}</span>
+                            {trade.sizeInSol !== undefined && trade.sizeInSol !== null && (
+                              <span>Size: <span className="text-text-heading font-semibold">{Number(trade.sizeInSol).toFixed(3)} SOL</span></span>
+                            )}
                             <span>Duration: <span className="text-text-heading font-semibold">{durationStr}</span></span>
                             {trade.takeProfitPct !== undefined && (
                               <span>TP <span className="text-sol-green font-semibold">+{Number(trade.takeProfitPct).toFixed(1)}%</span> · SL <span className="text-red-400 font-semibold">-{Number(trade.stopLossPct ?? 0).toFixed(1)}%</span></span>
                             )}
-                            {trade.sentiment !== undefined && trade.sentiment !== null && (
-                              <span>Sentiment <span className="text-sol-purple font-semibold">{Number(trade.sentiment).toFixed(2)}</span></span>
-                            )}
-                            {trade.technicalScore !== undefined && trade.technicalScore !== null && (
-                              <span>Technical <span className="text-sol-purple font-semibold">{(trade.technicalScore >= 0 ? "+" : "") + Number(trade.technicalScore).toFixed(2)}</span></span>
-                            )}
                           </div>
-                          {trade.news && trade.news.length > 0 && (
-                            <div className="text-left font-mono text-[8.5px] text-text-dim/85 border-t border-border-dim/10 pt-1.5 space-y-0.5">
-                              <span className="font-sans font-bold block text-[7.5px] uppercase tracking-wider text-text-dim mb-0.5">News catalysts at entry:</span>
-                              {trade.news.slice(0, 3).map((item: any, nIdx: number) => {
-                                const title = item && typeof item === "object" ? item.title : item;
-                                return (
-                                  <div key={nIdx} className="truncate font-serif text-[9px] text-text-heading/90" title={title}>
-                                    📰 {title}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
                         </div>
                       );
                     })}

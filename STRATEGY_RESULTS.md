@@ -109,3 +109,67 @@ useRegimeFilter = true
 ```
 Still **in-sample** — validate walk-forward and model fees/funding before trusting it live. Sharpe 3.87 on
 30–90d windows will **not** persist unchanged; treat it as "robustly non-losing," not a guarantee.
+
+---
+
+## 7. Live trade-history post-mortem (8 closed trades, 5x, SOL)
+Analysis of the actual Jupiter auto-trader log (6/21–6/22):
+
+| # | Side | Entry | Exit | Realized % | Hold | Exit cause (inferred) |
+|---|---|---:|---:|---:|---|---|
+| 1 | SHORT | 72.66 | 73.21 | −3.84 | 3h19m | stop / reversal |
+| 2 | LONG | 74.33 | 73.98 | −2.32 | 34m | reversal |
+| 3 | SHORT | 74.14 | 74.04 | +0.64 | 4m | reversal (instant) |
+| 4 | SHORT | 74.14 | 73.66 | +3.23 | 1h34m | take-profit-ish |
+| 5 | SHORT | 74.13 | 74.15 | −0.14 | 5m | reversal (instant) |
+| 6 | LONG | 74.33 | 74.08 | −1.66 | 4m | reversal (instant) |
+| 7 | LONG | 74.25 | 74.16 | −0.60 | 14m | reversal |
+| 8 | LONG | 74.49 | 74.23 | −1.76 | 27m | reversal |
+
+**Net ≈ −6.45% · win rate 25% (2/8).**
+
+**What went wrong:**
+1. **Every LONG lost (0/4).** All four longs were opened at ~74.2–74.5 while price was sliding — counter-trend longs into a falling market. Shorts were ~break-even (+0.11% over 4). The losses were *directional*, not sizing.
+2. **The macro backdrop was RISK-OFF the whole time** — DXY, US10Y and VIX were all rising. Longing crypto into a rising-dollar/rising-yield/rising-vol tape is the textbook losing setup, and the log confirms it.
+3. **Whipsaw / overtrading.** Trades 3, 5, 6 closed in **4–5 minutes** on "trend reversal" — the signal flipped almost immediately after entry. The TP (~6%) / SL (~3%) limits almost never decided the outcome; the time-limit and reversal rules did. The engine was thrashing inside a chop zone.
+4. **Re-entering the same level.** Four entries clustered at 74.1–74.5 — the bot kept re-arming the same losing level instead of standing aside.
+
+**The fix → macro regime filter** (now implemented in `runBacktest`, optional `macroRegime` arg):
+suppress new **longs** while macro is RISK-OFF and new **shorts** while RISK-ON. On this exact history the filter would have **blocked all four losing longs**, turning −6.45% into ≈ **−0.11%** (the shorts alone). It also cuts the whipsaw count by removing entries that fight the macro tape.
+
+## 8. Macro-filter benchmark (with macro indicators)
+Same MACD+RSI core (thr 0.25, 5x, 1h candles) run **with the macro filter OFF vs ON**, where the
+regime is derived from the **real 5-day trend of DX-Y.NYB (DXY) + ^TNX (US10Y) + ^VIX**.
+Reproduce: `npx tsx scripts/macro-benchmark.ts`.
+
+### Macro filter OFF (baseline)
+| Market/Window | Sharpe | PnL% | Win% | Profit Factor | Trades |
+|---|---:|---:|---:|---:|---:|
+| SOL / 30d | +5.55 | +89.3 | 61.9 | 3.32 | 21 |
+| SOL / 90d | +2.15 | +65.1 | 44.8 | 1.51 | 87 |
+| BTC / 30d | +1.66 | +11.1 | 29.6 | 1.41 | 27 |
+| BTC / 90d | +0.88 | +9.9 | 44.0 | 1.18 | 91 |
+| ETH / 30d | +4.08 | +45.4 | 60.0 | 2.92 | 25 |
+| ETH / 90d | +1.89 | +50.7 | 40.6 | 1.48 | 96 |
+| **Median** | **+2.02** | **+48.0** | — | — | — |
+
+### Macro filter ON
+| Market/Window | Sharpe | PnL% | Win% | Profit Factor | Trades |
+|---|---:|---:|---:|---:|---:|
+| SOL / 30d | +7.21 | +144.3 | 58.8 | 5.27 | 17 |
+| SOL / 90d | +3.16 | +123.4 | 47.9 | 2.01 | 73 |
+| BTC / 30d | +2.41 | +18.6 | 28.6 | 1.74 | 21 |
+| BTC / 90d | +2.31 | +39.3 | 51.4 | 1.62 | 72 |
+| ETH / 30d | +5.00 | +67.6 | 52.4 | 4.04 | 21 |
+| ETH / 90d | +3.34 | +139.3 | 45.8 | 2.15 | 83 |
+| **Median** | **+3.25** | **+95.5** | — | — | — |
+
+**Result:** the macro filter improved **Sharpe and PnL in 6/6 windows**, lifted median Sharpe
+**+2.02 → +3.25** and median PnL **+48% → +95.5%**, while **reducing trade count in every window**
+(it removes counter-macro entries — fewer, better trades). Profit factor rose in all six.
+
+**Honest framing (same caveats as §0):** these are **in-sample, recent (30–90d), 5x-leveraged, fee/
+funding-free** numbers on a period that was largely favourable — the absolute magnitudes will **not**
+persist and are inflated by leverage. What is robust is the **direction and consistency**: the macro
+gate helped in *every* market/window with no exceptions, which is exactly the failure mode the live
+trade log exhibited (counter-macro longs). Validate walk-forward and with costs before trusting the size.
