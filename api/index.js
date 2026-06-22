@@ -1,6 +1,6 @@
 var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
   get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
-}) : x)(function(x) {
+}) : x)(function (x) {
   if (typeof require !== "undefined") return require.apply(this, arguments);
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
@@ -3142,7 +3142,7 @@ async function checkJupiterTradingAndState(forceTrigger = false) {
         console.log(`[Jupiter Daemon] Trade entry suppressed because market direction is SIDEWAYS.`);
         config.error = "Trade entry suppressed: Market direction is sideways.";
       }
-      const maxConsecLosses = config.maxConsecutiveLosses ?? 4;
+      const maxConsecLosses = config.maxConsecutiveLosses ?? 8;
       if (canEnter && maxConsecLosses > 0 && (config.consecutiveLosses || 0) >= maxConsecLosses) {
         canEnter = false;
         config.error = `Circuit breaker active: ${config.consecutiveLosses} consecutive losses (limit ${maxConsecLosses}). New entries paused; reset consecutiveLosses to resume.`;
@@ -3550,7 +3550,7 @@ app.post("/api/backtest", async (req, res) => {
     let lastSentDirection = "HOLD";
     const startIndex = Math.min(26, Math.floor(closes.length / 3));
     for (let i = startIndex; i < closes.length; i++) {
-      let getTickSignal = function(tickIdx) {
+      let getTickSignal = function (tickIdx) {
         if (tickIdx < 0) {
           return {
             positionSide: "HOLD",
