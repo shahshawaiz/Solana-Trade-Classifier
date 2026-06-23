@@ -12,6 +12,7 @@ import {
   RefreshCw,
   Zap,
   Bell,
+  BellOff,
   Send,
   Check,
   AlertTriangle,
@@ -59,18 +60,26 @@ function cn(...inputs: ClassValue[]) {
 
 const Card = ({ children, className, title, icon: Icon, action, overflowVisible }: any) => (
   <div className={cn(
-    "bg-bg-card border border-border-dim rounded-lg flex flex-col shadow-sm", 
+    "bg-bg-card border border-border-dim rounded-lg flex flex-col shadow-sm relative group hover:border-sol-purple/40 transition-colors duration-300", 
     overflowVisible ? "" : "overflow-hidden",
     className
   )}>
+    {/* Cockpit corner joint overlays */}
+    <div className="absolute top-0 left-0 w-2 h-2 border-t-2 border-l-2 border-sol-purple/30 pointer-events-none group-hover:border-sol-purple/80 transition-colors" />
+    <div className="absolute top-0 right-0 w-2 h-2 border-t-2 border-r-2 border-sol-purple/30 pointer-events-none group-hover:border-sol-purple/80 transition-colors" />
+    <div className="absolute bottom-0 left-0 w-2 h-2 border-b-2 border-l-2 border-sol-purple/30 pointer-events-none group-hover:border-sol-purple/80 transition-colors" />
+    <div className="absolute bottom-0 right-0 w-2 h-2 border-b-2 border-r-2 border-sol-purple/30 pointer-events-none group-hover:border-sol-purple/80 transition-colors" />
+
     {(title || Icon || action) && (
-      <div className="px-5 py-3.5 border-b border-border-dim flex items-center justify-between bg-bg-main/50 shrink-0">
+      <div className="px-5 py-3.5 border-b border-border-dim flex items-center justify-between bg-bg-main/50 shrink-0 relative">
+        <div className="absolute bottom-0 left-0 w-full h-[1px] bg-gradient-to-r from-sol-purple/40 via-transparent to-transparent" />
         <div className="flex items-center gap-2">
-          <span className="text-[10px] uppercase tracking-[0.15em] font-extrabold text-text-heading">{title}</span>
+          <span className="w-1.5 h-1.5 rounded-full bg-sol-purple animate-pulse shrink-0" />
+          <span className="text-[10px] uppercase tracking-[0.2em] font-black text-text-heading font-mono">{title}</span>
         </div>
         <div className="flex items-center gap-2.5">
           {action && <div className="flex items-center shrink-0">{action}</div>}
-          {Icon && <Icon className="w-3.5 h-3.5 text-sol-purple opacity-70" />}
+          {Icon && <Icon className="w-3.5 h-3.5 text-sol-purple animate-pulse" style={{ animationDuration: '3s' }} />}
         </div>
       </div>
     )}
@@ -81,23 +90,34 @@ const Card = ({ children, className, title, icon: Icon, action, overflowVisible 
 );
 
 const Stat = ({ label, value, subValue, trend }: any) => (
-  <div className="bg-bg-card p-5 rounded-lg border border-border-dim shadow-sm">
-    <p className="text-[10px] uppercase tracking-widest text-text-dim mb-2">{label}</p>
+  <div className="bg-bg-card p-5 rounded-lg border border-border-dim shadow-sm relative group hover:border-sol-green/40 transition-colors duration-300">
+    <div className="absolute top-0 left-0 w-1.5 h-1.5 border-t border-l border-sol-green/30 pointer-events-none group-hover:border-sol-green/80 transition-colors" />
+    <div className="absolute bottom-0 right-0 w-1.5 h-1.5 border-b border-r border-sol-green/30 pointer-events-none group-hover:border-sol-green/80 transition-colors" />
+
+    <p className="text-[10px] uppercase tracking-widest text-text-dim mb-2 flex items-center gap-1 font-mono">
+      <span className="w-1 h-1 bg-sol-green rounded-full shrink-0" />
+      {label}
+    </p>
     <div className="flex items-baseline gap-2">
       <span className={cn(
-        "text-3xl font-serif font-medium",
+        "text-3xl font-mono tracking-tight font-black",
         trend !== undefined ? (trend > 0 ? "text-sol-green" : trend < 0 ? "text-red-500" : "text-text-heading") : "text-text-heading"
       )}>{value}</span>
       {trend !== undefined && (
         <span className={cn(
-          "text-[10px] font-mono",
-          trend > 0 ? "text-sol-green" : "text-red-500"
+          "text-[9px] font-mono px-1 py-0.5 rounded border",
+          trend > 0 ? "bg-sol-green/10 border-sol-green/20 text-sol-green" : "bg-red-500/10 border-red-500/20 text-red-400"
         )}>
-          {trend > 0 ? "↑" : "↓"}{Math.abs(trend).toFixed(1)}%
+          {trend > 0 ? "▲" : "▼"}{Math.abs(trend).toFixed(1)}%
         </span>
       )}
     </div>
-    {subValue && <p className="text-[9px] text-text-dim mt-2 uppercase tracking-[0.1em]">{subValue}</p>}
+    {subValue && (
+      <div className="flex items-center gap-1.5 mt-2">
+        <span className="text-[7px] text-sol-green font-mono bg-sol-green/10 border border-sol-green/20 px-1 rounded">SYS_OK</span>
+        <p className="text-[9px] text-text-dim uppercase tracking-[0.1em] font-mono">{subValue}</p>
+      </div>
+    )}
   </div>
 );
 
@@ -1440,9 +1460,20 @@ export default function App() {
   // The auto-trader (Jupiter) and the alert engine (Telegram) each persist a reasoning trail in
   // their config (auditLogs), polled above every 15s. Merge them newest-first for the footer panel.
   const [showAuditPanel, setShowAuditPanel] = useState(false);
+  const [toastsEnabled, setToastsEnabled] = useState<boolean>(() => {
+    const saved = localStorage.getItem("cortex_toasts_enabled");
+    return saved !== "false";
+  });
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: string; source: string }>>([]);
   const seenAuditIdsRef = useRef<Set<string>>(new Set());
   const auditInitializedRef = useRef(false);
+
+  useEffect(() => {
+    localStorage.setItem("cortex_toasts_enabled", toastsEnabled ? "true" : "false");
+    if (!toastsEnabled) {
+      setToasts([]);
+    }
+  }, [toastsEnabled]);
 
   const mergedAuditLogs = useMemo(() => {
     const j = ((jupiterConfig?.auditLogs as any[]) || []).map((e: any) => ({ ...e, source: "Auto-Trade" }));
@@ -1461,12 +1492,13 @@ export default function App() {
     const fresh = mergedAuditLogs.filter((e) => e.id && !seenAuditIdsRef.current.has(e.id));
     if (fresh.length === 0) return;
     fresh.forEach((e) => seenAuditIdsRef.current.add(e.id));
+    if (!toastsEnabled) return;
     const toAdd = fresh.slice(0, 4); // newest-first; avoid spamming if many land at once
     setToasts((prev) => [...toAdd, ...prev].slice(0, 5));
     toAdd.forEach((e) => {
       window.setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== e.id)), 8000);
     });
-  }, [mergedAuditLogs]);
+  }, [mergedAuditLogs, toastsEnabled]);
 
   // Visual style per audit entry type (and infer win/loss tint from the message text).
   const auditTone = (e: { type: string; message: string }) => {
@@ -2153,7 +2185,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-bg-main text-text-body font-sans flex flex-col">
+    <div className="min-h-screen bg-bg-main text-text-body font-sans flex flex-col sci-fi-scanlines">
       {/* Header */}
       <header className="h-16 border-b border-border-dim bg-bg-card flex items-center justify-between px-8 shrink-0 shadow-sm relative z-50">
         <div className="flex items-center gap-4">
@@ -2162,10 +2194,10 @@ export default function App() {
             <div className="w-2.5 h-2.5 bg-sol-green rounded-full" />
           </div>
           <div className="flex flex-col">
-            <h1 className="text-sm font-black uppercase tracking-[.3em] text-text-heading flex items-center gap-2">
-              {token === 'SOL' ? 'Solana' : token} Quant Alpha <span className="text-[9px] font-mono text-sol-purple bg-sol-purple/10 px-1 py-0.5 rounded border border-sol-purple/20">V2.0</span>
+            <h1 className="text-sm font-black uppercase tracking-[.3em] text-text-heading flex items-center gap-2 font-mono">
+              🚀 {token === 'SOL' ? 'Solana' : token} Quantum Bias Cockpit <span className="text-[9px] font-mono text-sol-purple bg-sol-purple/10 px-1 py-0.5 rounded border border-sol-purple/20 animate-pulse">V2.0</span>
             </h1>
-            <p className="text-[9px] text-text-dim uppercase tracking-widest font-medium">Multimodal Sentiment & Quantitative Arbitrage</p>
+            <p className="text-[9px] text-text-dim uppercase tracking-widest font-bold font-mono">🛰️ ORBITAL RADAR & MULTIMODAL PROPULSION CONTROLS</p>
           </div>
         </div>
 
@@ -2183,6 +2215,19 @@ export default function App() {
             </div>
           )}
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => setToastsEnabled((prev) => !prev)}
+              className={cn(
+                "flex items-center gap-1.5 px-2.5 py-1 rounded border text-[9px] uppercase font-mono tracking-wider transition-all",
+                toastsEnabled 
+                  ? "bg-sol-purple/10 border-sol-purple/35 text-sol-purple hover:bg-sol-purple/20" 
+                  : "bg-bg-input border-border-dim text-text-dim hover:text-text-heading hover:bg-border-dim/20"
+              )}
+              title={toastsEnabled ? "Mute toast notifications" : "Unmute toast notifications"}
+            >
+              {toastsEnabled ? <Bell className="w-3 h-3 text-sol-purple" /> : <BellOff className="w-3 h-3 text-text-dim" />}
+              <span>{toastsEnabled ? "Toasts: On" : "Toasts: Off"}</span>
+            </button>
             {lastUpdated && (
               <span className="text-[10px] font-mono text-text-dim uppercase tracking-tight">Sync: {lastUpdated} {tzAbbr}</span>
             )}
@@ -2196,49 +2241,49 @@ export default function App() {
             onClick={() => setCurrentView('forecast')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'forecast' && "text-sol-purple")}
           >
-            Forecast Trend
+            🛰️ Sensor Radar
           </button>
           <button 
             onClick={() => setCurrentView('dashboard')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'dashboard' && "text-sol-purple")}
           >
-            Strategy backtesting
+            ⚙️ Simulator Deck
           </button>
           <button 
             onClick={() => setCurrentView('liquidation')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'liquidation' && "text-sol-purple")}
           >
-            Liquidation Map
+            💥 Collision Grid
           </button>
           <button 
             onClick={() => setCurrentView('alerts')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'alerts' && "text-sol-purple")}
           >
-            Alerts Hub
+            📡 Telemetry Comms
           </button>
           <button
             onClick={() => setCurrentView('jupiter')}
             className={cn("hover:text-sol-purple transition-colors", currentView === 'jupiter' && "text-sol-purple")}
           >
-            Automated Trading
+            🤖 Autopilot Drive
           </button>
           <button
             onClick={() => setCurrentView('journal')}
             className={cn("hover:text-sol-purple transition-colors", currentView === 'journal' && "text-sol-purple")}
           >
-            Trade Journal
+            📝 Log Book
           </button>
           <button 
             onClick={() => setCurrentView('apiDocs')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'apiDocs' && "text-sol-purple")}
           >
-            API Docs
+            📖 Comms Protocols
           </button>
           <button 
             onClick={() => setCurrentView('about')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'about' && "text-sol-purple")}
           >
-            About
+            🛸 Ship Specs
           </button>
         </div>
         <div className="hidden md:flex gap-6 text-[11px] uppercase tracking-[0.1em] text-text-dim font-mono bg-bg-input px-4 py-1.5 rounded-full border border-border-dim">
@@ -5379,6 +5424,29 @@ export default function App() {
                           </button>
                         </div>
 
+                        {/* Browser Toast Notifications Toggle */}
+                        <div className="flex items-center justify-between p-4 bg-bg-input rounded-lg border border-border-dim">
+                          <div className="space-y-0.5">
+                            <label className="text-xs uppercase font-bold tracking-widest text-text-heading">Browser Toast Notifications</label>
+                            <p className="text-[10px] text-text-dim leading-normal">
+                              Show temporary toast notifications at the top-right of the dashboard when a new audit log is registered.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setToastsEnabled((prev) => !prev)}
+                            className={cn(
+                              "w-12 h-6 rounded-full p-1 transition-colors duration-200 focus:outline-none",
+                              toastsEnabled ? "bg-sol-green" : "bg-bg-main border border-border-dim"
+                            )}
+                          >
+                            <div className={cn(
+                              "w-4 h-4 rounded-full bg-white transition-transform duration-200 shadow",
+                              toastsEnabled ? "translate-x-6" : "translate-x-0"
+                            )} />
+                          </button>
+                        </div>
+
                         {/* Credentials secrets banner */}
                         <div className="p-4 bg-bg-input rounded-lg border border-border-dim space-y-3">
                           <div className="flex items-center gap-2">
@@ -6357,25 +6425,65 @@ export default function App() {
       </div>
 
       {/* "What just happened" toasts — fire on every new audit entry (PAPER or REAL trading). */}
-      <div className="fixed top-20 right-4 z-[120] flex flex-col gap-2 w-[22rem] max-w-[90vw] pointer-events-none">
-        {toasts.map((t) => (
-          <div
-            key={t.id}
-            className={cn(
-              "pointer-events-auto bg-bg-card/95 backdrop-blur border border-border-dim border-l-2 rounded-lg shadow-xl px-3 py-2 text-[11px] leading-snug flex items-start gap-2",
-              toneClasses[auditTone(t)]
-            )}
-          >
-            <Bell className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-            <div className="flex-1 min-w-0">
-              <div className="text-[8px] uppercase tracking-widest opacity-70 font-mono mb-0.5">{t.source} · {t.type}</div>
-              <div className="text-text-body break-words">{t.message}</div>
-            </div>
-            <button onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))} className="opacity-50 hover:opacity-100 shrink-0">
-              <X className="w-3 h-3" />
-            </button>
-          </div>
-        ))}
+      <div className="fixed top-20 right-4 z-[120] flex flex-col gap-2.5 w-[23rem] max-w-[90vw] pointer-events-none">
+        <AnimatePresence>
+          {toasts.map((t) => {
+            // Compute deterministic telemetry parameters for cockpit vibes
+            let sum = 0;
+            for (let i = 0; i < t.id.length; i++) sum += t.id.charCodeAt(i);
+            const warp = ((sum % 20) / 100 + 0.85).toFixed(2);
+            const shields = 100 - (sum % 10);
+            const sector = `SEC-${(sum % 90) + 10}`;
+
+            return (
+              <motion.div
+                key={t.id}
+                initial={{ x: 350, opacity: 0, scale: 0.9, rotate: 1.5 }}
+                animate={{ x: 0, opacity: 1, scale: 1, rotate: 0 }}
+                exit={{ x: 350, opacity: 0, scale: 0.85, rotate: -1.5 }}
+                transition={{ type: "spring", stiffness: 220, damping: 18 }}
+                className={cn(
+                  "pointer-events-auto bg-bg-card/95 backdrop-blur-md border border-border-dim border-l-4 rounded-md shadow-2xl p-3.5 flex flex-col gap-2 relative overflow-hidden group hover:border-sol-purple/60 transition-colors",
+                  toneClasses[auditTone(t)]
+                )}
+              >
+                {/* Tech scanline glare animation */}
+                <div className="absolute inset-0 bg-gradient-to-b from-transparent via-white/5 to-transparent -translate-y-full group-hover:translate-y-full transition-transform duration-1000 ease-out pointer-events-none" />
+                
+                {/* Space cockpit joints */}
+                <div className="absolute top-0 left-0 w-1.5 h-1.5 border-t border-l border-current opacity-30" />
+                <div className="absolute top-0 right-0 w-1.5 h-1.5 border-t border-r border-current opacity-30" />
+
+                <div className="flex items-start gap-2.5">
+                  <div className="p-1.5 bg-bg-input rounded border border-border-dim/40 shrink-0">
+                    <span className="w-2 h-2 rounded-full bg-current block animate-pulse shrink-0" />
+                  </div>
+                  
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[8px] uppercase tracking-[0.2em] opacity-80 font-mono mb-1 font-bold">
+                      📡 COMMS DECK // {t.source} // {sector}
+                    </div>
+                    <div className="text-text-body font-mono text-[11px] break-words leading-relaxed">{t.message}</div>
+                  </div>
+                  
+                  <button 
+                    onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))} 
+                    className="opacity-50 hover:opacity-100 hover:text-red-400 shrink-0 transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {/* Telemetry data readings */}
+                <div className="flex items-center justify-between text-[7px] text-text-dim/60 font-mono mt-1 pt-1.5 border-t border-border-dim/20">
+                  <span className="flex items-center gap-1">🛸 WARP: <strong className="text-text-body">{warp}c</strong></span>
+                  <span className="flex items-center gap-1">🛡️ SHIELD: <strong className="text-text-body">{shields}%</strong></span>
+                  <span className="flex items-center gap-1">⚡ SIG_PWR: <strong className="text-sol-green">MAX</strong></span>
+                </div>
+              </motion.div>
+            );
+          })}
+        </AnimatePresence>
       </div>
 
       {/* Slide-up audit log panel, toggled from the footer. */}
@@ -6410,31 +6518,32 @@ export default function App() {
         </div>
       )}
 
-      <footer className="h-10 bg-white border-t border-border-dim flex px-8 items-center justify-between text-[9px] text-text-dim uppercase tracking-[0.2em] shrink-0 font-mono">
+      <footer className="h-10 bg-bg-card border-t border-border-dim flex px-8 items-center justify-between text-[9px] text-text-dim uppercase tracking-[0.2em] shrink-0 font-mono relative">
+        <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-sol-purple/20 to-transparent" />
         <div className="flex items-center gap-6 min-w-0">
-          <span className="hidden lg:inline shrink-0">Quantum Alpha Engineering © 2026</span>
+          <span className="hidden lg:inline shrink-0">🌌 HULL STATUS: NOMINAL // DEEP SPACE EXPLORER © 2026</span>
           <button
             onClick={() => setShowAuditPanel((v) => !v)}
             className="flex items-center gap-2 hover:text-text-heading transition-colors normal-case tracking-normal min-w-0"
             title="Toggle the live strategy audit log"
           >
             <Terminal className="w-3 h-3 text-sol-purple shrink-0" />
-            <span className="font-bold shrink-0">Audit Log</span>
+            <span className="font-bold shrink-0 uppercase tracking-widest text-[9px]">Telemetry Log</span>
             {mergedAuditLogs.length > 0 && (
               <span className="bg-sol-purple/20 text-sol-purple px-1.5 rounded-full text-[8px] shrink-0">{mergedAuditLogs.length}</span>
             )}
-            <span className="hidden md:inline text-text-dim truncate max-w-[26rem] lowercase">
+            <span className="hidden md:inline text-text-dim truncate max-w-[26rem] lowercase font-mono">
               {mergedAuditLogs[0]?.message || "no activity yet"}
             </span>
             <ChevronUp className={cn("w-3 h-3 transition-transform shrink-0", showAuditPanel && "rotate-180")} />
           </button>
         </div>
         <div className="flex gap-12 items-center shrink-0">
-          <div className="flex items-center gap-1.5 overflow-hidden">
+          <div className="flex items-center gap-1.5 overflow-hidden text-sol-green font-bold">
             <span className="w-1.5 h-1.5 rounded-full bg-sol-green animate-ping" />
-            LIVE_LINK_ACTIVE
+            🛰️ BEACON_ACTIVE
           </div>
-          <span className="hidden md:inline">API: NEWSAPI.ORG</span>
+          <span className="hidden md:inline">📡 SENSORS: NEWSAPI</span>
         </div>
       </footer>
     </div>
