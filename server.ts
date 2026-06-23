@@ -3852,7 +3852,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
 
       // Risk circuit breaker: after N consecutive losing trades, pause NEW entries (exits still
       // work) until the streak resets. Set maxConsecutiveLosses to 0 to disable.
-      const maxConsecLosses = (config as any).maxConsecutiveLosses ?? 4;
+      const maxConsecLosses = (config as any).maxConsecutiveLosses ?? 8;
       // Auto-reset the streak once the cooldown window (6 hours) elapses since the last loss.
       const CONSEC_LOSS_RESET_MS = 6 * 60 * 60 * 1000;
       const lastLossAt = (config as any).consecutiveLossesUpdatedAt || 0;
@@ -5441,6 +5441,15 @@ app.get("/api/jupiter-config", async (req, res) => {
     const config = loadJupiterConfig();
     // Proactively delete any stale balance or execution errors if they are in PAPER mode, to keep the dashboard clean
     if (config.tradingMode === "PAPER" && config.error) {
+      delete config.error;
+      saveJupiterConfig(config);
+    }
+    // The circuit breaker is only "active" while consecutiveLosses >= the limit. If the streak
+    // is below the limit (e.g. after a reset, a win, or the 6h auto-reset), any lingering
+    // "Circuit breaker" error string is stale — clear it so the dashboard reflects reality.
+    const maxConsecLosses = (config as any).maxConsecutiveLosses ?? 8;
+    if (config.error && String(config.error).includes("Circuit breaker") &&
+        ((config as any).consecutiveLosses || 0) < maxConsecLosses) {
       delete config.error;
       saveJupiterConfig(config);
     }
