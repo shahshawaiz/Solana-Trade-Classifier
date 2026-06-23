@@ -3663,6 +3663,12 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
 
         // Track consecutive losing trades for the risk circuit breaker (win resets the streak).
         (config as any).consecutiveLosses = currentPnlPercent < 0 ? (((config as any).consecutiveLosses || 0) + 1) : 0;
+        // Stamp the time of the latest loss so the breaker can auto-reset after the cooldown window.
+        if (currentPnlPercent < 0) {
+          (config as any).consecutiveLossesUpdatedAt = Date.now();
+        } else {
+          delete (config as any).consecutiveLossesUpdatedAt;
+        }
 
         const closedId = Math.random().toString(36).substring(2, 9);
         const exitTimeStr = new Date().toISOString();
@@ -3788,11 +3794,20 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       }
 
       // Risk circuit breaker: after N consecutive losing trades, pause NEW entries (exits still
-      // work) until the streak is manually reset. Set maxConsecutiveLosses to 0 to disable.
-      const maxConsecLosses = (config as any).maxConsecutiveLosses ?? 8;
+      // work) until the streak resets. Set maxConsecutiveLosses to 0 to disable.
+      const maxConsecLosses = (config as any).maxConsecutiveLosses ?? 4;
+      // Auto-reset the streak once the cooldown window (6 hours) elapses since the last loss.
+      const CONSEC_LOSS_RESET_MS = 6 * 60 * 60 * 1000;
+      const lastLossAt = (config as any).consecutiveLossesUpdatedAt || 0;
+      if (((config as any).consecutiveLosses || 0) > 0 && lastLossAt && (Date.now() - lastLossAt) >= CONSEC_LOSS_RESET_MS) {
+        (config as any).consecutiveLosses = 0;
+        delete (config as any).consecutiveLossesUpdatedAt;
+        if (config.error && config.error.includes("Circuit breaker")) delete config.error;
+        console.log(`[Jupiter Daemon] Circuit breaker auto-reset: 6h elapsed since last loss. consecutiveLosses cleared.`);
+      }
       if (canEnter && maxConsecLosses > 0 && (((config as any).consecutiveLosses || 0) >= maxConsecLosses)) {
         canEnter = false;
-        config.error = `Circuit breaker active: ${(config as any).consecutiveLosses} consecutive losses (limit ${maxConsecLosses}). New entries paused; reset consecutiveLosses to resume.`;
+        config.error = `Circuit breaker active: ${(config as any).consecutiveLosses} consecutive losses (limit ${maxConsecLosses}). New entries paused; auto-resets 6h after the last loss, or reset consecutiveLosses to resume now.`;
         console.log(`[Jupiter Daemon] ${config.error}`);
       }
 
@@ -5426,6 +5441,7 @@ app.post("/api/jupiter-config", async (req, res) => {
     if (!triggerAutoTrade && !forceOpen && !forceClose) {
       if (current.error && current.error.includes("Circuit breaker")) {
         (current as any).consecutiveLosses = 0;
+        delete (current as any).consecutiveLossesUpdatedAt;
       }
       delete current.error;
     }
@@ -5532,6 +5548,7 @@ app.post("/api/jupiter-config", async (req, res) => {
       current.tradesHistory = [];
       current.lastTradeAddedAt = "";
       (current as any).consecutiveLosses = 0;
+      delete (current as any).consecutiveLossesUpdatedAt;
       if (current.error && current.error.includes("Circuit breaker")) {
         delete current.error;
       }
@@ -5539,6 +5556,7 @@ app.post("/api/jupiter-config", async (req, res) => {
 
     if (resetConsecutiveLosses) {
       (current as any).consecutiveLosses = 0;
+      delete (current as any).consecutiveLossesUpdatedAt;
       if (current.error && current.error.includes("Circuit breaker")) {
         delete current.error;
       }
@@ -5887,6 +5905,7 @@ function resetStatsOnFreshDeploy() {
       j.lastTradePnL = 0;
       j.tradesHistory = [];
       (j as any).consecutiveLosses = 0;
+      delete (j as any).consecutiveLossesUpdatedAt;
       j.activeTrade = null;
       if (j.error && j.error.includes("Circuit breaker")) {
         delete j.error;

@@ -1564,39 +1564,6 @@ export default function App() {
     }
   };
 
-  const handleSimulateConnectWallet = async () => {
-    setJupLoading(true);
-    setJupStatusMsg(null);
-    try {
-      const demoPubKey = "4CppKXhEj4agKwfsPWGMzxffgXg84sA4qGa72UafuuYx";
-      const res = await fetch("/api/jupiter-config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          walletAddress: demoPubKey,
-        })
-      });
-
-      if (res.ok) {
-        setJupStatusMsg({
-          type: "success",
-          text: `Simulated Demo Wallet successfully linked: ${demoPubKey.substring(0, 6)}...${demoPubKey.substring(demoPubKey.length - 4)}`
-        });
-        fetchJupiterConfig();
-      } else {
-        const errData = await safeJson(res);
-        throw new Error(errData.error || "Failed to notify backend of simulated linking");
-      }
-    } catch (err: any) {
-      setJupStatusMsg({
-        type: "err",
-        text: err.message || "Simulated Wallet connection failed."
-      });
-    } finally {
-      setJupLoading(false);
-    }
-  };
-
   const handleSaveJupiterConfig = async (e: React.FormEvent) => {
     e.preventDefault();
     setJupLoading(true);
@@ -3427,7 +3394,7 @@ export default function App() {
                   <Card title="Solana Adapter Configuration" icon={Wallet}>
                     <div className="space-y-6">
                       <p className="text-xs text-text-dim leading-relaxed">
-                        Authorize automated trade execution. You can connect your live Phantom Wallet, enter any public Solana address manually to run simulations/Paper Trading, or add your Private Key to enable automated server-side mainnet trading.
+                        Authorize automated trade execution by connecting your Phantom Wallet. This is the only supported connection method.
                       </p>
 
                       {/* Unified Current Wallet Status Bar */}
@@ -3473,16 +3440,16 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Option 1: Live Web Wallet Connection (Phantom extension) */}
+                      {/* Connect Phantom Wallet (only supported method) */}
                       <div className="p-4 bg-bg-main rounded-xl border border-border-dim space-y-3">
                         <div className="flex items-center gap-2">
-                          <div className="w-5 h-5 rounded-full bg-sol-purple/20 flex items-center justify-center text-sol-purple text-[10px] font-black">1</div>
-                          <h4 className="text-xs font-black uppercase text-text-heading font-sans">Method 1: Connect Browser Extension (Web UI)</h4>
+                          <div className="w-5 h-5 rounded-full bg-sol-purple/20 flex items-center justify-center text-sol-purple text-[10px] font-black">⚡</div>
+                          <h4 className="text-xs font-black uppercase text-text-heading font-sans">Connect Phantom Wallet</h4>
                         </div>
                         <p className="text-[10px] text-text-dim leading-relaxed">
-                          Connect your browser Phantom/Solflare wallet extension. Extension wallets require manual transaction signatures.
+                          Connect your browser Phantom wallet extension to authorize automated trade execution.
                         </p>
-                        
+
                         <div className="flex flex-wrap items-center justify-start gap-2 pt-1">
                           <button
                             type="button"
@@ -3493,15 +3460,6 @@ export default function App() {
                             <span className="font-extrabold font-sans">⚡ Connect Phantom Wallet</span>
                           </button>
 
-                          <button
-                            type="button"
-                            onClick={handleSimulateConnectWallet}
-                            disabled={jupLoading}
-                            className="inline-flex items-center gap-2 px-4 py-2.5 bg-sol-green/20 hover:bg-sol-green/35 border border-sol-green/30 text-sol-green text-[10px] font-black uppercase tracking-widest rounded-lg transition-all active:scale-95 cursor-pointer"
-                          >
-                            <span className="font-extrabold font-sans">🧪 Link Demo Wallet</span>
-                          </button>
-                          
                           <a
                             href={window.location.origin}
                             target="_blank"
@@ -3512,114 +3470,8 @@ export default function App() {
                           </a>
                         </div>
                         <p className="text-[9px] text-yellow-500/80 max-w-xl leading-relaxed italic pt-1">
-                          ⚠️ Sandbox Notice: Phantom and other extension wallets cannot inject or authorize trades inside the workspace preview iframe. Open the app in a new tab first to link your browser wallet.
+                          ⚠️ Sandbox Notice: Phantom cannot inject or authorize trades inside the workspace preview iframe. Open the app in a new tab first to link your browser wallet.
                         </p>
-                      </div>
-
-                      {/* Option 2: Secure Server Private Key (Automated Execution) */}
-                      <div className="p-4 bg-bg-main rounded-xl border border-border-dim space-y-3">
-                        <div className="flex items-center gap-2">
-                          <div className="w-5 h-5 rounded-full bg-sol-green/20 flex items-center justify-center text-sol-green text-[10px] font-black">2</div>
-                          <h4 className="text-xs font-black uppercase text-text-heading font-sans">Method 2: Secure Server Private Key (Fully Automated)</h4>
-                        </div>
-                        <p className="text-[10px] text-text-dim leading-relaxed">
-                          Enter your actual Base58 Solana private key to run fully automated mainnet positions. Our server daemon will safely sign and execute trades on-chain securely on the backend.
-                        </p>
-                        
-                        <div className="flex flex-col sm:flex-row gap-2">
-                          <input 
-                            type="password" 
-                            value={pkInput}
-                            title="Private Key (Base58)"
-                            onChange={(e) => setPkInput(e.target.value)}
-                            className="flex-1 bg-bg-input border border-border-dim rounded-lg p-2.5 text-xs text-text-heading font-mono focus:border-sol-purple outline-none"
-                            placeholder="Base58 Private Key (derived automatically)" 
-                          />
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              setJupLoading(true);
-                              setJupStatusMsg(null);
-                              try {
-                                const res = await fetch("/api/jupiter-config", {
-                                  method: "POST",
-                                  headers: { "Content-Type": "application/json" },
-                                  body: JSON.stringify({ privateKey: pkInput })
-                                });
-                                if (res.ok) {
-                                  setJupStatusMsg({
-                                    type: "success",
-                                    text: "Successfully saved actual server private key and auto-derived wallet address!"
-                                  });
-                                  fetchJupiterConfig();
-                                } else {
-                                  const data = await safeJson(res);
-                                  throw new Error(data.error || "Failed to update private key");
-                                }
-                              } catch (err: any) {
-                                setJupStatusMsg({ type: "err", text: err.message });
-                              } finally {
-                                setJupLoading(false);
-                              }
-                            }}
-                            className="px-5 py-2.5 bg-sol-green/20 hover:bg-sol-green/30 text-sol-green font-mono border border-sol-green/20 text-[10px] font-bold uppercase tracking-wide rounded-lg cursor-pointer transition-all active:scale-95"
-                          >
-                            Save Private Key
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Option 3: Manual Solana Wallet Address (Simulation / Paper / Read-Only Tracker) */}
-                      <div className="p-4 bg-bg-main rounded-xl border border-border-dim space-y-3">
-                        <div className="flex items-center gap-2">
-                          <div className="w-5 h-5 rounded-full bg-sol-purple/20 flex items-center justify-center text-sol-purple text-[10px] font-black">3</div>
-                          <h4 className="text-xs font-black uppercase text-text-heading font-sans">Method 3: Paste Solana Wallet Address (Simulation / Read-Only)</h4>
-                        </div>
-                        <p className="text-[10px] text-text-dim leading-relaxed">
-                          Simply paste your actual Solana public address manually to track live balances and run simulated Paper Trading without configuration of keys.
-                        </p>
-                        
-                        <div className="flex flex-col sm:flex-row gap-2">
-                          <input 
-                            type="text" 
-                            value={addressInput}
-                            title="Solana Wallet Address"
-                            onChange={(e) => setAddressInput(e.target.value.trim())}
-                            className="flex-1 bg-bg-input border border-border-dim rounded-lg p-2.5 text-xs text-text-heading font-mono focus:border-sol-purple outline-none"
-                            placeholder="Paste your Solana Wallet Address (e.g. DmtrAQtd...)" 
-                          />
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              setJupLoading(true);
-                              setJupStatusMsg(null);
-                              try {
-                                const res = await fetch("/api/jupiter-config", {
-                                  method: "POST",
-                                  headers: { "Content-Type": "application/json" },
-                                  body: JSON.stringify({ walletAddress: addressInput })
-                                });
-                                if (res.ok) {
-                                  setJupStatusMsg({
-                                    type: "success",
-                                    text: "Successfully saved manual Solana wallet address!"
-                                  });
-                                  fetchJupiterConfig();
-                                } else {
-                                  const data = await safeJson(res);
-                                  throw new Error(data.error || "Failed to update wallet address");
-                                }
-                              } catch (err: any) {
-                                setJupStatusMsg({ type: "err", text: err.message });
-                              } finally {
-                                setJupLoading(false);
-                              }
-                            }}
-                            className="px-5 py-2.5 bg-sol-purple/20 hover:bg-sol-purple/30 text-sol-purple font-mono border border-sol-purple/20 text-[10px] font-bold uppercase tracking-wide rounded-lg cursor-pointer transition-all active:scale-95"
-                          >
-                            Save Address
-                          </button>
-                        </div>
                       </div>
 
                       {/* Custom RPC URL Section */}
@@ -6462,7 +6314,7 @@ export default function App() {
                         <li><strong className="text-text-heading">Same-tick reversal re-entry.</strong> A direction flip now closes and opens the opposite position on the same tick.</li>
                         <li><strong className="text-text-heading">Real news only.</strong> All synthetic/LLM-fabricated "Telegram posts" and hardcoded sample signals were deleted. With no real headlines, sentiment is neutral (0) — never fabricated.</li>
                         <li><strong className="text-text-heading">Telegram news source fixed.</strong> Switched from an unreadable private invite link to a public, scrapeable channel; light relevance filtering keeps sentiment on-topic.</li>
-                        <li><strong className="text-text-heading">Risk circuit breaker.</strong> After <code>maxConsecutiveLosses</code> consecutive losing trades (default 8) new entries pause while exits still work; a win resets the streak. Set to 0 to disable.</li>
+                        <li><strong className="text-text-heading">Risk circuit breaker.</strong> After <code>maxConsecutiveLosses</code> consecutive losing trades (default 4) new entries pause while exits still work; a win resets the streak. The streak also auto-resets 6 hours after the last loss, or instantly when you click reset. Set to 0 to disable.</li>
                         <li><strong className="text-text-heading">Real perps execution.</strong> Automated on-chain trades now route through the official Jupiter CLI (<code>jup perps open/close</code>) — actual leveraged positions, not spot swaps or memos. Defaults to PAPER mode; failed opens roll back (no phantom positions).</li>
                       </ul>
                     </div>
