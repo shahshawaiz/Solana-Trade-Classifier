@@ -1,12 +1,12 @@
-import React, { useState, useEffect, useMemo } from "react";
-import { 
-  TrendingUp, 
-  TrendingDown, 
-  Settings, 
-  Newspaper, 
-  Activity, 
-  PieChart, 
-  ArrowUpRight, 
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import {
+  TrendingUp,
+  TrendingDown,
+  Settings,
+  Newspaper,
+  Activity,
+  PieChart,
+  ArrowUpRight,
   ArrowDownRight,
   Info,
   RefreshCw,
@@ -21,7 +21,10 @@ import {
   Coins,
   Download,
   Table,
-  BookOpen
+  BookOpen,
+  Terminal,
+  ChevronUp,
+  X
 } from "lucide-react";
 import { 
   LineChart, 
@@ -1432,6 +1435,60 @@ export default function App() {
       clearInterval(pollId);
     };
   }, []);
+
+  // ── Live audit log + "what just happened" notifications ──────────────────────────────────────
+  // The auto-trader (Jupiter) and the alert engine (Telegram) each persist a reasoning trail in
+  // their config (auditLogs), polled above every 15s. Merge them newest-first for the footer panel.
+  const [showAuditPanel, setShowAuditPanel] = useState(false);
+  const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: string; source: string }>>([]);
+  const seenAuditIdsRef = useRef<Set<string>>(new Set());
+  const auditInitializedRef = useRef(false);
+
+  const mergedAuditLogs = useMemo(() => {
+    const j = ((jupiterConfig?.auditLogs as any[]) || []).map((e: any) => ({ ...e, source: "Auto-Trade" }));
+    const t = ((telegramConfig?.auditLogs as any[]) || []).map((e: any) => ({ ...e, source: "Alert" }));
+    return [...j, ...t].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  }, [jupiterConfig?.auditLogs, telegramConfig?.auditLogs]);
+
+  // Pop a toast for any audit entry we haven't seen before (works for PAPER and REAL). The first
+  // poll only seeds the "seen" set so we don't blast a wall of toasts for pre-existing history.
+  useEffect(() => {
+    if (!auditInitializedRef.current) {
+      mergedAuditLogs.forEach((e) => seenAuditIdsRef.current.add(e.id));
+      auditInitializedRef.current = true;
+      return;
+    }
+    const fresh = mergedAuditLogs.filter((e) => e.id && !seenAuditIdsRef.current.has(e.id));
+    if (fresh.length === 0) return;
+    fresh.forEach((e) => seenAuditIdsRef.current.add(e.id));
+    const toAdd = fresh.slice(0, 4); // newest-first; avoid spamming if many land at once
+    setToasts((prev) => [...toAdd, ...prev].slice(0, 5));
+    toAdd.forEach((e) => {
+      window.setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== e.id)), 8000);
+    });
+  }, [mergedAuditLogs]);
+
+  // Visual style per audit entry type (and infer win/loss tint from the message text).
+  const auditTone = (e: { type: string; message: string }) => {
+    const m = e.message || "";
+    if (e.type === "trade") {
+      if (/CLOSE|Realized|banked/i.test(m)) {
+        return /(\+\d|banked \+|Realized \+)/i.test(m) ? "green" : (/-\d|Realized -/i.test(m) ? "red" : "purple");
+      }
+      return "purple"; // ENTER / open
+    }
+    if (e.type === "cooldown") return "amber";
+    if (e.type === "hold") return "dim";
+    return "sky"; // info
+  };
+  const toneClasses: Record<string, string> = {
+    green: "border-sol-green/40 text-sol-green",
+    red: "border-red-500/40 text-red-400",
+    purple: "border-sol-purple/40 text-sol-purple",
+    amber: "border-amber-500/40 text-amber-400",
+    sky: "border-sky-500/30 text-sky-300",
+    dim: "border-border-dim text-text-dim",
+  };
 
   const formatTimeLeft = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -6299,14 +6356,85 @@ export default function App() {
         )}
       </div>
 
+      {/* "What just happened" toasts — fire on every new audit entry (PAPER or REAL trading). */}
+      <div className="fixed top-20 right-4 z-[120] flex flex-col gap-2 w-[22rem] max-w-[90vw] pointer-events-none">
+        {toasts.map((t) => (
+          <div
+            key={t.id}
+            className={cn(
+              "pointer-events-auto bg-bg-card/95 backdrop-blur border border-border-dim border-l-2 rounded-lg shadow-xl px-3 py-2 text-[11px] leading-snug flex items-start gap-2",
+              toneClasses[auditTone(t)]
+            )}
+          >
+            <Bell className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-[8px] uppercase tracking-widest opacity-70 font-mono mb-0.5">{t.source} · {t.type}</div>
+              <div className="text-text-body break-words">{t.message}</div>
+            </div>
+            <button onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))} className="opacity-50 hover:opacity-100 shrink-0">
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Slide-up audit log panel, toggled from the footer. */}
+      {showAuditPanel && (
+        <div className="fixed bottom-10 left-0 right-0 z-[110] h-72 bg-bg-card border-t border-border-dim shadow-2xl flex flex-col">
+          <div className="flex items-center justify-between px-6 py-2 border-b border-border-dim shrink-0">
+            <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-text-heading">
+              <Terminal className="w-4 h-4 text-sol-purple" /> Live Strategy Audit Log
+              <span className="text-text-dim normal-case tracking-normal">
+                · {mergedAuditLogs.length} events · auto-trade {jupiterConfig?.tradingMode === "PAPER" ? "PAPER (simulated)" : "REAL"}
+              </span>
+            </div>
+            <button onClick={() => setShowAuditPanel(false)} className="text-text-dim hover:text-text-heading">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto custom-scrollbar px-6 py-3 space-y-1.5 font-mono text-[11px]">
+            {mergedAuditLogs.length === 0 ? (
+              <div className="text-text-dim text-center py-8">
+                No strategy activity yet. Every sync logs here — enter / stand-aside / hold / close, with the reason.
+              </div>
+            ) : (
+              mergedAuditLogs.map((e) => (
+                <div key={e.id} className={cn("flex items-start gap-3 border-l-2 pl-3 py-1", toneClasses[auditTone(e)])}>
+                  <span className="text-text-dim shrink-0 w-20">{new Date(e.timestamp).toLocaleTimeString()}</span>
+                  <span className="text-[8px] uppercase tracking-widest opacity-70 shrink-0 w-16 pt-0.5">{e.source}</span>
+                  <span className="text-text-body break-words flex-1">{e.message}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
       <footer className="h-10 bg-white border-t border-border-dim flex px-8 items-center justify-between text-[9px] text-text-dim uppercase tracking-[0.2em] shrink-0 font-mono">
-        <div>Quantum Alpha Engineering © 2026</div>
-        <div className="flex gap-12 items-center">
+        <div className="flex items-center gap-6 min-w-0">
+          <span className="hidden lg:inline shrink-0">Quantum Alpha Engineering © 2026</span>
+          <button
+            onClick={() => setShowAuditPanel((v) => !v)}
+            className="flex items-center gap-2 hover:text-text-heading transition-colors normal-case tracking-normal min-w-0"
+            title="Toggle the live strategy audit log"
+          >
+            <Terminal className="w-3 h-3 text-sol-purple shrink-0" />
+            <span className="font-bold shrink-0">Audit Log</span>
+            {mergedAuditLogs.length > 0 && (
+              <span className="bg-sol-purple/20 text-sol-purple px-1.5 rounded-full text-[8px] shrink-0">{mergedAuditLogs.length}</span>
+            )}
+            <span className="hidden md:inline text-text-dim truncate max-w-[26rem] lowercase">
+              {mergedAuditLogs[0]?.message || "no activity yet"}
+            </span>
+            <ChevronUp className={cn("w-3 h-3 transition-transform shrink-0", showAuditPanel && "rotate-180")} />
+          </button>
+        </div>
+        <div className="flex gap-12 items-center shrink-0">
           <div className="flex items-center gap-1.5 overflow-hidden">
             <span className="w-1.5 h-1.5 rounded-full bg-sol-green animate-ping" />
             LIVE_LINK_ACTIVE
           </div>
-          <span>API: NEWSAPI.ORG</span>
+          <span className="hidden md:inline">API: NEWSAPI.ORG</span>
         </div>
       </footer>
     </div>
