@@ -4,15 +4,14 @@ The Solana Trade Classifier exposes its **Cortex Alpha multi-factor strategy** o
 a small JSON HTTP API (Express, `server.ts`). The same engine powers the live
 signal and the historical backtest.
 
-- **Base URL (prod):** `https://solana-trade-bot.vercel.app`
+- **Base URL (prod):** `https://<your-app>.up.railway.app`
 - **Base URL (local):** `http://localhost:3000` (`npm run dev`)
 - **Content type:** `application/json` on every `POST`
 - **Up & running curl tests:** see [TESTING.md](./TESTING.md)
 
-> On Vercel the Express app runs as a serverless function (`api/index.ts`) and
-> the in-process daemons are disabled; background ticks are driven by Vercel Cron
-> hitting `GET /api/cron/tick`. The strategy endpoints below work identically in
-> both environments.
+> On Railway the Express app runs as a permanent always-on container: the HTTP API,
+> the built Vite UI, and the in-process 5-minute trading daemons all run in one
+> long-lived process (`npm run start:railway` → `node dist/server.cjs`).
 
 ## The strategy in one paragraph
 
@@ -45,9 +44,7 @@ returns one concise, decision-first **trade recommendation** for a token. Accept
 either `GET` (query string) or `POST` (JSON body).
 
 > Aliases that return the exact same payload: `POST /api/get-strategy-output`,
-> `GET /api/get-strategy-output`, `POST /api/strategy/signal`. On Vercel, only
-> `/api/*` is rewritten to the function — the bare `/get-strategy-output` is wired
-> up via an explicit rewrite in `vercel.json`, and the `/api/*` aliases always work.
+> `GET /api/get-strategy-output`, `POST /api/strategy/signal`.
 
 ### Request
 
@@ -61,10 +58,10 @@ either `GET` (query string) or `POST` (JSON body).
 
 ```bash
 # GET (query params)
-curl -s "https://solana-trade-bot.vercel.app/get-strategy-output?token=SOL&interval=15m"
+curl -s "https://<your-app>.up.railway.app/get-strategy-output?token=SOL&interval=15m"
 
 # POST (JSON body)
-curl -s https://solana-trade-bot.vercel.app/get-strategy-output \
+curl -s https://<your-app>.up.railway.app/get-strategy-output \
   -H 'content-type: application/json' \
   -d '{"token":"SOL","interval":"15m"}'
 ```
@@ -127,7 +124,7 @@ performance metrics (market vs strategy return, alpha).
 | `stopLossPct`    | number | `2.0`   | SL distance in %.                                    |
 
 ```bash
-curl -s https://solana-trade-bot.vercel.app/api/backtest \
+curl -s https://<your-app>.up.railway.app/api/backtest \
   -H 'content-type: application/json' \
   -d '{"token":"SOL","interval":"1h","lookbackDays":14}'
 ```
@@ -146,7 +143,6 @@ plus prediction-accuracy stats (error %, sMAPE). Requires ≥15 candles in range
 | `GET  /api/price`         | Latest price snapshot.                                             |
 | `GET  /api/historical`    | Historical OHLC candles (`token`, `interval`, date range).         |
 | `GET  /api/news`          | Recent market headlines.                                           |
-| `GET  /api/cron/tick`     | Daemon tick (used by Vercel Cron; safe to call manually).          |
 
 ## Consuming from Claude Code
 
@@ -155,7 +151,7 @@ wraps `/get-strategy-output` and `/api/backtest` as the `/signal` and
 `/backtest` commands. Point it at this API with:
 
 ```bash
-export CLASSIFIER_API_URL="https://solana-trade-bot.vercel.app"
+export CLASSIFIER_API_URL="https://<your-app>.up.railway.app"
 ```
 </content>
 </invoke>

@@ -11,5 +11,3 @@ dist
 test-trade
 *.log
 .DS_Store
-api/index.js
-vercel.json

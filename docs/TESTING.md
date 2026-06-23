@@ -2,7 +2,7 @@
 
 Quick checks to confirm the Cortex Alpha strategy API is alive and returning a
 trade recommendation. Works against either a local dev server or the deployed
-Vercel app. See [API.md](./API.md) for full field docs.
+Railway app. See [API.md](./API.md) for full field docs.
 
 ## 0. Pick a base URL
 
@@ -11,7 +11,7 @@ Vercel app. See [API.md](./API.md) for full field docs.
 export BASE=http://localhost:3000
 
 # OR deployed (prod)
-export BASE=https://solana-trade-bot.vercel.app
+export BASE=https://<your-app>.up.railway.app
 ```
 
 ## 1. Start the server (local only)
@@ -41,9 +41,8 @@ If this fails: the server isn't running / not reachable, or `$BASE` is wrong.
 curl -fsS "$BASE/get-strategy-output?token=SOL&interval=15m" | tee /tmp/strat.json
 ```
 
-> On the deployed app the bare `/get-strategy-output` is wired via a rewrite in
-> `vercel.json`. If you ever get a 404/405 on prod, use the always-safe alias:
-> `"$BASE/api/get-strategy-output?token=SOL&interval=15m"`.
+> Both the bare `/get-strategy-output` and the `/api/get-strategy-output` alias are
+> served directly by the Express app, so either path works on prod and local.
 
 ### POST (JSON body)
 
@@ -131,7 +130,7 @@ curl -fsS "$BASE/api/cron/tick"                        | head -c 200; echo   # d
 cd /path/to/plugins/classifier/vendor/classifier
 npm install && npm run build
 
-# Defaults to https://solana-trade-bot.vercel.app; override for local:
+# Defaults to https://<your-app>.up.railway.app; override for local:
 CLASSIFIER_API_URL="$BASE" node dist/cli.js signal SOL 1h
 CLASSIFIER_API_URL="$BASE" node dist/cli.js backtest SOL 1h 14
 node dist/cli.js config        # shows which base URL it will hit

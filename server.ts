@@ -234,8 +234,7 @@ try {
 
 
 // --- Resilient OHLC source ---
-// Yahoo Finance frequently hangs or is blocked from serverless/datacenter IPs (e.g. Vercel),
-// which kills the function with FUNCTION_INVOCATION_FAILED. We fetch crypto candles from
+// Yahoo Finance frequently hangs or is blocked from datacenter IPs. We fetch crypto candles from
 // CryptoCompare first (no cookies/crumb, works from any IP), with a *timed* Yahoo fallback so
 // a hang can never crash the function. Returns the same `{ quotes: [...] }` shape as yf.chart.
 function withTimeout<T>(p: Promise<T>, ms: number, label = "op"): Promise<T> {
@@ -4299,8 +4298,7 @@ const handleGetStrategyOutput = async (req: any, res: any) => {
 
 app.get("/get-strategy-output", handleGetStrategyOutput);
 app.post("/get-strategy-output", handleGetStrategyOutput);
-// /api/* aliases — on Vercel only /api/* is rewritten to the serverless function,
-// so these guarantee the recommendation is reachable in production too.
+// /api/* aliases so the recommendation is reachable under the /api prefix too.
 app.get("/api/get-strategy-output", handleGetStrategyOutput);
 app.post("/api/get-strategy-output", handleGetStrategyOutput);
 app.post("/api/strategy/signal", handleGetStrategyOutput);
@@ -5951,33 +5949,13 @@ app.post("/api/sentiment", async (req, res) => {
   }
 });
 
-// Cron-driven daemon tick for serverless hosts (Vercel) where setInterval can't run.
-// Vercel Cron calls this on a schedule; it runs ONE tick of each daemon. Protect with
-// the CRON_SECRET env var (Vercel automatically sends it as a Bearer token).
-app.get("/api/cron/tick", async (req, res) => {
-  if (process.env.CRON_SECRET && req.headers["authorization"] !== `Bearer ${process.env.CRON_SECRET}`) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  const ranAt = new Date().toISOString();
-  try {
-    await checkPredictionAndAlert().catch((e: any) => console.error("[Cron] alert tick failed:", e.message));
-    await checkJupiterTradingAndState().catch((e: any) => console.error("[Cron] jupiter tick failed:", e.message));
-    res.json({ ok: true, ranAt });
-  } catch (e: any) {
-    res.status(500).json({ ok: false, error: e.message, ranAt });
-  }
-});
-
 // On a fresh deployment, wipe accumulated trade stats so each deploy starts from zero.
 // Detected via the platform's per-deploy id (Railway sets RAILWAY_DEPLOYMENT_ID). The id is
 // stored in config; when it changes we reset once. Without a deploy id (e.g. local dev) we
 // preserve state. Set DEPLOYMENT_ID manually to force a reset on any host.
 function resetStatsOnFreshDeploy() {
-  const deployId = process.env.RAILWAY_DEPLOYMENT_ID || 
-                   process.env.RAILWAY_GIT_COMMIT_SHA || 
-                   process.env.VERCEL_DEPLOYMENT_ID || 
-                   process.env.VERCEL_GIT_COMMIT_SHA || 
-                   process.env.VERCEL_URL || 
+  const deployId = process.env.RAILWAY_DEPLOYMENT_ID ||
+                   process.env.RAILWAY_GIT_COMMIT_SHA ||
                    process.env.DEPLOYMENT_ID || "";
   if (!deployId) return;
   try {
@@ -6058,16 +6036,9 @@ async function startServer() {
   });
 }
 
-// On Vercel the app runs as a serverless function (api/index.ts) — we must NOT call
-// app.listen() or start setInterval daemons there. Background ticks are driven by
-// Vercel Cron hitting /api/cron/tick instead. Locally / on Railway, run normally.
-const isVercel = !!process.env.VERCEL;
+// Railway runs this as a permanent always-on container: start the HTTP server and the
+// long-lived setInterval trading daemons directly.
 if (process.env.NODE_ENV !== "test" && process.env.CORTEX_TESTING !== "true") {
   resetStatsOnFreshDeploy();
-  if (!isVercel) {
-    startServer();
-  }
+  startServer();
 }
-
-// Exported so Vercel's @vercel/node runtime can use the Express app as a handler.
-export default app;
