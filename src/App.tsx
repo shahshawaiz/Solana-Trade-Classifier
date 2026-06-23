@@ -1519,51 +1519,6 @@ export default function App() {
   };
 
   // Jupiter Wallet & Auto Execution Handlers
-  const handleConnectWallet = async () => {
-    setJupLoading(true);
-    setJupStatusMsg(null);
-    try {
-      const solana = (window as any).phantom?.solana || (window as any).solana;
-
-      if (!solana) {
-        throw new Error("Phantom Wallet extension not detected! Extensions do not inject into iframes. Please open the app in a new tab to link your browser wallet.");
-      }
-
-      const resp = await solana.connect();
-      const rawPubKey = (resp && resp.publicKey) || solana.publicKey;
-      if (!rawPubKey) {
-        throw new Error("Could not retrieve public key from connected wallet. Please unlock your Phantom Wallet and try again.");
-      }
-      const pubKey = typeof rawPubKey === 'string' ? rawPubKey : (typeof rawPubKey.toBase58 === 'function' ? rawPubKey.toBase58() : rawPubKey.toString());
-
-      const res = await fetch("/api/jupiter-config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          walletAddress: pubKey,
-        })
-      });
-
-      if (res.ok) {
-        setJupStatusMsg({
-          type: "success",
-          text: `Successfully linked Phantom wallet: ${pubKey.substring(0, 6)}...${pubKey.substring(pubKey.length - 4)}`
-        });
-        fetchJupiterConfig();
-      } else {
-        const errData = await safeJson(res);
-        throw new Error(errData.error || "Failed to notify backend of wallet linking");
-      }
-    } catch (err: any) {
-      setJupStatusMsg({
-        type: "err",
-        text: err.message || "Phantom Wallet connection failed."
-      });
-    } finally {
-      setJupLoading(false);
-    }
-  };
-
   const handleSaveJupiterConfig = async (e: React.FormEvent) => {
     e.preventDefault();
     setJupLoading(true);
@@ -1596,39 +1551,6 @@ export default function App() {
         fetchJupiterConfig();
       } else {
         throw new Error(data.error || "Failed to update configurations");
-      }
-    } catch (err: any) {
-      setJupStatusMsg({ type: "err", text: err.message });
-    } finally {
-      setJupLoading(false);
-    }
-  };
-
-  const handleDisconnectWallet = async () => {
-    setJupLoading(true);
-    setJupStatusMsg(null);
-    try {
-      // Trigger extension disconnect
-      try {
-        const solana = getConnectedWalletProvider();
-        if (solana && typeof solana.disconnect === "function") {
-          await solana.disconnect();
-        }
-      } catch (extErr) {
-        console.warn("Wallet extension disconnect warning:", extErr);
-      }
-
-      const res = await fetch("/api/jupiter-config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ disconnect: true })
-      });
-      if (res.ok) {
-        setJupStatusMsg({ type: "success", text: "Wallet disconnected successfully." });
-        fetchJupiterConfig();
-      } else {
-        const data = await safeJson(res);
-        throw new Error(data.error || "Failed to disconnect");
       }
     } catch (err: any) {
       setJupStatusMsg({ type: "err", text: err.message });
@@ -3394,84 +3316,32 @@ export default function App() {
                   <Card title="Solana Adapter Configuration" icon={Wallet}>
                     <div className="space-y-6">
                       <p className="text-xs text-text-dim leading-relaxed">
-                        Authorize automated trade execution by connecting your Phantom Wallet. This is the only supported connection method.
+                        The trading wallet is configured server-side from the <code className="text-sol-purple">JUP_PRIVATE_KEY</code> environment variable. No in-browser wallet connection is required — the daemon signs and executes automated trades on the backend.
                       </p>
 
-                      {/* Unified Current Wallet Status Bar */}
+                      {/* Server-Configured Wallet Status Bar (sourced from JUP_PRIVATE_KEY) */}
                       <div className="p-4 bg-bg-input rounded-xl border border-border-dim space-y-3.5">
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                           <div className="space-y-1">
                             <span className="text-[10px] font-mono text-text-dim uppercase tracking-wider block font-bold">
-                              Current Connected Wallet Address
+                              Server Trading Wallet Address
                             </span>
                             {jupiterConfig.walletAddress ? (
                               <div className="flex items-center gap-2 flex-wrap">
                                 <span className="text-sol-purple font-mono font-bold text-xs select-all bg-sol-purple/10 px-2 py-1 rounded-md border border-sol-purple/20">
                                   {jupiterConfig.walletAddress}
                                 </span>
-                                <span className={cn(
-                                  "text-[9px] font-bold uppercase px-2 py-0.5 rounded-full border",
-                                  jupiterConfig.privateKey && !jupiterConfig.privateKeyIsAutoGenerated
-                                    ? "bg-sol-green/10 border-sol-green/20 text-sol-green"
-                                    : "bg-sol-purple/10 border-sol-purple/20 text-sol-purple"
-                                )}>
-                                  {jupiterConfig.privateKey && !jupiterConfig.privateKeyIsAutoGenerated
-                                    ? "🔒 Automated Server Key"
-                                    : "👁️ Tracked / Web Wallet"}
+                                <span className="text-[9px] font-bold uppercase px-2 py-0.5 rounded-full border bg-sol-green/10 border-sol-green/20 text-sol-green">
+                                  🔒 Server Key (JUP_PRIVATE_KEY)
                                 </span>
                               </div>
                             ) : (
                               <span className="text-red-400 font-mono text-xs italic block font-bold">
-                                No Wallet Connected (Mainnet Idle)
+                                No wallet configured — set JUP_PRIVATE_KEY in the server environment.
                               </span>
                             )}
                           </div>
-
-                          {jupiterConfig.walletAddress && (
-                            <button
-                              type="button"
-                              onClick={handleDisconnectWallet}
-                              disabled={jupLoading}
-                              className="self-start sm:self-center px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 text-[10px] font-black uppercase tracking-wider rounded-lg transition-all active:scale-95 cursor-pointer"
-                            >
-                              Disconnect Wallet
-                            </button>
-                          )}
                         </div>
-                      </div>
-
-                      {/* Connect Phantom Wallet (only supported method) */}
-                      <div className="p-4 bg-bg-main rounded-xl border border-border-dim space-y-3">
-                        <div className="flex items-center gap-2">
-                          <div className="w-5 h-5 rounded-full bg-sol-purple/20 flex items-center justify-center text-sol-purple text-[10px] font-black">⚡</div>
-                          <h4 className="text-xs font-black uppercase text-text-heading font-sans">Connect Phantom Wallet</h4>
-                        </div>
-                        <p className="text-[10px] text-text-dim leading-relaxed">
-                          Connect your browser Phantom wallet extension to authorize automated trade execution.
-                        </p>
-
-                        <div className="flex flex-wrap items-center justify-start gap-2 pt-1">
-                          <button
-                            type="button"
-                            onClick={handleConnectWallet}
-                            disabled={jupLoading}
-                            className="inline-flex items-center gap-2 px-4 py-2.5 bg-sol-purple hover:bg-sol-purple/95 text-white text-[10px] font-black uppercase tracking-widest rounded-lg transition-all shadow-md active:scale-95 cursor-pointer"
-                          >
-                            <span className="font-extrabold font-sans">⚡ Connect Phantom Wallet</span>
-                          </button>
-
-                          <a
-                            href={window.location.origin}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-2 px-4 py-2.5 bg-bg-input hover:bg-bg-input/80 text-text-heading text-[10px] font-black uppercase tracking-widest rounded-lg border border-border-dim transition-all active:scale-95 cursor-pointer"
-                          >
-                            <span>🌐 Open App in New Tab ↗</span>
-                          </a>
-                        </div>
-                        <p className="text-[9px] text-yellow-500/80 max-w-xl leading-relaxed italic pt-1">
-                          ⚠️ Sandbox Notice: Phantom cannot inject or authorize trades inside the workspace preview iframe. Open the app in a new tab first to link your browser wallet.
-                        </p>
                       </div>
 
                       {/* Custom RPC URL Section */}
