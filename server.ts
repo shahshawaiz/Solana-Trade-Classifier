@@ -915,7 +915,7 @@ async function fetchTelegramChannelFeed(channelUrl: string, token: string): Prom
   }
 }
 
-export async function fetchMarketNews(token: string, topic: string, from?: string, to: Date = new Date()): Promise<any[]> {
+export async function fetchMarketNews(token: string, topic: string, from?: string, to: Date = new Date(), isAutoSync = false): Promise<any[]> {
   let articles: any[] = [];
   const seenTitles = new Set<string>();
 
@@ -1028,7 +1028,11 @@ export async function fetchMarketNews(token: string, topic: string, from?: strin
   // Fetch from the custom configured Telegram News Channel
   try {
     const telegramConfig = loadTelegramConfig();
-    if (telegramConfig.newsTelegramChannel) {
+    const jupiterConfig = loadJupiterConfig();
+    const strategyDisabled = !telegramConfig.enabled && !jupiterConfig.enabled;
+    if (isAutoSync && strategyDisabled) {
+      console.log("[fetchMarketNews] Skipping Telegram news fetch during auto-sync because strategy is disabled.");
+    } else if (telegramConfig.newsTelegramChannel) {
       fetchPromises.push((async () => {
         try {
           const telegramArticles = await fetchTelegramChannelFeed(telegramConfig.newsTelegramChannel, token);
@@ -1193,7 +1197,13 @@ app.get("/api/news", async (req, res) => {
     // Source 5: Telegram Live News Scraper
     try {
       const telegramConfig = loadTelegramConfig();
-      if (telegramConfig.newsTelegramChannel) {
+      const jupiterConfig = loadJupiterConfig();
+      const isAutoSync = req.query.autoSync === "true";
+      const strategyDisabled = !telegramConfig.enabled && !jupiterConfig.enabled;
+
+      if (isAutoSync && strategyDisabled) {
+        console.log("[/api/news] Skipping Telegram news fetch during auto-sync because strategy is disabled.");
+      } else if (telegramConfig.newsTelegramChannel) {
         fetchPromises.push((async () => {
           try {
             const telegramArticles = await fetchTelegramChannelFeed(telegramConfig.newsTelegramChannel, String(token));
@@ -1674,7 +1684,7 @@ export function getNewsAgeString(publishedAt: string): string {
   }
 }
 
-export async function getPredictionData(token: string, topic: string, weights: any, interval: string = "15m", newsQueryKeywords: string = "") {
+export async function getPredictionData(token: string, topic: string, weights: any, interval: string = "15m", newsQueryKeywords: string = "", isAutoSync: boolean = false) {
   const predictCacheKey = `${token.toUpperCase()}_${interval}_${topic.substring(0, 50)}_${newsQueryKeywords.substring(0, 50)}_${JSON.stringify(weights)}`;
   const cached = predictCache.get(predictCacheKey);
   if (cached && (Date.now() - cached.timestamp) < PREDICT_CACHE_TTL_MS) {
@@ -1705,11 +1715,11 @@ export async function getPredictionData(token: string, topic: string, weights: a
   
   // 2. News (Considering at least 5 news for sentiment score analysis as requested)
   const queryTopic = newsQueryKeywords && newsQueryKeywords.trim() !== "" ? newsQueryKeywords.trim() : (topic || token);
-  let articles = await fetchMarketNews(token, queryTopic);
+  let articles = await fetchMarketNews(token, queryTopic, undefined, undefined, isAutoSync);
 
   // Broaden query to ensure we fetch at least 5 search items if needed
   if (articles.length < 5) {
-    const fallbackArticles = await fetchMarketNews(token, "crypto");
+    const fallbackArticles = await fetchMarketNews(token, "crypto", undefined, undefined, isAutoSync);
     fallbackArticles.forEach((fa: any) => {
       if (!articles.some((a: any) => a.title.toLowerCase().trim() === fa.title.toLowerCase().trim())) {
         articles.push(fa);
@@ -4356,8 +4366,8 @@ function restartJupiterDaemon(minutes: number) {
 
 app.post("/api/predict", async (req, res) => {
   try {
-    const { token = "SOL", topic = "crypto,war", weights, interval = "15m" } = req.body;
-    const result = await getPredictionData(token, topic, weights, interval);
+    const { token = "SOL", topic = "crypto,war", weights, interval = "15m", isAutoSync = false } = req.body;
+    const result = await getPredictionData(token, topic, weights, interval, "", isAutoSync);
     res.json(result);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -4366,12 +4376,12 @@ app.post("/api/predict", async (req, res) => {
 
 app.post("/api/forecast", async (req, res) => {
   try {
-    const { token = "SOL", interval = "1h", weights, newsQueryKeywords = "" } = req.body;
+    const { token = "SOL", interval = "1h", weights, newsQueryKeywords = "", isAutoSync = false } = req.body;
     const topic = newsQueryKeywords && newsQueryKeywords.trim() !== "" 
       ? newsQueryKeywords.trim() 
       : `${token.toUpperCase()} OR Solana cryptocurrency OR Solana news`;
       
-    const result = await getPredictionData(token, topic, weights, interval, newsQueryKeywords);
+    const result = await getPredictionData(token, topic, weights, interval, newsQueryKeywords, isAutoSync);
     
     // getPredictionData now perfectly returns the exact combined payload for Forecast and Alerts!
     res.json(result);

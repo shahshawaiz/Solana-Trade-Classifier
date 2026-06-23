@@ -313,6 +313,14 @@ export default function App() {
   const [sentiment, setSentiment] = useState<any>({ score: 0, rationale: "", action: "", inputData: null });
   const [loading, setLoading] = useState(true);
   const [loadingStep, setLoadingStep] = useState<string>("");
+  const [toastsEnabled, setToastsEnabled] = useState<boolean>(() => {
+    const saved = localStorage.getItem("cortex_toasts_enabled");
+    return saved !== "false";
+  });
+  const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: string; source: string }>>([]);
+  const [localSyncLogs, setLocalSyncLogs] = useState<Array<{ id: string; timestamp: string; message: string; type: string; source: string }>>([]);
+  const seenAuditIdsRef = useRef<Set<string>>(new Set());
+  const auditInitializedRef = useRef(false);
   const [weights, setWeights] = useState<{
     sentiment: number;
     technical: number;
@@ -1434,10 +1442,35 @@ export default function App() {
     if (timeLeft === 0) {
       console.log("[Auto-Refresh Triggered] Synchronizing latest quantitative states...");
       setTimeLeft(syncInterval);
-      fetchData();
+
+      // Pop toast notification
+      if (toastsEnabled) {
+        const toastId = Math.random().toString(36).substring(2, 9);
+        const newToast = {
+          id: toastId,
+          source: "Telemetry",
+          type: "sync",
+          message: "🔄 Sync Cycle Triggered: Fetching latest market indicators, news sentiment index, and auto-trading logs."
+        };
+        setToasts((prev) => [newToast, ...prev].slice(0, 5));
+        window.setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== toastId)), 8000);
+      }
+
+      // Add local entry in the live audit log
+      const syncLogId = Math.random().toString(36).substring(2, 9);
+      const newSyncLog = {
+        id: syncLogId,
+        timestamp: new Date().toISOString(),
+        source: "Telemetry",
+        type: "info",
+        message: "🔄 Sync Interval Hit: Successfully synchronized latest market parameters, sentiment metrics, and automated portfolio states."
+      };
+      setLocalSyncLogs((prev) => [newSyncLog, ...prev]);
+
+      fetchData(true);
       fetchJupiterConfig();
     }
-  }, [timeLeft, syncInterval]);
+  }, [timeLeft, syncInterval, toastsEnabled]);
 
   // Sync Jupiter state rapidly (every 15 seconds), fetching on-chain logs and portfolio values
   useEffect(() => {
@@ -1457,13 +1490,6 @@ export default function App() {
   // The auto-trader (Jupiter) and the alert engine (Telegram) each persist a reasoning trail in
   // their config (auditLogs), polled above every 15s. Merge them newest-first for the footer panel.
   const [showAuditPanel, setShowAuditPanel] = useState(false);
-  const [toastsEnabled, setToastsEnabled] = useState<boolean>(() => {
-    const saved = localStorage.getItem("cortex_toasts_enabled");
-    return saved !== "false";
-  });
-  const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: string; source: string }>>([]);
-  const seenAuditIdsRef = useRef<Set<string>>(new Set());
-  const auditInitializedRef = useRef(false);
 
   useEffect(() => {
     localStorage.setItem("cortex_toasts_enabled", toastsEnabled ? "true" : "false");
@@ -1475,10 +1501,10 @@ export default function App() {
   const mergedAuditLogs = useMemo(() => {
     const j = ((jupiterConfig?.auditLogs as any[]) || []).map((e: any) => ({ ...e, source: "Auto-Trade" }));
     const t = ((telegramConfig?.auditLogs as any[]) || []).map((e: any) => ({ ...e, source: "Alert" }));
-    return [...j, ...t]
+    return [...j, ...t, ...localSyncLogs]
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
       .slice(0, 500);
-  }, [jupiterConfig?.auditLogs, telegramConfig?.auditLogs]);
+  }, [jupiterConfig?.auditLogs, telegramConfig?.auditLogs, localSyncLogs]);
 
   // Pop a toast for any audit entry we haven't seen before (works for PAPER and REAL). The first
   // poll only seeds the "seen" set so we don't blast a wall of toasts for pre-existing history.
@@ -1963,7 +1989,7 @@ export default function App() {
     }
   };
 
-  const fetchData = async () => {
+  const fetchData = async (isAutoSync = false) => {
     setLoading(true);
     setLoadingStep("Syncing Historical Market Data...");
     setErrorMsg(null);
@@ -1991,7 +2017,7 @@ export default function App() {
       let newsData: any = { articles: [], isMock: true };
       try {
         setLoadingStep("Extracting Global News Context...");
-        const newsRes = await fetch(`/api/news?topic=${encodeURIComponent(topic)}&token=${token}&from=${startTime}&to=${endTime}`);
+        const newsRes = await fetch(`/api/news?topic=${encodeURIComponent(topic)}&token=${token}&from=${startTime}&to=${endTime}${isAutoSync ? "&autoSync=true" : ""}`);
         if (!newsRes.headers.get("content-type")?.includes("application/json")) {
           const text = await newsRes.text();
           if (newsRes.status === 429) {
@@ -2095,7 +2121,7 @@ export default function App() {
         const predRes = await fetch("/api/predict", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token, topic, weights: effectiveWeights, interval })
+          body: JSON.stringify({ token, topic, weights: effectiveWeights, interval, isAutoSync })
         });
         if (!predRes.headers.get("content-type")?.includes("application/json")) {
            const text = await predRes.text();
@@ -2974,7 +3000,7 @@ export default function App() {
                       }}
                       className="px-2.5 py-1 bg-sol-purple text-text-heading rounded hover:bg-sol-purple/85 transition-colors uppercase font-mono font-bold text-[9px] tracking-wider shrink-0 text-center"
                     >
-                      Sync Feed
+                      Get Latest Info
                     </button>
                   </div>
                 </div>
