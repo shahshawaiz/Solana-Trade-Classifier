@@ -60,26 +60,21 @@ function cn(...inputs: ClassValue[]) {
 
 const Card = ({ children, className, title, icon: Icon, action, overflowVisible }: any) => (
   <div className={cn(
-    "bg-bg-card border border-border-dim rounded-lg flex flex-col shadow-sm relative group hover:border-sol-purple/40 transition-colors duration-300", 
+    "bg-bg-card border border-border-dim rounded-lg flex flex-col shadow-sm relative overflow-hidden group hover:shadow-md transition-all duration-300 hover:-translate-y-[1px]", 
     overflowVisible ? "" : "overflow-hidden",
     className
   )}>
-    {/* Cockpit corner joint overlays */}
-    <div className="absolute top-0 left-0 w-2 h-2 border-t-2 border-l-2 border-sol-purple/30 pointer-events-none group-hover:border-sol-purple/80 transition-colors" />
-    <div className="absolute top-0 right-0 w-2 h-2 border-t-2 border-r-2 border-sol-purple/30 pointer-events-none group-hover:border-sol-purple/80 transition-colors" />
-    <div className="absolute bottom-0 left-0 w-2 h-2 border-b-2 border-l-2 border-sol-purple/30 pointer-events-none group-hover:border-sol-purple/80 transition-colors" />
-    <div className="absolute bottom-0 right-0 w-2 h-2 border-b-2 border-r-2 border-sol-purple/30 pointer-events-none group-hover:border-sol-purple/80 transition-colors" />
+    {/* Colorful gradient top line */}
+    <div className="absolute top-0 left-0 w-full h-[3px] bg-gradient-to-r from-sol-purple via-[#6366f1] to-sol-green" />
 
     {(title || Icon || action) && (
-      <div className="px-5 py-3.5 border-b border-border-dim flex items-center justify-between bg-bg-main/50 shrink-0 relative">
-        <div className="absolute bottom-0 left-0 w-full h-[1px] bg-gradient-to-r from-sol-purple/40 via-transparent to-transparent" />
+      <div className="px-5 py-3.5 border-b border-border-dim flex items-center justify-between bg-bg-main/30 shrink-0 mt-[3px]">
         <div className="flex items-center gap-2">
-          <span className="w-1.5 h-1.5 rounded-full bg-sol-purple animate-pulse shrink-0" />
-          <span className="text-[10px] uppercase tracking-[0.2em] font-black text-text-heading font-mono">{title}</span>
+          <span className="text-[10px] uppercase tracking-[0.15em] font-extrabold text-text-heading">{title}</span>
         </div>
         <div className="flex items-center gap-2.5">
           {action && <div className="flex items-center shrink-0">{action}</div>}
-          {Icon && <Icon className="w-3.5 h-3.5 text-sol-purple animate-pulse" style={{ animationDuration: '3s' }} />}
+          {Icon && <Icon className="w-3.5 h-3.5 text-sol-purple group-hover:scale-110 transition-transform duration-300" />}
         </div>
       </div>
     )}
@@ -89,37 +84,37 @@ const Card = ({ children, className, title, icon: Icon, action, overflowVisible 
   </div>
 );
 
-const Stat = ({ label, value, subValue, trend }: any) => (
-  <div className="bg-bg-card p-5 rounded-lg border border-border-dim shadow-sm relative group hover:border-sol-green/40 transition-colors duration-300">
-    <div className="absolute top-0 left-0 w-1.5 h-1.5 border-t border-l border-sol-green/30 pointer-events-none group-hover:border-sol-green/80 transition-colors" />
-    <div className="absolute bottom-0 right-0 w-1.5 h-1.5 border-b border-r border-sol-green/30 pointer-events-none group-hover:border-sol-green/80 transition-colors" />
+const Stat = ({ label, value, subValue, trend }: any) => {
+  const isPositive = trend !== undefined && trend > 0;
+  const isNegative = trend !== undefined && trend < 0;
+  const topColor = isPositive 
+    ? "from-sol-green to-emerald-400" 
+    : (isNegative ? "from-red-500 to-rose-400" : "from-sol-purple to-[#6366f1]");
 
-    <p className="text-[10px] uppercase tracking-widest text-text-dim mb-2 flex items-center gap-1 font-mono">
-      <span className="w-1 h-1 bg-sol-green rounded-full shrink-0" />
-      {label}
-    </p>
-    <div className="flex items-baseline gap-2">
-      <span className={cn(
-        "text-3xl font-mono tracking-tight font-black",
-        trend !== undefined ? (trend > 0 ? "text-sol-green" : trend < 0 ? "text-red-500" : "text-text-heading") : "text-text-heading"
-      )}>{value}</span>
-      {trend !== undefined && (
+  return (
+    <div className="bg-bg-card p-5 rounded-lg border border-border-dim shadow-sm relative overflow-hidden group hover:shadow-md transition-all duration-300 hover:-translate-y-[1px]">
+      {/* Colorful gradient top line */}
+      <div className={cn("absolute top-0 left-0 w-full h-[3px] bg-gradient-to-r", topColor)} />
+
+      <p className="text-[10px] uppercase tracking-widest text-text-dim mb-2 mt-1">{label}</p>
+      <div className="flex items-baseline gap-2">
         <span className={cn(
-          "text-[9px] font-mono px-1 py-0.5 rounded border",
-          trend > 0 ? "bg-sol-green/10 border-sol-green/20 text-sol-green" : "bg-red-500/10 border-red-500/20 text-red-400"
-        )}>
-          {trend > 0 ? "▲" : "▼"}{Math.abs(trend).toFixed(1)}%
-        </span>
-      )}
-    </div>
-    {subValue && (
-      <div className="flex items-center gap-1.5 mt-2">
-        <span className="text-[7px] text-sol-green font-mono bg-sol-green/10 border border-sol-green/20 px-1 rounded">SYS_OK</span>
-        <p className="text-[9px] text-text-dim uppercase tracking-[0.1em] font-mono">{subValue}</p>
+          "text-3xl font-serif font-medium transition-colors duration-300 group-hover:text-sol-purple",
+          trend !== undefined ? (trend > 0 ? "text-sol-green" : trend < 0 ? "text-red-500" : "text-text-heading") : "text-text-heading"
+        )}>{value}</span>
+        {trend !== undefined && (
+          <span className={cn(
+            "text-[10px] font-mono px-1 py-0.5 rounded",
+            trend > 0 ? "bg-sol-green/10 text-sol-green" : "bg-red-500/10 text-red-500"
+          )}>
+            {trend > 0 ? "↑" : "↓"}{Math.abs(trend).toFixed(1)}%
+          </span>
+        )}
       </div>
-    )}
-  </div>
-);
+      {subValue && <p className="text-[9px] text-text-dim mt-2 uppercase tracking-[0.1em]">{subValue}</p>}
+    </div>
+  );
+};
 
 const TradeHistory = ({ trades }: { trades: any[] }) => {
   if (!trades || trades.length === 0) {
@@ -2187,7 +2182,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-bg-main text-text-body font-sans flex flex-col sci-fi-scanlines">
+    <div className="min-h-screen bg-bg-main text-text-body font-sans flex flex-col">
       {/* Header */}
       <header className="h-16 border-b border-border-dim bg-bg-card flex items-center justify-between px-8 shrink-0 shadow-sm relative z-50">
         <div className="flex items-center gap-4">
@@ -2196,10 +2191,11 @@ export default function App() {
             <div className="w-2.5 h-2.5 bg-sol-green rounded-full" />
           </div>
           <div className="flex flex-col">
-            <h1 className="text-sm font-black uppercase tracking-[.3em] text-text-heading flex items-center gap-2 font-mono">
-              🚀 {token === 'SOL' ? 'Solana' : token} Quantum Bias Cockpit <span className="text-[9px] font-mono text-sol-purple bg-sol-purple/10 px-1 py-0.5 rounded border border-sol-purple/20 animate-pulse">V2.0</span>
+            <h1 className="text-sm font-black uppercase tracking-[.3em] flex items-center gap-2">
+              <span className="animated-gradient-text">{token === 'SOL' ? 'Solana' : token} Quant Alpha</span>
+              <span className="text-[9px] font-mono text-sol-purple bg-sol-purple/10 px-1 py-0.5 rounded border border-sol-purple/20 animate-pulse">V2.0</span>
             </h1>
-            <p className="text-[9px] text-text-dim uppercase tracking-widest font-bold font-mono">🛰️ ORBITAL RADAR & MULTIMODAL PROPULSION CONTROLS</p>
+            <p className="text-[9px] text-text-dim uppercase tracking-widest font-medium">Multimodal Sentiment & Quantitative Arbitrage</p>
           </div>
         </div>
 
@@ -2243,49 +2239,49 @@ export default function App() {
             onClick={() => setCurrentView('forecast')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'forecast' && "text-sol-purple")}
           >
-            🛰️ Sensor Radar
+            Forecast Trend
           </button>
           <button 
             onClick={() => setCurrentView('dashboard')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'dashboard' && "text-sol-purple")}
           >
-            ⚙️ Simulator Deck
+            Strategy backtesting
           </button>
           <button 
             onClick={() => setCurrentView('liquidation')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'liquidation' && "text-sol-purple")}
           >
-            💥 Collision Grid
+            Liquidation Map
           </button>
           <button 
             onClick={() => setCurrentView('alerts')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'alerts' && "text-sol-purple")}
           >
-            📡 Telemetry Comms
+            Alerts Hub
           </button>
           <button
             onClick={() => setCurrentView('jupiter')}
             className={cn("hover:text-sol-purple transition-colors", currentView === 'jupiter' && "text-sol-purple")}
           >
-            🤖 Autopilot Drive
+            Automated Trading
           </button>
           <button
             onClick={() => setCurrentView('journal')}
             className={cn("hover:text-sol-purple transition-colors", currentView === 'journal' && "text-sol-purple")}
           >
-            📝 Log Book
+            Trade Journal
           </button>
           <button 
             onClick={() => setCurrentView('apiDocs')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'apiDocs' && "text-sol-purple")}
           >
-            📖 Comms Protocols
+            API Docs
           </button>
           <button 
             onClick={() => setCurrentView('about')} 
             className={cn("hover:text-sol-purple transition-colors", currentView === 'about' && "text-sol-purple")}
           >
-            🛸 Ship Specs
+            About
           </button>
         </div>
         <div className="hidden md:flex gap-6 text-[11px] uppercase tracking-[0.1em] text-text-dim font-mono bg-bg-input px-4 py-1.5 rounded-full border border-border-dim">
@@ -6427,15 +6423,18 @@ export default function App() {
       </div>
 
       {/* "What just happened" toasts — fire on every new audit entry (PAPER or REAL trading). */}
-      <div className="fixed top-20 right-4 z-[120] flex flex-col gap-2.5 w-[23rem] max-w-[90vw] pointer-events-none">
+      <div className="fixed top-20 right-4 z-[120] flex flex-col gap-2.5 w-[22rem] max-w-[90vw] pointer-events-none">
         <AnimatePresence>
           {toasts.map((t) => {
-            // Compute deterministic telemetry parameters for cockpit vibes
-            let sum = 0;
-            for (let i = 0; i < t.id.length; i++) sum += t.id.charCodeAt(i);
-            const warp = ((sum % 20) / 100 + 0.85).toFixed(2);
-            const shields = 100 - (sum % 10);
-            const sector = `SEC-${(sum % 90) + 10}`;
+            const tone = auditTone(t);
+            const lightToneClasses: Record<string, string> = {
+              green: "bg-gradient-to-r from-emerald-50/98 to-teal-50/98 border-emerald-400 text-emerald-800 shadow-emerald-100",
+              red: "bg-gradient-to-r from-rose-50/98 to-red-50/98 border-red-300 text-rose-800 shadow-rose-100",
+              purple: "bg-gradient-to-r from-purple-50/98 to-indigo-50/98 border-sol-purple/40 text-purple-800 shadow-purple-100",
+              amber: "bg-gradient-to-r from-amber-50/98 to-yellow-50/98 border-amber-300 text-amber-800 shadow-amber-100",
+              sky: "bg-gradient-to-r from-sky-50/98 to-blue-50/98 border-sky-300 text-sky-800 shadow-sky-100",
+              dim: "bg-white/98 border-border-dim text-text-dim shadow-slate-100",
+            };
 
             return (
               <motion.div
@@ -6445,42 +6444,31 @@ export default function App() {
                 exit={{ x: 350, opacity: 0, scale: 0.85, rotate: -1.5 }}
                 transition={{ type: "spring", stiffness: 220, damping: 18 }}
                 className={cn(
-                  "pointer-events-auto bg-bg-card/95 backdrop-blur-md border border-border-dim border-l-4 rounded-md shadow-2xl p-3.5 flex flex-col gap-2 relative overflow-hidden group hover:border-sol-purple/60 transition-colors",
-                  toneClasses[auditTone(t)]
+                  "pointer-events-auto border border-l-4 rounded-lg shadow-xl p-3.5 flex flex-col gap-2 relative overflow-hidden group hover:-translate-y-[1px] transition-all duration-300",
+                  lightToneClasses[tone] || lightToneClasses.dim
                 )}
               >
-                {/* Tech scanline glare animation */}
-                <div className="absolute inset-0 bg-gradient-to-b from-transparent via-white/5 to-transparent -translate-y-full group-hover:translate-y-full transition-transform duration-1000 ease-out pointer-events-none" />
-                
-                {/* Space cockpit joints */}
-                <div className="absolute top-0 left-0 w-1.5 h-1.5 border-t border-l border-current opacity-30" />
-                <div className="absolute top-0 right-0 w-1.5 h-1.5 border-t border-r border-current opacity-30" />
+                {/* Collapsing progress bar at the bottom */}
+                <div className="absolute bottom-0 left-0 h-[3px] bg-current opacity-25 toast-progress-bar" />
 
                 <div className="flex items-start gap-2.5">
-                  <div className="p-1.5 bg-bg-input rounded border border-border-dim/40 shrink-0">
-                    <span className="w-2 h-2 rounded-full bg-current block animate-pulse shrink-0" />
+                  <div className="p-1 bg-white/80 rounded border border-current/25 shrink-0 shadow-sm">
+                    <Bell className="w-3.5 h-3.5 text-current animate-bounce" style={{ animationDuration: '2s' }} />
                   </div>
                   
                   <div className="flex-1 min-w-0">
-                    <div className="text-[8px] uppercase tracking-[0.2em] opacity-80 font-mono mb-1 font-bold">
-                      📡 COMMS DECK // {t.source} // {sector}
+                    <div className="text-[8px] uppercase tracking-[0.15em] opacity-75 font-mono mb-0.5 font-bold">
+                      {t.source} · {t.type}
                     </div>
-                    <div className="text-text-body font-mono text-[11px] break-words leading-relaxed">{t.message}</div>
+                    <div className="text-text-heading font-sans text-[11px] leading-relaxed break-words font-medium">{t.message}</div>
                   </div>
                   
                   <button 
                     onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))} 
-                    className="opacity-50 hover:opacity-100 hover:text-red-400 shrink-0 transition-colors"
+                    className="opacity-40 hover:opacity-90 shrink-0 transition-colors"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
-                </div>
-
-                {/* Telemetry data readings */}
-                <div className="flex items-center justify-between text-[7px] text-text-dim/60 font-mono mt-1 pt-1.5 border-t border-border-dim/20">
-                  <span className="flex items-center gap-1">🛸 WARP: <strong className="text-text-body">{warp}c</strong></span>
-                  <span className="flex items-center gap-1">🛡️ SHIELD: <strong className="text-text-body">{shields}%</strong></span>
-                  <span className="flex items-center gap-1">⚡ SIG_PWR: <strong className="text-sol-green">MAX</strong></span>
                 </div>
               </motion.div>
             );
@@ -6520,21 +6508,21 @@ export default function App() {
         </div>
       )}
 
-      <footer className="h-10 bg-bg-card border-t border-border-dim flex px-8 items-center justify-between text-[9px] text-text-dim uppercase tracking-[0.2em] shrink-0 font-mono relative">
-        <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-sol-purple/20 to-transparent" />
+      <footer className="h-10 bg-white border-t border-border-dim flex px-8 items-center justify-between text-[9px] text-text-dim uppercase tracking-[0.2em] shrink-0 font-mono relative">
+        <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-sol-purple via-[#6366f1] to-sol-green" />
         <div className="flex items-center gap-6 min-w-0">
-          <span className="hidden lg:inline shrink-0">🌌 HULL STATUS: NOMINAL // DEEP SPACE EXPLORER © 2026</span>
+          <span className="hidden lg:inline shrink-0">Quantum Alpha Engineering © 2026</span>
           <button
             onClick={() => setShowAuditPanel((v) => !v)}
             className="flex items-center gap-2 hover:text-text-heading transition-colors normal-case tracking-normal min-w-0"
             title="Toggle the live strategy audit log"
           >
             <Terminal className="w-3 h-3 text-sol-purple shrink-0" />
-            <span className="font-bold shrink-0 uppercase tracking-widest text-[9px]">Telemetry Log</span>
+            <span className="font-bold shrink-0">Audit Log</span>
             {mergedAuditLogs.length > 0 && (
               <span className="bg-sol-purple/20 text-sol-purple px-1.5 rounded-full text-[8px] shrink-0">{mergedAuditLogs.length}</span>
             )}
-            <span className="hidden md:inline text-text-dim truncate max-w-[26rem] lowercase font-mono">
+            <span className="hidden md:inline text-text-dim truncate max-w-[26rem] lowercase">
               {mergedAuditLogs[0]?.message || "no activity yet"}
             </span>
             <ChevronUp className={cn("w-3 h-3 transition-transform shrink-0", showAuditPanel && "rotate-180")} />
@@ -6543,9 +6531,9 @@ export default function App() {
         <div className="flex gap-12 items-center shrink-0">
           <div className="flex items-center gap-1.5 overflow-hidden text-sol-green font-bold">
             <span className="w-1.5 h-1.5 rounded-full bg-sol-green animate-ping" />
-            🛰️ BEACON_ACTIVE
+            LIVE_LINK_ACTIVE
           </div>
-          <span className="hidden md:inline">📡 SENSORS: NEWSAPI</span>
+          <span className="hidden md:inline">API: NEWSAPI.ORG</span>
         </div>
       </footer>
     </div>
