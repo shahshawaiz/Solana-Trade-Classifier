@@ -573,7 +573,7 @@ export default function App() {
   const [lookbackMode, setLookbackMode] = useState<'preset' | 'custom'>('preset');
   const [startDate, setStartDate] = useState(etFormat(subDays(new Date(), 7), "yyyy-MM-dd"));
   const [endDate, setEndDate] = useState(etFormat(new Date(), "yyyy-MM-dd"));
-  const [interval, setChartInterval] = useState("15m");
+  const [interval, setChartInterval] = useState("5m");
   useEffect(() => {
     if (lookbackMode === 'preset') {
       setStartDate(etFormat(subDays(new Date(), lookbackDays), "yyyy-MM-dd"));
@@ -583,7 +583,7 @@ export default function App() {
 
   const [currentSpotPrice, setCurrentSpotPrice] = useState<number | null>(null);
   const [mapSpread, setMapSpread] = useState<number>(0.1);
-  const [syncInterval, setSyncInterval] = useState(300); // defaults to 5 minutes
+  const [syncInterval, setSyncInterval] = useState(1200); // defaults to 20 minutes
   const [topic, setTopic] = useState<string>(() => {
     try {
       const saved = localStorage.getItem("cortex_topic");
@@ -830,7 +830,9 @@ export default function App() {
       const Low = Math.max(0.1, Price - spreadLimit);
 
       let stepLabel = "";
-      if (intervalLabel === "15m") {
+      if (intervalLabel === "5m") {
+        stepLabel = `+${Math.round(r * 5)}m`;
+      } else if (intervalLabel === "15m") {
         stepLabel = `+${Math.round(r * 15)}m`;
       } else if (intervalLabel === "30m") {
         stepLabel = `+${Math.round(r * 30)}m`;
@@ -843,7 +845,9 @@ export default function App() {
       let absLabel = "Now";
       if (r > 0) {
         let targetDate = new Date(lastDate);
-        if (intervalLabel === "15m") {
+        if (intervalLabel === "5m") {
+          targetDate.setMinutes(lastDate.getMinutes() + Math.round(r * 5));
+        } else if (intervalLabel === "15m") {
           targetDate.setMinutes(lastDate.getMinutes() + Math.round(r * 15));
         } else if (intervalLabel === "30m") {
           targetDate.setMinutes(lastDate.getMinutes() + Math.round(r * 30));
@@ -1220,7 +1224,7 @@ export default function App() {
 
   // Auto-refresh states
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
-  const [timeLeft, setTimeLeft] = useState(300); // 5 minutes standard countdown
+  const [timeLeft, setTimeLeft] = useState(1200); // 20 minutes standard countdown
 
   // Telegram alert states
   const [telegramConfig, setTelegramConfig] = useState<any>({
@@ -1234,7 +1238,7 @@ export default function App() {
     lastCheckedAt: "",
     cooldownMinutes: 30, // customizable cooldown period (default 30 mins)
     frequency: 5, // default alert analytics check frequency to 5
-    interval: "15m", // Analytic timeframe default to 15m
+    interval: "5m", // Analytic timeframe default to 5m
     auditLogs: [],
     error: "",
     newsTelegramChannel: "https://t.me/+1C0c6rUVmjo3Y2Y8"
@@ -1251,8 +1255,8 @@ export default function App() {
         if (parsed.topic === "market" || parsed.topic === "Crypto") {
           parsed.topic = "crypto,war";
         }
-        if (parsed.interval === "5m" || !parsed.interval) {
-          parsed.interval = "15m";
+        if (!parsed.interval) {
+          parsed.interval = "5m";
         }
         return parsed;
       } catch(e) {}
@@ -1267,7 +1271,7 @@ export default function App() {
       stopLossPct: 1.625,
       frequencyMinutes: 5,
       cooldownMinutes: 30,
-      interval: "15m",
+      interval: "5m",
       token: "SOL",
       topic: "crypto,war",
       weights: { sentiment: 0, technical: 0.9, liquidity: 0.85, elliottWave: 0, supertrend: 0.9, fvg: 0, dca: 0 },
@@ -2510,6 +2514,7 @@ export default function App() {
                     <option value={120}>2 Minutes</option>
                     <option value={300}>5 Minutes (Balanced)</option>
                     <option value={600}>10 Minutes</option>
+                    <option value={1200}>20 Minutes</option>
                   </select>
                 </div>
               )}

@@ -2145,7 +2145,7 @@ export function loadTelegramConfig(): TelegramConfig {
       if (parsed.takeProfitPct === undefined) parsed.takeProfitPct = 3.25;
       if (parsed.stopLossPct === undefined) parsed.stopLossPct = 1.625;
       if (parsed.leverage === undefined) parsed.leverage = 3;
-      if (parsed.interval === undefined || parsed.interval === "5m") parsed.interval = "15m";
+      if (parsed.interval === undefined) parsed.interval = "5m";
       if (parsed.frequency === undefined) parsed.frequency = 5;
       if (parsed.activeTrade === undefined) parsed.activeTrade = null;
       if (parsed.tradesHistory === undefined) parsed.tradesHistory = [];
@@ -2335,7 +2335,7 @@ function loadJupiterConfig(): JupiterConfig {
       if (parsed.stopLossPct === undefined) parsed.stopLossPct = 1.625;
       if (parsed.leverage === undefined) parsed.leverage = 3;
       if (parsed.allocationPercent === undefined) parsed.allocationPercent = 5;
-      if (parsed.interval === undefined || parsed.interval === "5m") parsed.interval = "15m";
+      if (parsed.interval === undefined) parsed.interval = "5m";
       if (parsed.activeTrade === undefined) parsed.activeTrade = null;
       if (parsed.tradesHistory === undefined) parsed.tradesHistory = [];
       if (parsed.frequencyMinutes === undefined) parsed.frequencyMinutes = 5;
