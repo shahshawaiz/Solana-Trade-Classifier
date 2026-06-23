@@ -1421,6 +1421,12 @@ function dcaMeanReversionScore(closes: number[], period = 50): number {
   return Math.max(-1, Math.min(1, -z / 2));
 }
 
+// Conviction threshold for the composite bias Σ. The data-selected robust config
+// (STRATEGY_RESULTS.md §3/§6) uses 0.25, not the legacy 0.08 — the 0.08 cutoff fired
+// too often and produced the whipsaw/overtrading documented in the live post-mortem (§7).
+// Keep this in sync with the /api/backtest default (signalThreshold) so live == backtest.
+const SIGNAL_THRESHOLD = 0.25;
+
 export function performCoreAnalysis(closes: number[], headlines: string[] = [], weights: any, historicalSentimentOverride?: number, bars?: Bar[]) {
   // 1. Rigorous Elliott Wave Oscillator & Wave Count Calculation
   const waveInfo = calculateElliotWave(closes);
@@ -1471,12 +1477,15 @@ export function performCoreAnalysis(closes: number[], headlines: string[] = [], 
 
   // Centralized composite score (Σ) — all 4 subsystems weighted per the Cortex Alpha spec:
   // Σ = (MACD·wTech) + (RSI·wLiq) + (Sentiment·wSent) + (ElliottWave·wEW), normalized by Σweights.
-  let sentimentW = weights?.sentiment !== undefined ? weights.sentiment : 0.90;
-  let technicalW = weights?.technical !== undefined ? weights.technical : 0.85;
+  // Defaults = the data-selected robust config (STRATEGY_RESULTS.md §6): trend-following core of
+  // MACD (technical) + RSI (liquidity) + Supertrend, with Sentiment and Elliott Wave OFF — both
+  // were shown to *reduce* performance on SOL/BTC/ETH × 30/90d and are opt-in only.
+  let sentimentW = weights?.sentiment !== undefined ? weights.sentiment : 0;
+  let technicalW = weights?.technical !== undefined ? weights.technical : 0.9;
   let liquidityW = weights?.liquidity !== undefined ? weights.liquidity : 0.85;
-  let elliottW = weights?.elliottWave !== undefined ? weights.elliottWave : 0.85;
-  // New optional signals (default 0 = off): Supertrend (ATR trend), Fair Value Gap, DCA mean-reversion.
-  let supertrendW = weights?.supertrend !== undefined ? weights.supertrend : 0;
+  let elliottW = weights?.elliottWave !== undefined ? weights.elliottWave : 0;
+  // Supertrend (ATR trend) defaults ON; Fair Value Gap + DCA mean-reversion default 0 (off).
+  let supertrendW = weights?.supertrend !== undefined ? weights.supertrend : 0.9;
   let fvgW = weights?.fvg !== undefined ? weights.fvg : 0;
   let dcaW = weights?.dca !== undefined ? weights.dca : 0;
 
@@ -1520,9 +1529,9 @@ export function performCoreAnalysis(closes: number[], headlines: string[] = [], 
   // Consistent signal threshold across system
   let action: "Long Buy" | "Short Sell" | "Long Sell (Overbought)" | "Short Buy (Oversold)" | "Hold" = "Hold";
   if (!isChop) {
-    if (compositeScore > 0.08) {
+    if (compositeScore > SIGNAL_THRESHOLD) {
       action = "Long Buy";
-    } else if (compositeScore < -0.08) {
+    } else if (compositeScore < -SIGNAL_THRESHOLD) {
       action = "Short Sell";
     }
   }
@@ -1773,10 +1782,9 @@ export async function getPredictionData(token: string, topic: string, weights: a
   const strategyData = performCoreAnalysis(closes, headlines, weights, llmScore, quotes);
   const { compositeScore, emaScore, rsiScore, elliottWaveScore, headlineSentimentFinal, elliotWavePhase } = strategyData;
 
-  // Decision is driven purely by the Composite Bias Σ (which now includes the Elliott Wave
-  // term) vs the ±0.08 threshold, plus the Chop Zone (RSI 40-60 + MA squeeze) — exactly per
-  // the Cortex Alpha spec. No separate Elliott-Wave veto and no 200-EMA suppression gate:
-  // those were undocumented filters that blocked spec-valid signals and broke the catalyst overrule.
+  // Decision is driven by the Composite Bias Σ vs the ±SIGNAL_THRESHOLD conviction cutoff (0.25,
+  // the data-selected robust value — see STRATEGY_RESULTS.md), plus the Chop Zone (RSI 40-60 + MA
+  // squeeze) and the entry gates below (ADX, 15m Supertrend, MACD histogram, RSI timing).
   function evaluateSignal(priceCloses: number[], rsiVal: number, hls: string[], llmVal?: number) {
       const localQuotes = quotes.slice(0, priceCloses.length);
       const sData = performCoreAnalysis(priceCloses, hls, weights, llmVal, localQuotes);
@@ -1785,10 +1793,10 @@ export async function getPredictionData(token: string, topic: string, weights: a
       let aRec = sData.isChop ? "Hold Chop Zone" : "Hold";
       let trnd = "SIDEWAYS";
 
-      if (sData.compositeScore > 0.08) {
+      if (sData.compositeScore > SIGNAL_THRESHOLD) {
           pSide = "LONG"; aRec = "Long Buy"; trnd = "UP";
           if (rsiVal < 30) aRec = "Long Buy (Oversold)";
-      } else if (sData.compositeScore < -0.08) {
+      } else if (sData.compositeScore < -SIGNAL_THRESHOLD) {
           pSide = "SHORT"; aRec = "Short Sell"; trnd = "DOWN";
           if (rsiVal > 70) aRec = "Short Sell (Overbought)";
       }
@@ -1978,7 +1986,13 @@ Return JSON ONLY: { "rationale": "expert justification here", "suggestedOrder": 
     atr, // latest ATR (price units) — daemon derives ATR-based TP/SL for the actual trade side
     atrSlMult: ATR_SL_MULT,
     atrTpMult: ATR_TP_MULT,
-    indicators: { rsi: currentRsi, ema12: currentEmaFast, ema26: currentEmaSlow },
+    indicators: {
+      rsi: currentRsi, ema12: currentEmaFast, ema26: currentEmaSlow,
+      // Primary-trend reference: price vs the 200-period EMA decides the regime (only go with
+      // the higher-timeframe trend). ADX(14) gauges whether that trend has any strength.
+      ema200: (() => { const e = calculateEMA(closes, Math.min(200, closes.length)); return e[e.length - 1] || latest.close; })(),
+      adx14: calculateADX(quotes, 14),
+    },
     strategyDetails: {
         sentimentWeight: strategyData.wSent,
         technicalWeight: strategyData.wTech,
@@ -2084,7 +2098,9 @@ export function calculateDurationStr(startIso: string, endIso: string): string {
   }
 }
 
-function addAuditLog(config: TelegramConfig, message: string, type: "info" | "cooldown" | "trade" | "hold") {
+// Structural type so the same audit-log store works for both the Telegram alert engine and the
+// Jupiter on-chain auto-trader (both carry an optional auditLogs array).
+function addAuditLog(config: { auditLogs?: Array<AuditLogEntry> }, message: string, type: "info" | "cooldown" | "trade" | "hold") {
   if (!config.auditLogs) config.auditLogs = [];
   config.auditLogs.push({
     id: Math.random().toString(36).substring(2, 9),
@@ -2211,6 +2227,8 @@ export interface JupiterConfig {
   lastTradePnL: number;
   cumulativePnL: number;
   interval?: string;
+  useRegimeFilter?: boolean; // 200-EMA primary-trend gate (default ON): only long above, short below.
+  auditLogs?: Array<AuditLogEntry>; // per-sync reasoning trail (why each tick entered/held/skipped).
   activeTrade: {
     side: "LONG" | "SHORT";
     entryPrice: number;
@@ -2309,7 +2327,11 @@ function loadJupiterConfig(): JupiterConfig {
       if (parsed.lastTradeAddedAt === undefined) parsed.lastTradeAddedAt = "";
       if (parsed.token === undefined) parsed.token = "SOL";
       if (parsed.topic === undefined || parsed.topic === "market" || parsed.topic === "Crypto") parsed.topic = "crypto,war";
-      if (!parsed.weights) {
+      const legacyLosingWeights = parsed.weights && parsed.weights.sentiment === 0.9 && parsed.weights.elliottWave === 0.85;
+      if (!parsed.weights || legacyLosingWeights) {
+        // Reset the shipped legacy 4-factor combo (sentiment 0.9 + Elliott Wave 0.85) to the
+        // data-selected trend-following core. Those two terms were shown to REDUCE performance
+        // (STRATEGY_RESULTS.md §3/§6) and drove the counter-trend losses in the live post-mortem §7.
         parsed.weights = { sentiment: 0, technical: 0.9, liquidity: 0.85, elliottWave: 0, supertrend: 0.9, fvg: 0, dca: 0 };
       } else {
         if (parsed.weights.sentiment === undefined) parsed.weights.sentiment = 0;
@@ -2320,7 +2342,7 @@ function loadJupiterConfig(): JupiterConfig {
         if (parsed.weights.fvg === undefined) parsed.weights.fvg = 0;
         if (parsed.weights.dca === undefined) parsed.weights.dca = 0;
       }
-      
+
       if (applyEnvPrivateKey(parsed)) {
         // JUP_PRIVATE_KEY env var is the authoritative wallet; nothing else to derive.
       } else if (parsed.disconnected) {
@@ -2778,8 +2800,8 @@ export async function checkPredictionAndAlert(forceAlert = false) {
   
   console.log(`[Telegram Daemon] [telegram_alert_v1] Running check every ${config.frequency || 5}m for ${config.token}...`);
   try {
-    const pred = await getPredictionData(config.token, config.topic, config.weights);
-    
+    const pred = await getPredictionData(config.token, config.topic, config.weights, config.interval || "1h");
+
     config.lastCheckedAt = new Date().toISOString();
     delete config.error;
 
@@ -3611,7 +3633,10 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
 
   console.log(`[Jupiter Daemon] Running execution check for wallet ${activeWallet} (forceTrigger: ${forceTrigger})...`);
   try {
-    const pred = await getPredictionData(config.token, config.topic, config.weights);
+    // Run the signal on the configured timeframe (default 1h). Previously the interval arg was
+    // omitted → silently defaulted to 15m, contradicting the 1h move in STRATEGY_RESULTS.md §9/§10
+    // (5m/fast scalping is a structurally losing config: tiny edge × high trade count × fees).
+    const pred = await getPredictionData(config.token, config.topic, config.weights, config.interval || "1h");
     config.lastCheckedAt = new Date().toISOString();
     delete config.error;
 
@@ -3755,9 +3780,11 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         if (tradesHistory.length > 25) tradesHistory.shift();
         appendJournalEntry("Auto-Trade (Jupiter)", closedTradeLog); // permanent, never reset
 
+        const closedSide = closedTradeLog.side;
         activeTrade = null;
         closedThisTick = true;
         console.log(`[Jupiter Daemon] Position Closed! Reason: ${closeReason}. PnL: ${currentPnlPercent.toFixed(2)}%`);
+        addAuditLog(config, `CLOSE ${closedSide} @ $${exitPrice.toFixed(2)} — ${closeReason}. Realized ${currentPnlPercent >= 0 ? "+" : ""}${currentPnlPercent.toFixed(2)}% (${durationText}).`, "trade");
 
         try {
           // Execute REAL on-chain close
@@ -3835,6 +3862,11 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           console.error("[Jupiter Daemon] Failed to send Telegram alert for close:", e.message);
         }
       }
+
+      // Position survived the tick: log why we're still holding (no TP/SL/trail/reversal hit).
+      if (activeTrade) {
+        addAuditLog(config, `HOLD ${activeTrade.side} @ entry $${entryPrice.toFixed(2)}, mark $${exitPrice.toFixed(2)} — unrealized ${currentPnlPercent >= 0 ? "+" : ""}${currentPnlPercent.toFixed(2)}%. No TP/SL/trail/reversal trigger; thesis intact.`, "info");
+      }
     }
 
     // Only allow entering a position if not already in one (strict 1-trade limit check)
@@ -3872,12 +3904,55 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       // Macro regime filter: block counter-macro entries — no new LONGs while the
       // dollar/yields/volatility backdrop is RISK-OFF, no new SHORTs while RISK-ON.
       // Disable with useMacroFilter:false. A macro outage resolves to NEUTRAL (no effect).
+      let macroRegimeNote: string = "NEUTRAL";
       if (canEnter && (config as any).useMacroFilter !== false) {
         const macroRegime = await getMacroRegimeCached();
+        macroRegimeNote = macroRegime;
         if (!macroAllowsEntry(enterSide, macroRegime)) {
           canEnter = false;
           config.error = `Macro filter: ${enterSide} entry suppressed — macro regime is ${macroRegime}.`;
           console.log(`[Jupiter Daemon] ${config.error}`);
+        }
+      }
+
+      // Primary-trend (200-EMA) regime filter — the single biggest validated edge in
+      // STRATEGY_RESULTS.md (the winning backtest config runs useRegimeFilter ON, and the live
+      // post-mortem §7 found EVERY losing LONG was a counter-trend long into a falling market).
+      // Rule: never fade the higher-timeframe trend — block LONGs below the 200-EMA, SHORTs above.
+      // Disable with useRegimeFilter:false; forceTrigger (manual "trade now") bypasses it.
+      let regimeNote = "aligned";
+      if (canEnter && (config as any).useRegimeFilter !== false && !forceTrigger) {
+        const ema200 = (pred as any).indicators?.ema200;
+        const px = pred.price;
+        if (ema200 && px) {
+          const aligned = enterSide === "LONG" ? px > ema200 : px < ema200;
+          if (!aligned) {
+            canEnter = false;
+            regimeNote = `counter-trend (px $${px.toFixed(2)} ${enterSide === "LONG" ? "<" : ">"} 200-EMA $${ema200.toFixed(2)})`;
+            config.error = `Regime filter: ${enterSide} entry suppressed — ${regimeNote}.`;
+            console.log(`[Jupiter Daemon] ${config.error}`);
+          }
+        }
+      }
+
+      // ── Per-sync reasoning audit (expert-trader trail) ──────────────────────────────────────
+      // Record WHY this tick acted or stood aside, with the numbers a trader would check:
+      // composite bias Σ vs the conviction threshold, trend, ADX strength, primary-trend regime,
+      // and the macro backdrop. This makes every strategy-output sync explainable after the fact.
+      {
+        const sigma = pred.strategyDetails?.compositeScore ?? 0;
+        const adx = (pred as any).indicators?.adx14;
+        const ctx = `Σ=${(sigma >= 0 ? "+" : "") + sigma.toFixed(3)} vs ±${SIGNAL_THRESHOLD} · ${pred.action}` +
+          ` · trend ${pred.trend}${adx !== undefined ? ` · ADX ${adx.toFixed(0)}` : ""}` +
+          ` · macro ${macroRegimeNote} · px $${pred.price?.toFixed(2)}`;
+        if (canEnter) {
+          addAuditLog(config, `ENTER ${enterSide} — ${ctx}. Confirmed signal, regime ${regimeNote}, macro permits.`, "trade");
+        } else {
+          const why = config.error
+            || (!enterSide || enterSide === "HOLD"
+                ? "no directional conviction — Σ within ±threshold or chop/ADX gate (stand aside)"
+                : "signal not yet 2-bar confirmed");
+          addAuditLog(config, `STAND ASIDE — ${ctx}. Reason: ${why}`, "hold");
         }
       }
 

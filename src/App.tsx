@@ -5952,10 +5952,10 @@ export default function App() {
                       The strategy unifies perfectly across the Telegram alerts, order forecasts, and live visual dashboards via one unified <strong>Composite Bias Score (Σ)</strong>:
                     </p>
                     <div className="bg-bg-input p-4 rounded font-mono text-[10px] break-words border border-border-dim flex justify-center text-center">
-                      Σ = (MACD × W₁) + (RSI × W₂) + (News × W₃) + (ElliottWave × W₄)
+                      Σ = (MACD × W₁) + (RSI × W₂) + (Supertrend × W₃) [+ News, +ElliottWave]
                     </div>
                     <p>
-                      All <strong>four</strong> weighted subsystems contribute to Σ (the Elliott Wave term is now active, not just a phase tag), and the result is normalized by the sum of weights. The score is bounded between <strong>-1.0 (Heavy Bearish conviction)</strong> and <strong>+1.0 (Heavy Bullish conviction)</strong> to automate dynamic target forecasting.
+                      The <strong>data-selected default</strong> uses only the three trend/momentum terms — <strong>MACD + RSI + Supertrend</strong>. News (Sentiment) and Elliott Wave are <strong>opt-in</strong>: the multi-asset sweep showed both <i>reduced</i> performance, so they ship OFF (weights 0). Σ is normalized by the sum of weights and bounded <strong>-1.0</strong> (heavy bearish) to <strong>+1.0</strong> (heavy bullish). A directional trade only fires when <strong>|Σ| &gt; 0.25</strong> (the conviction threshold) — the legacy 0.08 cutoff over-fired and produced whipsaw.
                     </p>
                   </div>
                 </Card>
@@ -5985,7 +5985,16 @@ export default function App() {
                         <strong className="text-text-heading">6. ADX(14) Trend Gate</strong>: A hard no-trade gate. Entries are completely suppressed unless ADX(14) &gt; 20, indicating the presence of a strong trending market and preventing range-bound whipsaws.
                       </li>
                       <li>
-                        <strong className="text-text-heading">7. Risk, Cooldown, & Leverage</strong>: Leveraged take-profit is capped at 3–3.5% (default 3.25%) and stop-loss at 1.5–1.75% (default 1.625%) at a default optimization leverage of 3x. Features a hard daily cap of 4 trades max and a 45-minute cooldown/pause after 2 consecutive losses.
+                        <strong className="text-text-heading">7. 200-EMA Primary-Trend Regime Filter</strong>: The highest-value gate. The engine <strong>never fades the higher-timeframe trend</strong> — LONGs are blocked while price is below the 200-EMA and SHORTs while above it. The live post-mortem found <i>every</i> losing long was a counter-trend long into a falling market; this filter removes exactly those entries.
+                      </li>
+                      <li>
+                        <strong className="text-text-heading">8. Macro Regime Filter (DXY / US10Y / VIX)</strong>: Reads the real 5-day trend of the dollar, 10-year yield and volatility. No new LONGs while the macro backdrop is <i>RISK-OFF</i>, no new SHORTs while <i>RISK-ON</i>. A data outage resolves to NEUTRAL so it can never block trading entirely. In the benchmark it improved Sharpe and PnL in 6/6 windows while cutting trade count.
+                      </li>
+                      <li>
+                        <strong className="text-text-heading">9. Risk, Circuit Breaker, & Leverage</strong>: ATR-based stop-loss with a trailing stop that ratchets behind the best price (locks gains, never widens the loss); leveraged TP ≈ 3.25% / SL ≈ 1.625% at a default 3x. A <strong>circuit breaker pauses new entries after 8 consecutive losses</strong> and auto-resets 6 hours after the last loss (exits always remain enabled).
+                      </li>
+                      <li>
+                        <strong className="text-text-heading">10. Per-Sync Reasoning Audit</strong>: Every strategy-output sync writes an auditable line explaining <i>why</i> it acted — Σ vs threshold, trend, ADX, the 200-EMA regime, and the macro backdrop — so each ENTER / STAND-ASIDE / HOLD / CLOSE decision is explainable after the fact.
                       </li>
                     </ul>
                     <div className="pt-2">
@@ -5995,6 +6004,34 @@ export default function App() {
                     </div>
                   </div>
                 </Card>
+              </div>
+
+              {/* Honest limitations & failure modes — the trader's critique */}
+              <div className="bg-bg-card border border-red-500/30 p-6 rounded-2xl space-y-5">
+                <div className="flex items-center gap-3">
+                  <Activity className="w-5 h-5 text-red-400" />
+                  <h3 className="text-lg font-serif italic text-text-heading">Known Limitations & Failure Modes (read this)</h3>
+                </div>
+                <p className="text-xs text-text-dim leading-relaxed">
+                  No strategy works in all markets — the honest goal is <strong>robustness</strong>, not a money printer. These are the documented ways this system loses, and how it now defends against each:
+                </p>
+                <ul className="list-disc pl-5 space-y-3 text-xs text-text-body">
+                  <li>
+                    <strong className="text-text-heading">Whipsaw / overtrading.</strong> At the old 0.08 threshold and a fast timeframe the signal flipped within minutes, closing trades on noise for tiny losses (death by a thousand cuts). <span className="text-sol-green">Mitigation:</span> conviction threshold raised to 0.25, engine runs on 1h candles, ADX(14)&gt;20 gate.
+                  </li>
+                  <li>
+                    <strong className="text-text-heading">Counter-trend entries.</strong> The live post-mortem showed every losing long was opened into a falling market. <span className="text-sol-green">Mitigation:</span> the 200-EMA primary-trend filter and the DXY/yield/VIX macro filter both block trades that fight the prevailing trend.
+                  </li>
+                  <li>
+                    <strong className="text-text-heading">Leverage vs. stop distance.</strong> A tight stop under 3–5x leverage can be wicked out inside normal SOL volatility. Stops are ATR-derived (not a fixed %) and a trailing stop locks gains — but <strong>leverage still amplifies both noise and loss</strong>; size down in choppy regimes.
+                  </li>
+                  <li>
+                    <strong className="text-text-heading">Fees &amp; funding drag.</strong> Backtests exclude taker fees, borrow/funding and slippage. At small size and high frequency these can erase a real edge entirely (5-minute scalping was net-negative even before the gross edge). Treat the engine as <strong>1h-or-slower</strong>.
+                  </li>
+                  <li>
+                    <strong className="text-text-heading">In-sample optimism.</strong> The headline Sharpe/PnL numbers are tuned on recent 30–90d windows and will <strong>not</strong> persist unchanged. They are a hypothesis to validate walk-forward and with costs — not a guarantee. Paper-trade before risking capital.
+                  </li>
+                </ul>
               </div>
 
               {/* Strategy performance comparisons table */}

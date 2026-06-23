@@ -15,25 +15,36 @@ signal and the historical backtest.
 
 ## The strategy in one paragraph
 
-Every decision is a **composite bias Σ** — a weighted, normalized sum of four
-subsystems:
+Every decision is a **composite bias Σ** — a weighted, normalized sum of the
+strategy's subsystems. The **data-selected default** is a trend-following core of
+**MACD + RSI + Supertrend**; News (Sentiment) and Elliott Wave ship **off** (weight
+0) because the multi-asset sweep showed both *reduced* performance — they remain
+opt-in:
 
 ```
-Σ = ( MACD·wTechnical + RSI·wLiquidity + Sentiment·wSentiment + ElliottWave·wElliottWave )
-    ─────────────────────────────────────────────────────────────────────────────────────
-                       wTechnical + wLiquidity + wSentiment + wElliottWave
+Σ = ( MACD·wTechnical + RSI·wLiquidity + Supertrend·wSupertrend [+ Sentiment·wSent + ElliottWave·wEW] )
+    ──────────────────────────────────────────────────────────────────────────────────────────────────
+                                          Σ weights
 ```
 
-- `Σ > +0.08` → **LONG**, `Σ < -0.08` → **SHORT**, otherwise **HOLD**.
-- **Catalyst overrule:** sentiment ≥ +0.85 / ≤ −0.85 forces Σ to ±1.0 and fires
-  immediately (bypasses the chop filter and the 2-bar confirmation).
+- `Σ > +0.25` → **LONG**, `Σ < -0.25` → **SHORT**, otherwise **HOLD**. The 0.25
+  conviction threshold replaced the legacy 0.08 cutoff, which over-fired and caused
+  whipsaw (see `STRATEGY_RESULTS.md` §3/§7).
+- **200-EMA trend-regime filter:** never fade the higher-timeframe trend — LONGs
+  blocked below the 200-EMA, SHORTs blocked above. (`useRegimeFilter`, default on.)
+- **Macro regime filter:** no new LONGs while DXY/US10Y/VIX are RISK-OFF, no new
+  SHORTs while RISK-ON. (`useMacroFilter`, default on; outage → NEUTRAL.)
+- **Entry gates:** ADX(14) > 20, 15m-Supertrend alignment, MACD-histogram direction,
+  RSI(21) timing, and a 2-bar confirmation must all agree before a trade fires.
+- **Catalyst overrule:** if Sentiment is enabled, ≥ +0.85 / ≤ −0.85 forces Σ to ±1.0
+  and fires immediately (bypasses chop + confirmation).
 - **Chop Zone:** RSI in 40–60 **and** a fast/slow EMA squeeze (<0.30% of price)
   forces HOLD to avoid sideways fakeouts.
-- **Confirmation:** a directional signal only fires once the current and prior
-  candle agree (2-bar confirmation), unless a catalyst overrule is active.
+- **Timeframe:** the live auto-trader runs **1h** candles. 5m/fast scalping is a
+  structurally losing config (tiny edge × high trade count × fees — §9).
 
-Default weights when `weights` is omitted: `sentiment 0.90, technical 0.85,
-liquidity 0.85, elliottWave 0.85`.
+Default weights when `weights` is omitted: `sentiment 0, technical 0.90 (MACD),
+liquidity 0.85 (RSI), supertrend 0.90, elliottWave 0`.
 
 ---
 
