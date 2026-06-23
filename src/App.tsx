@@ -6017,16 +6017,22 @@ export default function App() {
                 </p>
                 <ul className="list-disc pl-5 space-y-3 text-xs text-text-body">
                   <li>
-                    <strong className="text-text-heading">Whipsaw / overtrading.</strong> At the old 0.08 threshold and a fast timeframe the signal flipped within minutes, closing trades on noise for tiny losses (death by a thousand cuts). <span className="text-sol-green">Mitigation:</span> conviction threshold raised to 0.25, engine runs on 1h candles, ADX(14)&gt;20 gate.
+                    <strong className="text-text-heading">Whipsaw / premature exits ("phantom R:R").</strong> At the old 0.08 threshold the signal flipped within minutes, and the reversal rule cut trades for tiny fee-eaten losses before the 2:1 TP/SL could ever govern. <span className="text-sol-green">Mitigation:</span> 0.25 threshold + 1h candles + ADX(14)&gt;20, and the <strong>reversal exit now only banks winners ≥1.5%</strong> — losers ride to the ATR stop, so the hard SL/TP is the real exit system.
                   </li>
                   <li>
                     <strong className="text-text-heading">Counter-trend entries.</strong> The live post-mortem showed every losing long was opened into a falling market. <span className="text-sol-green">Mitigation:</span> the 200-EMA primary-trend filter and the DXY/yield/VIX macro filter both block trades that fight the prevailing trend.
                   </li>
                   <li>
+                    <strong className="text-text-heading">Re-arming the same failed level.</strong> The bot fired four longs in a ~0.3-wide chop band and lost them all. <span className="text-sol-green">Mitigation:</span> a <strong>same-zone re-entry block</strong> refuses the same side within 0.6% of the last failed entry for 60 min, on top of the 8-loss circuit breaker.
+                  </li>
+                  <li>
+                    <strong className="text-text-heading">Uniform sizing ignores conviction.</strong> Every trade was the same size regardless of signal strength. <span className="text-sol-green">Mitigation:</span> <strong>conviction-based sizing</strong> scales collateral by |Σ| (floor 60% at threshold → 100% at full conviction); it only de-risks marginal trades and never exceeds the configured base.
+                  </li>
+                  <li>
                     <strong className="text-text-heading">Leverage vs. stop distance.</strong> A tight stop under 3–5x leverage can be wicked out inside normal SOL volatility. Stops are ATR-derived (not a fixed %) and a trailing stop locks gains — but <strong>leverage still amplifies both noise and loss</strong>; size down in choppy regimes.
                   </li>
                   <li>
-                    <strong className="text-text-heading">Fees &amp; funding drag.</strong> Backtests exclude taker fees, borrow/funding and slippage. At small size and high frequency these can erase a real edge entirely (5-minute scalping was net-negative even before the gross edge). Treat the engine as <strong>1h-or-slower</strong>.
+                    <strong className="text-text-heading">Fees &amp; funding drag.</strong> Backtests exclude taker fees, borrow/funding and slippage. At small size and high frequency these can erase a real edge entirely (5-minute scalping was net-negative even before the gross edge). The ≥1.5% reversal buffer exists specifically to clear Jupiter's open/close + borrow fees; still, treat the engine as <strong>1h-or-slower</strong>.
                   </li>
                   <li>
                     <strong className="text-text-heading">In-sample optimism.</strong> The headline Sharpe/PnL numbers are tuned on recent 30–90d windows and will <strong>not</strong> persist unchanged. They are a hypothesis to validate walk-forward and with costs — not a guarantee. Paper-trade before risking capital.

@@ -2228,6 +2228,12 @@ export interface JupiterConfig {
   cumulativePnL: number;
   interval?: string;
   useRegimeFilter?: boolean; // 200-EMA primary-trend gate (default ON): only long above, short below.
+  minReversalProfitPct?: number; // reversal exit only fires above this leveraged profit % (default 1.5; 0 = off).
+  reentryBlockPct?: number; // block re-arming the same side within this % of a failed entry (default 0.6; 0 = off).
+  reentryBlockMinutes?: number; // duration of the same-zone re-entry lockout (default 60).
+  useConvictionSizing?: boolean; // scale size by |Σ| signal strength (default ON).
+  convictionSizeFloor?: number; // smallest fraction of base size for a threshold-strength signal (default 0.6).
+  lastFailedEntry?: { price: number; side: "LONG" | "SHORT"; at: number }; // last losing entry (for re-entry block).
   auditLogs?: Array<AuditLogEntry>; // per-sync reasoning trail (why each tick entered/held/skipped).
   activeTrade: {
     side: "LONG" | "SHORT";
@@ -3732,11 +3738,23 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         }
       }
 
-      // Reversal trend changes
+      // Reversal trend changes — but ONLY take a reversal exit once the trade has cleared a
+      // fee/noise buffer of profit. Previously the reversal rule fired the instant the signal
+      // flipped, closing trades in 4–5 min for tiny ±0.x% results that Jupiter's open/close +
+      // borrow fees turned net-negative (the "phantom R:R" / premature-exit problem). Now the
+      // hard SL and trailing stop are the ONLY exits for an unprofitable trade — the reversal can
+      // only realize a *winner*. minReversalProfitPct is leveraged % (default 1.5%); 0 disables.
+      const minReversalProfit = (config as any).minReversalProfitPct ?? 1.5;
       if (!shouldClose && enterSide !== "HOLD" && enterSide !== activeTrade.side) {
-        shouldClose = true;
-        reversalReentry = true; // Rule 04: settle and open the opposite on the same tick
-        closeReason = `Trend Reversal (Signal flipped to ${enterSide})`;
+        if (currentPnlPercent >= minReversalProfit) {
+          shouldClose = true;
+          reversalReentry = true; // Rule 04: settle and open the opposite on the same tick
+          closeReason = `Trend Reversal — banked +${currentPnlPercent.toFixed(2)}% (signal flipped to ${enterSide})`;
+        } else {
+          // Signal flipped but we're not yet in fee-clearing profit: hold and let the hard SL /
+          // trailing stop govern the downside instead of churning out at a fee-eaten micro-loss.
+          addAuditLog(config, `Reversal signal to ${enterSide} IGNORED — trade only ${currentPnlPercent >= 0 ? "+" : ""}${currentPnlPercent.toFixed(2)}% (< +${minReversalProfit}% fee buffer). Holding; SL/trail governs.`, "info");
+        }
       }
 
       if (shouldClose) {
@@ -3748,8 +3766,13 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         // Stamp the time of the latest loss so the breaker can auto-reset after the cooldown window.
         if (currentPnlPercent < 0) {
           (config as any).consecutiveLossesUpdatedAt = Date.now();
+          // Remember the price/side/time of this failed entry so the daemon can refuse to re-arm
+          // the SAME side at the SAME level (the bot previously fired 4 longs in a ~0.3-wide chop
+          // band and lost them all). Cleared on any win below.
+          (config as any).lastFailedEntry = { price: entryPrice, side: activeTrade.side, at: Date.now() };
         } else {
           delete (config as any).consecutiveLossesUpdatedAt;
+          delete (config as any).lastFailedEntry;
         }
 
         const closedId = Math.random().toString(36).substring(2, 9);
@@ -3935,6 +3958,25 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         }
       }
 
+      // Same-zone re-entry block: after a losing trade, refuse to re-arm the SAME side within
+      // reentryBlockPct of the failed entry price for reentryBlockMinutes. The live log showed the
+      // bot firing four longs clustered at 74.13–74.49 and losing them all — re-arming the exact
+      // level that just failed. forceTrigger (manual) bypasses this. Disable via reentryBlockPct:0.
+      const reentryBlockPct = (config as any).reentryBlockPct ?? 0.6;   // % of price
+      const reentryBlockMin = (config as any).reentryBlockMinutes ?? 60; // minutes
+      const failed = (config as any).lastFailedEntry;
+      if (canEnter && !forceTrigger && reentryBlockPct > 0 && failed && enterSide === failed.side) {
+        const ageMin = (Date.now() - (failed.at || 0)) / 60000;
+        const distPct = Math.abs(pred.price - failed.price) / failed.price * 100;
+        if (ageMin <= reentryBlockMin && distPct <= reentryBlockPct) {
+          canEnter = false;
+          config.error = `Re-entry block: ${enterSide} within ${distPct.toFixed(2)}% of the last failed ${failed.side} entry ($${failed.price.toFixed(2)}), ${ageMin.toFixed(0)}m ago. Standing aside from the failed zone.`;
+          console.log(`[Jupiter Daemon] ${config.error}`);
+        } else if (ageMin > reentryBlockMin) {
+          delete (config as any).lastFailedEntry; // window elapsed — clear the lockout
+        }
+      }
+
       // ── Per-sync reasoning audit (expert-trader trail) ──────────────────────────────────────
       // Record WHY this tick acted or stood aside, with the numbers a trader would check:
       // composite bias Σ vs the conviction threshold, trend, ADX strength, primary-trend regime,
@@ -4080,6 +4122,24 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           } else {
             // SOL collateral: approximate USD value via the traded asset price (SOL-centric).
             collateralUsd = solBalance * allocationFraction * entryPrice;
+          }
+
+          // Conviction-based sizing: scale collateral by signal strength so the strongest,
+          // cleanest setups get full size and weak (near-threshold) signals get reduced size —
+          // it NEVER exceeds the configured base, so it only ever de-risks marginal trades.
+          // Factor maps |Σ| from the conviction threshold (0.25 -> floor) to 1.0 (-> full).
+          // Disable with useConvictionSizing:false. (Counter-macro/counter-trend trades are already
+          // blocked upstream, i.e. effectively size 0.)
+          if ((config as any).useConvictionSizing !== false) {
+            const sigmaAbs = Math.abs(pred.strategyDetails?.compositeScore ?? 0);
+            const floor = (config as any).convictionSizeFloor ?? 0.6; // smallest fraction of base
+            const span = Math.max(0.0001, 1 - SIGNAL_THRESHOLD);
+            const convFactor = Math.min(1, Math.max(floor, floor + (1 - floor) * ((sigmaAbs - SIGNAL_THRESHOLD) / span)));
+            if (convFactor < 1) {
+              const before = collateralUsd;
+              collateralUsd = collateralUsd * convFactor;
+              addAuditLog(config, `Conviction sizing: Σ=${sigmaAbs.toFixed(3)} → ${(convFactor * 100).toFixed(0)}% size ($${before.toFixed(2)} → $${collateralUsd.toFixed(2)} collateral).`, "info");
+            }
           }
 
           // Enforce the $10 minimum so the open isn't rejected by Jupiter.
