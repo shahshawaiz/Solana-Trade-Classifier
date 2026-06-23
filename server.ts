@@ -2108,7 +2108,7 @@ function addAuditLog(config: { auditLogs?: Array<AuditLogEntry> }, message: stri
     message,
     type
   });
-  if (config.auditLogs.length > 50) {
+  if (config.auditLogs.length > 500) {
     config.auditLogs.shift();
   }
 }

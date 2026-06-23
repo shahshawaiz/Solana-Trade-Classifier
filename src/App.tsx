@@ -1478,7 +1478,9 @@ export default function App() {
   const mergedAuditLogs = useMemo(() => {
     const j = ((jupiterConfig?.auditLogs as any[]) || []).map((e: any) => ({ ...e, source: "Auto-Trade" }));
     const t = ((telegramConfig?.auditLogs as any[]) || []).map((e: any) => ({ ...e, source: "Alert" }));
-    return [...j, ...t].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    return [...j, ...t]
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, 500);
   }, [jupiterConfig?.auditLogs, telegramConfig?.auditLogs]);
 
   // Pop a toast for any audit entry we haven't seen before (works for PAPER and REAL). The first
