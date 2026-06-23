@@ -3575,6 +3575,9 @@ async function executeOnChainTradeServerSide(
 // Background auto-execution logic for Connected Jupiter/Phantom Wallets
 async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
   const config = loadJupiterConfig();
+  // Capture the breaker reset generation; if it changes during this (possibly long-running)
+  // tick, a concurrent reset happened and we must not write our stale tripped state back.
+  const breakerGenAtStart = jupiterBreakerResetGen;
   let activeWallet = config.walletAddress;
   
   // Only override with server private key if it is actually configured by the user (not auto-generated)
@@ -3854,6 +3857,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       if (((config as any).consecutiveLosses || 0) > 0 && lastLossAt && (Date.now() - lastLossAt) >= CONSEC_LOSS_RESET_MS) {
         (config as any).consecutiveLosses = 0;
         delete (config as any).consecutiveLossesUpdatedAt;
+        bumpBreakerResetGen();
         if (config.error && config.error.includes("Circuit breaker")) delete config.error;
         console.log(`[Jupiter Daemon] Circuit breaker auto-reset: 6h elapsed since last loss. consecutiveLosses cleared.`);
       }
@@ -4150,17 +4154,38 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
     config.tradesHistory = tradesHistory;
     config.lastAction = pred.action;
 
+    honorConcurrentBreakerReset(config, breakerGenAtStart);
     saveJupiterConfig(config);
   } catch (err: any) {
     console.error("[Jupiter Daemon] FAILED execution checking loop:", err.message);
     config.error = err.message;
+    honorConcurrentBreakerReset(config, breakerGenAtStart);
     saveJupiterConfig(config);
+  }
+}
+
+// If the breaker streak was reset out-of-band during this tick, drop our stale tripped
+// state so the daemon's save doesn't resurrect the circuit breaker the user just cleared.
+function honorConcurrentBreakerReset(config: any, genAtStart: number) {
+  if (jupiterBreakerResetGen !== genAtStart) {
+    config.consecutiveLosses = 0;
+    delete config.consecutiveLossesUpdatedAt;
+    if (config.error && String(config.error).includes("Circuit breaker")) {
+      delete config.error;
+    }
   }
 }
 
 // Daemon scheduler handle
 let daemonTimer: NodeJS.Timeout | null = null;
 let jupiterDaemonTimer: NodeJS.Timeout | null = null;
+
+// Monotonic counter bumped whenever the circuit-breaker streak is reset out-of-band
+// (manual reset button, resetStats, or the 6h auto-reset). A long daemon tick captures
+// this at the start and, if it changed before the tick's final save, must NOT clobber
+// the reset by writing back its stale (tripped) consecutiveLosses/error snapshot.
+let jupiterBreakerResetGen = 0;
+function bumpBreakerResetGen() { jupiterBreakerResetGen++; }
 
 function restartDaemon(minutes: number) {
   if (daemonTimer) {
@@ -5494,6 +5519,7 @@ app.post("/api/jupiter-config", async (req, res) => {
       if (current.error && current.error.includes("Circuit breaker")) {
         (current as any).consecutiveLosses = 0;
         delete (current as any).consecutiveLossesUpdatedAt;
+        bumpBreakerResetGen();
       }
       delete current.error;
     }
@@ -5601,6 +5627,7 @@ app.post("/api/jupiter-config", async (req, res) => {
       current.lastTradeAddedAt = "";
       (current as any).consecutiveLosses = 0;
       delete (current as any).consecutiveLossesUpdatedAt;
+      bumpBreakerResetGen();
       if (current.error && current.error.includes("Circuit breaker")) {
         delete current.error;
       }
@@ -5609,11 +5636,15 @@ app.post("/api/jupiter-config", async (req, res) => {
     if (resetConsecutiveLosses) {
       (current as any).consecutiveLosses = 0;
       delete (current as any).consecutiveLossesUpdatedAt;
+      bumpBreakerResetGen();
       if (current.error && current.error.includes("Circuit breaker")) {
         delete current.error;
       }
+      // Persist immediately so a concurrent daemon tick can't reintroduce the breaker
+      // before the handler's final save below.
+      saveJupiterConfig(current);
     }
-    
+
     restartJupiterDaemon(current.frequencyMinutes || 5);
 
     if (forceClose && current.activeTrade) {
