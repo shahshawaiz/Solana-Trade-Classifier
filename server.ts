@@ -2259,7 +2259,9 @@ export const JUPITER_CONFIG_FILE = path.join(os.tmpdir(), "jupiter_config_state.
 // When JUP_PRIVATE_KEY is configured in the environment it is the single, authoritative
 // trading wallet — overriding any stored/auto-generated key. Returns true when applied.
 function applyEnvPrivateKey(config: any): boolean {
-  const envKey = (process.env.JUP_PRIVATE_KEY || "").trim();
+  // Same source/precedence as scripts/railway-start.sh and syncJupCliKeyFromEnv so the
+  // tracked wallet always matches the wallet that actually signs on-chain.
+  const envKey = (process.env.JUP_PRIVATE_KEY || process.env.PRIVATE_KEY || "").trim();
   if (!envKey) return false;
   try {
     const keypair = getKeypairFromPrivateKey(envKey);
@@ -2269,7 +2271,8 @@ function applyEnvPrivateKey(config: any): boolean {
     delete config.disconnected;
     return true;
   } catch (e: any) {
-    console.error("[Jupiter Config] JUP_PRIVATE_KEY is set but invalid:", e.message);
+    // PRIVATE_KEY may legitimately be a non-Solana (e.g. EVM) key on some setups — only warn.
+    console.warn("[Jupiter Config] Env signing key (JUP_PRIVATE_KEY/PRIVATE_KEY) is not a valid Solana key:", e.message);
     return false;
   }
 }
@@ -3340,28 +3343,28 @@ function jupCliKeyName(config: any): string {
 // signing uses the same wallet that loadJupiterConfig tracks. Tolerates a missing
 // CLI (e.g. serverless) and an already-imported key — never throws.
 function syncJupCliKeyFromEnv(): void {
-  const envKey = (process.env.JUP_PRIVATE_KEY || "").trim();
+  const envKey = (process.env.JUP_PRIVATE_KEY || process.env.PRIVATE_KEY || "").trim();
   if (!envKey) return;
   const keyName = jupCliKeyName(loadJupiterConfig());
-  const attempt = (args: string[]) => new Promise<boolean>((resolve) => {
-    execFile("jup", args, { timeout: 30000 }, (err, _stdout, stderr) => {
-      if (err) {
-        console.warn(`[Jupiter CLI] keys add (${args.join(" ").replace(envKey, "***")}) failed: ${((stderr || "").trim()) || err.message}`);
-        resolve(false);
-      } else {
-        resolve(true);
-      }
-    });
-  });
-  // Try with --force first (overwrite existing), then fall back to a plain add.
-  attempt(["keys", "add", keyName, "--private-key", envKey, "--force"]).then((ok) => {
-    if (ok) {
-      console.log(`[Jupiter CLI] Imported JUP_PRIVATE_KEY into keystore as "${keyName}".`);
+  // Never let the raw private key reach the logs — strip it from any CLI output we print.
+  const mask = (s: string) => (s || "").split(envKey).join("***");
+
+  // The Railway start script (scripts/railway-start.sh) already imports this key before
+  // launch, so first check whether the keystore has it and skip if so. This avoids the
+  // "key already exists" error and any delete/re-add race with the daemon. This helper
+  // mainly covers `npm run start` / local dev where the start script didn't run.
+  execFile("jup", ["keys", "list"], { timeout: 30000 }, (listErr, listOut) => {
+    const have = !listErr && new RegExp(`(^|\\s|")${keyName}($|\\s|")`).test(listOut || "");
+    if (have) {
+      console.log(`[Jupiter CLI] Keystore already contains "${keyName}" — skipping env key import.`);
       return;
     }
-    attempt(["keys", "add", keyName, "--private-key", envKey]).then((ok2) => {
-      if (ok2) console.log(`[Jupiter CLI] Imported JUP_PRIVATE_KEY into keystore as "${keyName}".`);
-      else console.warn(`[Jupiter CLI] Could not import JUP_PRIVATE_KEY automatically — if running REAL trades, run: jup keys add ${keyName} --private-key <JUP_PRIVATE_KEY>`);
+    execFile("jup", ["keys", "add", keyName, "--private-key", envKey], { timeout: 30000 }, (addErr, _o, addStderr) => {
+      if (addErr) {
+        console.warn(`[Jupiter CLI] Could not import the env signing key as "${keyName}": ${mask((addStderr || addErr.message || "").trim())}`);
+      } else {
+        console.log(`[Jupiter CLI] Imported env signing key into keystore as "${keyName}".`);
+      }
     });
   });
 }
