@@ -157,28 +157,74 @@ export function checkRsiTimingGate(rsis: number[], side: "LONG" | "SHORT"): bool
   return false;
 }
 
-// Check if MACD histogram is > 0 and rising for 2 candles (LONG) or < 0 and falling for 2 candles (SHORT)
+// MACD histogram sign filter (moderate/relaxed): histogram simply on the right side of zero —
+// > 0 for LONG, < 0 for SHORT. The previous build also required the histogram to be strictly
+// accelerating for 2 consecutive bars; that "rising 2 bars" condition almost never coincided with
+// the RSI-timing trigger on 15m candles, so the bot effectively never entered. Sign-only keeps the
+// trend-agreement intent without the over-strict timing. Used as one of two momentum triggers
+// (MACD OR RSI-timing) — see entryGateBlock.
 export function checkMacdGate(closes: number[], side: "LONG" | "SHORT"): boolean {
   if (closes.length < 35) return false;
   const fastEma = calculateEMA(closes, 12);
   const slowEma = calculateEMA(closes, 26);
   const macdLine = fastEma.map((f, i) => f - slowEma[i]);
   const signalLine = calculateEMA(macdLine, 9);
-  
+
   const h = macdLine.map((m, i) => m - signalLine[i]);
   const n = h.length;
-  if (n < 3) return false;
-  
+  if (n < 1) return false;
+
   const histCurr = h[n - 1];
-  const histPrev1 = h[n - 2];
-  const histPrev2 = h[n - 3];
-  
+
   if (side === "LONG") {
-    return histCurr > 0 && histCurr > histPrev1 && histPrev1 > histPrev2;
+    return histCurr > 0;
   } else if (side === "SHORT") {
-    return histCurr < 0 && histCurr < histPrev1 && histPrev1 < histPrev2;
+    return histCurr < 0;
   }
   return false;
+}
+
+// Minimum ADX(14) for an entry to be considered "trending" enough. Relaxed from 20 -> 15 (moderate
+// profile) and env-tunable. Below this the market is treated as ranging and entries are held.
+const ADX_GATE_MIN = Number(process.env.ADX_GATE_MIN) || 15;
+
+// Shared entry-gate stack — the SINGLE source of truth used by both the live auto-trader
+// (evaluateSignal) and the server /api/backtest engine (getTickSignal) so the two can never drift.
+// Moderate profile (per user selection):
+//   1. ADX(14) > ADX_GATE_MIN ......... trend-strength filter (ranging markets stand aside)
+//   2. 15m Supertrend direction ....... block counter-trend entries on the higher timeframe
+//   3. Momentum trigger ............... MACD-sign OR RSI(21)-timing cross (either one, not both)
+// Returns a { aRec } block reason when an entry should be suppressed, or null when all gates pass.
+export function entryGateBlock(
+  side: "LONG" | "SHORT",
+  closes: number[],
+  quotes: any[],
+  interval: string
+): { aRec: string } | null {
+  // 1. ADX trend-strength gate
+  const adxVal = calculateADX(quotes, 14);
+  if (adxVal <= ADX_GATE_MIN) {
+    return { aRec: `Hold (ADX is ranging: ${adxVal.toFixed(1)} <= ${ADX_GATE_MIN})` };
+  }
+
+  // 2. 15m Supertrend direction gate
+  let st15 = 0;
+  if (interval === "5m") {
+    st15 = supertrendScore(resampleTo15mQuotes(quotes), 20, 4);
+  } else if (interval === "15m") {
+    st15 = supertrendScore(quotes, 20, 4);
+  }
+  if (st15 === -1 && side === "LONG") return { aRec: "Hold (15m Supertrend is Bearish)" };
+  if (st15 === 1 && side === "SHORT") return { aRec: "Hold (15m Supertrend is Bullish)" };
+
+  // 3. Momentum trigger: MACD-sign OR RSI(21)-timing cross (either confirms — not both required)
+  const macdOk = checkMacdGate(closes, side);
+  const rsiOk = checkRsiTimingGate(calculateRSI(closes, 21), side);
+  if (!macdOk && !rsiOk) {
+    return { aRec: "Hold (no momentum trigger: MACD sign & RSI timing both fail)" };
+  }
+
+  return null;
 }
 
 // Helper to resample 5m quotes into 15m candles
@@ -1817,55 +1863,14 @@ export async function getPredictionData(token: string, topic: string, weights: a
           aRec = sData.isChop ? "Hold Chop Zone" : "Hold (Σ below threshold)";
       }
 
-      // Apply Technical and Momentum Gates to Entries
+      // Apply the shared moderate entry-gate stack (ADX strength · 15m Supertrend direction ·
+      // MACD-sign OR RSI-timing momentum). Single source of truth shared with /api/backtest.
       if (pSide === "LONG" || pSide === "SHORT") {
-          // 1. ADX(14) > 20 gate
-          const adxVal = calculateADX(localQuotes, 14);
-          if (adxVal <= 20) {
+          const block = entryGateBlock(pSide as any, priceCloses, localQuotes, validInterval);
+          if (block) {
               pSide = "HOLD";
-              aRec = `Hold (ADX is ranging: ${adxVal.toFixed(1)} <= 20)`;
+              aRec = block.aRec;
               trnd = "CHOP/HOLD";
-          }
-          
-          // 2. 15m Supertrend Direction Gate
-          if (pSide !== "HOLD") {
-              let st15 = 0;
-              if (validInterval === "5m") {
-                  const resampled = resampleTo15mQuotes(localQuotes);
-                  st15 = supertrendScore(resampled, 20, 4);
-              } else if (validInterval === "15m") {
-                  st15 = supertrendScore(localQuotes, 20, 4);
-              }
-              if (st15 === -1 && pSide === "LONG") {
-                  pSide = "HOLD";
-                  aRec = "Hold (15m Supertrend is Bearish)";
-                  trnd = "CHOP/HOLD";
-              } else if (st15 === 1 && pSide === "SHORT") {
-                  pSide = "HOLD";
-                  aRec = "Hold (15m Supertrend is Bullish)";
-                  trnd = "CHOP/HOLD";
-              }
-          }
-
-          // 3. MACD histogram direction filter
-          if (pSide !== "HOLD") {
-              const macdOk = checkMacdGate(priceCloses, pSide as any);
-              if (!macdOk) {
-                  pSide = "HOLD";
-                  aRec = pSide === "LONG" ? "Hold (MACD Histogram not positive/rising)" : "Hold (MACD Histogram not negative/falling)";
-                  trnd = "CHOP/HOLD";
-              }
-          }
-
-          // 4. RSI(21) timing tool confirmation
-          if (pSide !== "HOLD") {
-              const localRsis = calculateRSI(priceCloses, 21);
-              const rsiOk = checkRsiTimingGate(localRsis, pSide as any);
-              if (!rsiOk) {
-                  pSide = "HOLD";
-                  aRec = pSide === "LONG" ? "Hold (Waiting for RSI to cross above 35)" : "Hold (Waiting for RSI to cross below 65)";
-                  trnd = "CHOP/HOLD";
-              }
           }
       }
 
@@ -4600,56 +4605,15 @@ app.post("/api/backtest", async (req, res) => {
           aRec = sData.isChop ? "Hold Chop Zone" : "Hold (Σ below threshold)";
         }
 
-        // Apply Technical and Momentum Gates to Entries in Backtesting
+        // Apply the SAME shared moderate entry-gate stack the live trader uses, so this
+        // backtest stays faithful to live behaviour (single source of truth: entryGateBlock).
         if (pSide === "LONG" || pSide === "SHORT") {
           const tickQuotes = quotes.slice(0, tickIdx + 1);
-          // 1. ADX(14) > 20 gate
-          const adxVal = calculateADX(tickQuotes, 14);
-          if (adxVal <= 20) {
+          const block = entryGateBlock(pSide as any, tickCloses, tickQuotes, interval);
+          if (block) {
             pSide = "HOLD";
-            aRec = `Hold (ADX is ranging: ${adxVal.toFixed(1)} <= 20)`;
+            aRec = block.aRec;
             trnd = "CHOP/HOLD";
-          }
-          
-          // 2. 15m Supertrend Direction Gate
-          if (pSide !== "HOLD") {
-            let st15 = 0;
-            if (interval === "5m") {
-              const resampled = resampleTo15mQuotes(tickQuotes);
-              st15 = supertrendScore(resampled, 20, 4);
-            } else if (interval === "15m") {
-              st15 = supertrendScore(tickQuotes, 20, 4);
-            }
-            if (st15 === -1 && pSide === "LONG") {
-              pSide = "HOLD";
-              aRec = "Hold (15m Supertrend is Bearish)";
-              trnd = "CHOP/HOLD";
-            } else if (st15 === 1 && pSide === "SHORT") {
-              pSide = "HOLD";
-              aRec = "Hold (15m Supertrend is Bullish)";
-              trnd = "CHOP/HOLD";
-            }
-          }
-
-          // 3. MACD histogram direction filter
-          if (pSide !== "HOLD") {
-            const macdOk = checkMacdGate(tickCloses, pSide as any);
-            if (!macdOk) {
-              pSide = "HOLD";
-              aRec = pSide === "LONG" ? "Hold (MACD Histogram not positive/rising)" : "Hold (MACD Histogram not negative/falling)";
-              trnd = "CHOP/HOLD";
-            }
-          }
-
-          // 4. RSI(21) timing tool confirmation
-          if (pSide !== "HOLD") {
-            const tickRsis = calculateRSI(tickCloses, 21);
-            const rsiOk = checkRsiTimingGate(tickRsis, pSide as any);
-            if (!rsiOk) {
-              pSide = "HOLD";
-              aRec = pSide === "LONG" ? "Hold (Waiting for RSI to cross above 35)" : "Hold (Waiting for RSI to cross below 65)";
-              trnd = "CHOP/HOLD";
-            }
           }
         }
         

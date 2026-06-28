@@ -1,5 +1,20 @@
 /**
  * Backtest engine logic for Solana trading strategy.
+ *
+ * ⚠️ NOT THE AUTHORITATIVE BACKTEST — DOES NOT MATCH THE LIVE AUTO-TRADER.
+ * This is a simplified, close-only engine used by the in-app UI panel (App.tsx) and the
+ * macro-benchmark script. It diverges from the live bot in two structural ways that close-only
+ * data cannot bridge:
+ *   1. Composite Σ: here it is EMA-cross techSig + binary RSI(30/70). The live trader
+ *      (server.ts performCoreAnalysis) uses a continuous MACD score + RSI score + Supertrend.
+ *   2. Entry gates: the live trader applies entryGateBlock (ADX(14) trend-strength + 15m
+ *      Supertrend direction + MACD-sign/RSI-timing momentum). ADX and Supertrend need OHLC
+ *      (high/low), which this dataset does not carry — so those gates are absent here, making
+ *      this engine LESS selective (more trades) than live.
+ *
+ * The faithful backtest of the live strategy is the server's POST /api/backtest (getTickSignal),
+ * which shares performCoreAnalysis + entryGateBlock with the live daemon. STRATEGY_RESULTS.md is
+ * generated from that engine. Use this UI engine for quick directional/weight intuition only.
  */
 
 export interface MarketData {
