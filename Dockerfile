@@ -2,9 +2,9 @@
 # (Express API + built Vite UI + 5-min trading daemons + jup CLI for REAL perps).
 FROM node:20-bookworm-slim
 
-# bash (start script) + toolchain for any native npm deps
+# bash (start script) + git (build-time version stamp) + toolchain for any native npm deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash python3 make g++ ca-certificates \
+      bash git python3 make g++ ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
