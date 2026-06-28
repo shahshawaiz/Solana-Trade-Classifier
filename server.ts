@@ -50,15 +50,21 @@ const bs58: {
 // every automated trade's audit log + journal entry so each trade records the build it ran under.
 interface AppVersion { version: string; commit: string; fullCommit?: string; branch?: string; build?: number; buildTime?: string; display: string; }
 let APP_VERSION: AppVersion = (() => {
+  let info: AppVersion = { version: "2.0.0", commit: "unknown", branch: "", display: "v2.0.0 (unknown)" };
   try {
     const raw = fs.readFileSync(path.join(process.cwd(), "version.json"), "utf8");
     const v = JSON.parse(raw);
-    if (v && v.display) return v as AppVersion;
+    if (v && v.version) info = v as AppVersion;
   } catch {}
-  const sha = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.DEPLOYMENT_ID || "";
-  const shortSha = sha ? sha.slice(0, 7) : "unknown";
-  const version = "2.0.0";
-  return { version, commit: shortSha, fullCommit: sha, branch: process.env.RAILWAY_GIT_BRANCH || "", display: `v${version} (${shortSha})` };
+  // Overlay the platform commit SHA at runtime. On Railway the Docker build excludes .git, so
+  // version.json can't carry a real commit — but RAILWAY_GIT_COMMIT_SHA is set at runtime, so this
+  // still yields a distinct version per commit/deploy.
+  const envSha = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.DEPLOYMENT_ID || "";
+  if (envSha && (!info.commit || info.commit === "unknown")) {
+    const short = envSha.slice(0, 7);
+    info = { ...info, commit: short, fullCommit: envSha, branch: info.branch || process.env.RAILWAY_GIT_BRANCH || "", display: `v${info.version} (${short})` };
+  }
+  return info;
 })();
 export function getAppVersion(): AppVersion { return APP_VERSION; }
 
