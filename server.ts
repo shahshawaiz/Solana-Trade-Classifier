@@ -227,6 +227,84 @@ export function entryGateBlock(
   return null;
 }
 
+// ───────────────────────── Exit strategy (shared) ─────────────────────────
+// Volatility-adaptive exit: partial scale-out + breakeven + ATR trailing stop. One source of
+// truth for the live daemon, the /api/backtest engine, and scripts/macro-benchmark.ts, so the
+// exit behaviour can't drift between simulation and live. All decisions are in PRICE space and
+// therefore leverage-independent — callers apply their own leverage to the realized %.
+//
+//   • Initial stop ......... entry ∓ EXIT_SL_MULT×ATR              (hard loss cap)
+//   • Partial scale-out .... at entry ± EXIT_PARTIAL_MULT×ATR, take EXIT_PARTIAL_FRAC of size
+//                            AND move the stop to breakeven (entry)  → risk-free runner
+//   • Trailing stop ........ after the scale-out, ratchet the stop to peak ∓ EXIT_TRAIL_MULT×ATR
+//   • Hard TP cap .......... entry ± EXIT_TP_MULT×ATR               (close the runner)
+// Time-limit and reversal exits stay in the callers (they differ live vs backtest).
+export const EXIT_SL_MULT = Number(process.env.EXIT_SL_MULT) || 1.5;
+export const EXIT_TP_MULT = Number(process.env.EXIT_TP_MULT) || 4.0;
+export const EXIT_PARTIAL_MULT = Number(process.env.EXIT_PARTIAL_MULT) || 1.5;
+export const EXIT_PARTIAL_FRAC = Number(process.env.EXIT_PARTIAL_FRAC) || 0.5;
+export const EXIT_TRAIL_MULT = Number(process.env.EXIT_TRAIL_MULT) || 2.0;
+
+export interface ExitState {
+  side: "LONG" | "SHORT";
+  entryPrice: number;
+  atr: number;          // ATR (price units) captured at entry
+  peak: number;         // best (favorable) price seen since entry
+  stopPrice: number;    // active protective stop — moves to breakeven then trails
+  partialTaken: boolean;
+}
+
+export function initExitState(side: "LONG" | "SHORT", entryPrice: number, atr: number): ExitState {
+  const a = atr > 0 ? atr : 0;
+  const stopPrice = side === "LONG" ? entryPrice - EXIT_SL_MULT * a : entryPrice + EXIT_SL_MULT * a;
+  return { side, entryPrice, atr: a, peak: entryPrice, stopPrice, partialTaken: false };
+}
+
+// Evaluate one mark price. Returns the (possibly updated) state plus, if applicable, a partial
+// scale-out fraction to realize this tick and/or a full-close reason for the remainder.
+export function evaluateExit(prev: ExitState, price: number): { partialFrac: number; close: string | null; state: ExitState } {
+  const s: ExitState = { ...prev };
+  const long = s.side === "LONG";
+  let partialFrac = 0;
+  let close: string | null = null;
+
+  s.peak = long ? Math.max(s.peak, price) : Math.min(s.peak, price);
+
+  // Degenerate (no ATR yet): only the fixed stop is active.
+  if (s.atr <= 0) {
+    if (long ? price <= s.stopPrice : price >= s.stopPrice) close = "Stop Loss";
+    return { partialFrac, close, state: s };
+  }
+
+  const tpCap = long ? s.entryPrice + EXIT_TP_MULT * s.atr : s.entryPrice - EXIT_TP_MULT * s.atr;
+  const partialTrig = long ? s.entryPrice + EXIT_PARTIAL_MULT * s.atr : s.entryPrice - EXIT_PARTIAL_MULT * s.atr;
+
+  // 1. Active stop first (initial SL → breakeven → trail all live in stopPrice).
+  if (long ? price <= s.stopPrice : price >= s.stopPrice) {
+    const beReached = long ? s.stopPrice >= s.entryPrice : s.stopPrice <= s.entryPrice;
+    close = !s.partialTaken ? "Stop Loss" : beReached ? "Trailing Stop" : "Stop Loss";
+    return { partialFrac, close, state: s };
+  }
+
+  // 2. Partial scale-out + move stop to breakeven (once).
+  if (!s.partialTaken && (long ? price >= partialTrig : price <= partialTrig)) {
+    partialFrac = EXIT_PARTIAL_FRAC;
+    s.partialTaken = true;
+    s.stopPrice = long ? Math.max(s.stopPrice, s.entryPrice) : Math.min(s.stopPrice, s.entryPrice);
+  }
+
+  // 3. Trail the stop behind the peak once the runner is risk-free (ratchets favorably only).
+  if (s.partialTaken) {
+    const trail = long ? s.peak - EXIT_TRAIL_MULT * s.atr : s.peak + EXIT_TRAIL_MULT * s.atr;
+    s.stopPrice = long ? Math.max(s.stopPrice, trail) : Math.min(s.stopPrice, trail);
+  }
+
+  // 4. Hard take-profit cap on the runner.
+  if (long ? price >= tpCap : price <= tpCap) close = "Take Profit Cap";
+
+  return { partialFrac, close, state: s };
+}
+
 // Helper to resample 5m quotes into 15m candles
 export function resampleTo15mQuotes(quotes5m: any[]): any[] {
   const quotes15m: any[] = [];
@@ -2261,6 +2339,11 @@ export interface JupiterConfig {
     takeProfitPct?: number;
     stopLossPct?: number;
     trailPeak?: number;
+    atrAtEntry?: number;     // ATR (price) captured at entry — drives the shared exit helper
+    stopPrice?: number;      // active protective stop (price); ratchets BE → trail
+    partialTaken?: boolean;  // true once the +1.5×ATR 50% scale-out has fired
+    realizedPnlPct?: number; // leveraged % already banked via partial scale-out(s)
+    remainingFrac?: number;  // open fraction of the position (1 → 0.5 after scale-out)
     positionPubkey?: string;
     sentiment?: number;
     technicalScore?: number;
@@ -3707,49 +3790,74 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         currentPnlPercent = ((entryPrice - exitPrice) / entryPrice) * 100 * leverage;
       }
 
-      // Check TP/SL based strictly on the liquidity pools calculated at entry
-      const currentTpPct = activeTrade.takeProfitPct || 4;
-      const currentSlPct = activeTrade.stopLossPct || 2;
-      const tpPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 + (currentTpPct / 100) / leverage) : entryPrice * (1 - (currentTpPct / 100) / leverage);
-      const slPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 - (currentSlPct / 100) / leverage) : entryPrice * (1 + (currentSlPct / 100) / leverage);
-
-      if (activeTrade.side === "LONG") {
-        if (exitPrice >= tpPriceLimit) {
-          shouldClose = true;
-          closeReason = `Take Profit Pool Hit ($${tpPriceLimit.toFixed(2)})`;
-        } else if (exitPrice <= slPriceLimit) {
-          shouldClose = true;
-          closeReason = `Stop Loss Pool Dump ($${slPriceLimit.toFixed(2)})`;
+      // Volatility-adaptive exit — the SAME shared helper the backtest/benchmark use: partial
+      // scale-out (50% at +1.5×ATR) + move stop to breakeven + ATR trailing stop + hard TP cap
+      // (4×ATR). Falls back to the stored fixed TP/SL % only when ATR was unavailable at entry.
+      const atrEntry = activeTrade.atrAtEntry || 0;
+      if (atrEntry > 0) {
+        if (activeTrade.stopPrice === undefined) {
+          activeTrade.stopPrice = activeTrade.side === "LONG" ? entryPrice - EXIT_SL_MULT * atrEntry : entryPrice + EXIT_SL_MULT * atrEntry;
         }
-      } else if (activeTrade.side === "SHORT") {
-        if (exitPrice <= tpPriceLimit) {
-          shouldClose = true;
-          closeReason = `Take Profit Pool Hit ($${tpPriceLimit.toFixed(2)})`;
-        } else if (exitPrice >= slPriceLimit) {
-          shouldClose = true;
-          closeReason = `Stop Loss Pool Pump ($${slPriceLimit.toFixed(2)})`;
-        }
-      }
+        if (activeTrade.remainingFrac === undefined) activeTrade.remainingFrac = 1;
+        if (activeTrade.realizedPnlPct === undefined) activeTrade.realizedPnlPct = 0;
 
-      // Trailing stop: ratchet a stop behind the best price reached, at the same distance as
-      // the initial (ATR-based) stop. It only fires once the stop has moved into profit (beyond
-      // entry), so the hard SL still handles losses — this just locks in gains on winners.
-      if (!shouldClose) {
-        const trailDist = Math.abs(entryPrice - slPriceLimit);
+        const res = evaluateExit({
+          side: activeTrade.side,
+          entryPrice,
+          atr: atrEntry,
+          peak: activeTrade.trailPeak || entryPrice,
+          stopPrice: activeTrade.stopPrice,
+          partialTaken: !!activeTrade.partialTaken,
+        }, exitPrice);
+        activeTrade.trailPeak = res.state.peak;
+        activeTrade.stopPrice = res.state.stopPrice;
+
+        // Partial scale-out: bank EXIT_PARTIAL_FRAC of the leveraged move, reduce size, stop→BE.
+        if (res.partialFrac > 0 && !activeTrade.partialTaken) {
+          const frac = res.partialFrac;
+          const banked = currentPnlPercent * frac;
+          activeTrade.realizedPnlPct = (activeTrade.realizedPnlPct || 0) + banked;
+          activeTrade.remainingFrac = (activeTrade.remainingFrac || 1) - frac;
+          activeTrade.partialTaken = true;
+          const closeSize = activeTrade.sizeInSol * frac;
+          activeTrade.sizeInSol = activeTrade.sizeInSol - closeSize;
+          cumulativePnL += banked;
+          addAuditLog(config, `SCALE-OUT ${(frac * 100).toFixed(0)}% ${activeTrade.side} @ $${exitPrice.toFixed(2)} (+${EXIT_PARTIAL_MULT}×ATR) — banked ${banked >= 0 ? "+" : ""}${banked.toFixed(2)}%; stop → breakeven $${entryPrice.toFixed(2)}. Runner ${(activeTrade.remainingFrac * 100).toFixed(0)}% now trailing.`, "trade");
+          try {
+            if (config.privateKey && activeTrade.mode !== "PAPER") {
+              console.log(`[Jupiter Perps] Executing REAL partial CLOSE (${(frac * 100).toFixed(0)}%). Size: ${closeSize.toFixed(4)}`);
+              await executeOnChainTradeServerSide("CLOSE", closeSize);
+            } else {
+              console.log(`[Jupiter Perps] PAPER partial scale-out ${(frac * 100).toFixed(0)}% (simulated).`);
+            }
+          } catch (e: any) {
+            console.error("[Jupiter Daemon] Partial scale-out close failed:", e.message);
+          }
+        }
+
+        if (res.close) {
+          shouldClose = true;
+          if (res.close === "Take Profit Cap") {
+            const cap = activeTrade.side === "LONG" ? entryPrice + EXIT_TP_MULT * atrEntry : entryPrice - EXIT_TP_MULT * atrEntry;
+            closeReason = `Take Profit Cap (${EXIT_TP_MULT}×ATR, $${cap.toFixed(2)})`;
+          } else if (res.close === "Trailing Stop") {
+            closeReason = `Trailing Stop ($${activeTrade.stopPrice.toFixed(2)}, peak $${(activeTrade.trailPeak || entryPrice).toFixed(2)})`;
+          } else {
+            closeReason = `Stop Loss ($${activeTrade.stopPrice.toFixed(2)})`;
+          }
+        }
+      } else {
+        // Legacy fallback (no ATR at entry): fixed TP/SL on the stored leveraged %.
+        const currentTpPct = activeTrade.takeProfitPct || 4;
+        const currentSlPct = activeTrade.stopLossPct || 2;
+        const tpPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 + (currentTpPct / 100) / leverage) : entryPrice * (1 - (currentTpPct / 100) / leverage);
+        const slPriceLimit = activeTrade.side === "LONG" ? entryPrice * (1 - (currentSlPct / 100) / leverage) : entryPrice * (1 + (currentSlPct / 100) / leverage);
         if (activeTrade.side === "LONG") {
-          activeTrade.trailPeak = Math.max(activeTrade.trailPeak || entryPrice, exitPrice);
-          const trailStop = activeTrade.trailPeak - trailDist;
-          if (trailStop > entryPrice && exitPrice <= trailStop) {
-            shouldClose = true;
-            closeReason = `Trailing Stop ($${trailStop.toFixed(2)}, peak $${activeTrade.trailPeak.toFixed(2)})`;
-          }
+          if (exitPrice >= tpPriceLimit) { shouldClose = true; closeReason = `Take Profit Pool Hit ($${tpPriceLimit.toFixed(2)})`; }
+          else if (exitPrice <= slPriceLimit) { shouldClose = true; closeReason = `Stop Loss Pool Dump ($${slPriceLimit.toFixed(2)})`; }
         } else if (activeTrade.side === "SHORT") {
-          activeTrade.trailPeak = Math.min(activeTrade.trailPeak || entryPrice, exitPrice);
-          const trailStop = activeTrade.trailPeak + trailDist;
-          if (trailStop < entryPrice && exitPrice >= trailStop) {
-            shouldClose = true;
-            closeReason = `Trailing Stop ($${trailStop.toFixed(2)}, trough $${activeTrade.trailPeak.toFixed(2)})`;
-          }
+          if (exitPrice <= tpPriceLimit) { shouldClose = true; closeReason = `Take Profit Pool Hit ($${tpPriceLimit.toFixed(2)})`; }
+          else if (exitPrice >= slPriceLimit) { shouldClose = true; closeReason = `Stop Loss Pool Pump ($${slPriceLimit.toFixed(2)})`; }
         }
       }
 
@@ -3773,8 +3881,15 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       }
 
       if (shouldClose) {
+        // Fold any banked partial scale-out into the whole-trade result. The remainder leg is
+        // remainingFrac of the position; realizedPnlPct holds the already-banked (and already
+        // cumulated) partial, so only the remainder is added to cumulative here. From this point
+        // currentPnlPercent represents the FULL trade result for logs/telegram/journal.
+        const remFrac = activeTrade.remainingFrac ?? 1;
+        const remainderPnl = remFrac * currentPnlPercent;
+        currentPnlPercent = (activeTrade.realizedPnlPct || 0) + remainderPnl;
         lastTradePnL = currentPnlPercent;
-        cumulativePnL += currentPnlPercent;
+        cumulativePnL += remainderPnl;
 
         // Track consecutive losing trades for the risk circuit breaker (win resets the streak).
         (config as any).consecutiveLosses = currentPnlPercent < 0 ? (((config as any).consecutiveLosses || 0) + 1) : 0;
@@ -4204,6 +4319,10 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             takeProfitPct: tpPct,
             stopLossPct: slPct,
             trailPeak: entryPrice, // best price seen — drives the trailing stop
+            atrAtEntry: atrVal,    // ATR (price) for the shared partial-scale-out/trail exit
+            partialTaken: false,   // becomes true after the +1.5×ATR 50% scale-out fires
+            realizedPnlPct: 0,     // leveraged % already banked via partial scale-out(s)
+            remainingFrac: 1,      // open fraction of the position (1 → 0.5 after the scale-out)
             sentiment: pred.sentiment,
             technicalScore: pred.strategyDetails?.technicalScore,
             news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []

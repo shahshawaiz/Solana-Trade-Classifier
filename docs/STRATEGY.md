@@ -1,0 +1,203 @@
+# Cortex Alpha — Complete Trading Strategy
+
+This is the authoritative, end-to-end description of the automated strategy: how a bias is formed,
+when the bot enters, how it exits, the risk controls around it, and where each piece lives in code.
+It also documents the three engines (live, server backtest, benchmark) and their parity status.
+
+> ⚠️ **Reality check.** Backtest numbers are in-sample and optimistic; they exclude funding,
+> slippage, and most fees. The honest expectation for a well-built version of this is
+> *break-even-to-slightly-positive pre-fees*. See [STRATEGY_RESULTS.md](../STRATEGY_RESULTS.md) for
+> the methodology and the skeptical framing. Default execution mode is **PAPER**.
+
+---
+
+## 1. Pipeline at a glance
+
+```
+quotes (OHLC) + news ──▶ performCoreAnalysis ──▶ Σ (composite bias)
+                                                   │
+                       ┌───────────────────────────┘
+                       ▼
+   direction = Σ vs ±THRESHOLD  +  200-EMA regime  +  Chop-Zone guard
+                       │
+                       ▼
+   entryGateBlock:  ADX(14) > min  ·  15m Supertrend dir  ·  (MACD-sign OR RSI-timing)
+                       │
+                       ▼
+   2-bar confirmation  +  macro filter  +  cooldown / daily-cap / circuit-breaker
+                       │
+                       ▼  open
+   evaluateExit (per tick):  partial scale-out + breakeven + ATR trail + TP cap
+                       +  time-limit  +  in-profit reversal
+```
+
+Default candle interval is **15m**; the canonical backtest in STRATEGY_RESULTS.md runs **1h**.
+
+---
+
+## 2. Composite bias Σ — `performCoreAnalysis` ([server.ts](../server.ts))
+
+Σ is a weighted, normalized blend of component scores in `[-1, +1]`. Default weights (the
+data-selected robust config — sentiment and Elliott Wave are **off** because they hurt on
+SOL/BTC/ETH × 30/90d):
+
+| Component | Weight key | Default | Notes |
+|---|---|---:|---|
+| MACD trend | `technical` | 0.90 | Primary trend signal |
+| RSI | `liquidity` | 0.85 | Momentum / mean-reversion |
+| Supertrend (ATR) | `supertrend` | 0.90 | ATR-based trend overlay |
+| News sentiment | `sentiment` | 0.00 | Off by default; Gemini/heuristic NLP when on |
+| Elliott Wave | `elliottWave` | 0.00 | Off by default |
+| Fair Value Gap | `fvg` | 0.00 | Off by default |
+| DCA mean-reversion | `dca` | 0.00 | Off by default |
+
+```
+Σ = Σ(componentScore × weight) / Σ(weights)
+```
+
+**Catalyst overrule:** when sentiment is enabled and a headline scores ≥ +0.85 / ≤ −0.85, Σ is
+forced to ±1.0 and the Chop-Zone + 2-bar confirmation are bypassed (an authoritative news catalyst).
+
+---
+
+## 3. Entry logic
+
+A long/short candidate must clear **all** of the following.
+
+### 3.1 Conviction threshold
+`Σ > +SIGNAL_THRESHOLD` ⇒ LONG candidate; `Σ < −SIGNAL_THRESHOLD` ⇒ SHORT candidate.
+`SIGNAL_THRESHOLD = 0.25` (the robust value from the config sweep). Within ±0.25 ⇒ HOLD.
+
+### 3.2 Trend-regime filter (200-EMA)
+Only longs **above** the 200-EMA, only shorts **below** it. Cuts counter-trend whipsaw. Toggle with
+`useRegimeFilter` (default ON).
+
+### 3.3 Chop Zone guard
+If RSI is in the neutral 40–60 band **and** the fast/slow MAs squeeze (spread < 0.30%), force HOLD —
+avoids sideways fakeouts. Skipped on a catalyst overrule.
+
+### 3.4 Entry gates — `entryGateBlock` ([server.ts](../server.ts))
+The **single shared gate stack** used by both the live trader and the server backtest. "Moderate"
+profile (chosen to stop the bot standing aside every cycle):
+
+1. **ADX(14) > `ADX_GATE_MIN`** (default **15**, was 20) — trend-strength filter; ranging markets stand aside.
+2. **15m Supertrend direction** — block counter-trend entries on the higher timeframe (applied on 5m/15m).
+3. **Momentum trigger = MACD-sign OR RSI(21)-timing** — *either* confirms (previously required **both**,
+   plus a MACD histogram "rising 2 bars" condition, which almost never coincided → the bot never traded).
+   - MACD-sign: histogram > 0 for LONG, < 0 for SHORT.
+   - RSI-timing: RSI(21) crossed up through 35 (LONG) / down through 65 (SHORT) within the last 2 bars.
+
+### 3.5 2-bar confirmation
+Enter only when the current bar **and** the previous bar agree on direction. A catalyst overrule
+fires immediately and bypasses the wait.
+
+### 3.6 Macro regime filter
+Block counter-macro entries: no new LONGs while the dollar/yields/volatility backdrop is **RISK-OFF**,
+no new SHORTs while **RISK-ON**. Regime = 5-day trend of DX-Y.NYB, ^TNX, ^VIX. `useMacroFilter` (default ON);
+a macro data outage resolves to NEUTRAL (no effect).
+
+---
+
+## 4. Exit strategy — `evaluateExit` ([server.ts](../server.ts))
+
+Volatility-adaptive, **shared** by the live daemon and the benchmark. All levels are in price space
+(leverage-independent) and scaled by the ATR captured at entry. Defaults are env-tunable.
+
+| Stage | Rule | Env (default) |
+|---|---|---|
+| Initial stop | entry ∓ `EXIT_SL_MULT`×ATR | `EXIT_SL_MULT` (1.5) |
+| **Partial scale-out** | at entry ± `EXIT_PARTIAL_MULT`×ATR, close `EXIT_PARTIAL_FRAC` of size **and move stop to breakeven** | `EXIT_PARTIAL_MULT` (1.5), `EXIT_PARTIAL_FRAC` (0.5) |
+| Trailing stop | after the scale-out, ratchet the stop to peak ∓ `EXIT_TRAIL_MULT`×ATR (favorable-only) | `EXIT_TRAIL_MULT` (2.0) |
+| Hard TP cap | close the runner at entry ± `EXIT_TP_MULT`×ATR | `EXIT_TP_MULT` (4.0) |
+
+**Intuition:** take half off the table at +1.5×ATR (locks profit, removes downside risk by moving the
+stop to breakeven), then let the remaining half run behind a 2×ATR trailing stop up to a 4×ATR cap.
+
+Two additional exits live in the callers (they differ live vs backtest):
+
+- **Time-limit:** if a trade hasn't scaled out and is still below +0.5% after 90 minutes, cut it.
+- **In-profit reversal:** if the signal flips to the opposite side **and** the trade has cleared a
+  fee/noise buffer (`minReversalProfitPct`, default 1.5% leveraged), bank it and (live) re-enter the
+  opposite side on the same tick. A flip while not yet in profit is **ignored** — the stop/trail
+  governs the downside (prevents fee-eaten micro-loss churn).
+
+Worked example (LONG, entry 100, ATR 2): stop starts at 97. At 103 → sell 50%, stop → 100 (breakeven).
+At peak 106 → trail stop ratchets to 102. Pull back to 101.9 → close the runner as "Trailing Stop".
+Net: half banked at +3, half at ~+2 — versus the old hard 3×ATR TP that capped the whole position.
+
+---
+
+## 5. Risk controls (live daemon)
+
+| Control | Behaviour | Default |
+|---|---|---|
+| Single-position limit | At most one open position at a time | — |
+| Cooldown | No new entry within N minutes of the last entry | 30 min |
+| Consecutive-loss cooldown | Pause entries after 2 straight losses | 45 min |
+| Daily trade cap | Max opens per rolling 24h | 4 |
+| Circuit breaker | Pause **new** entries after N consecutive losses; auto-resets 6h after the last loss | `maxConsecutiveLosses` 8 |
+| Failed-entry guard | Refuse to re-arm the **same side at the same price level** after a loss | — |
+| SIDEWAYS suppression | No entry when trend is classified SIDEWAYS (unless force-triggered) | — |
+
+Exits are **never** blocked by these gates — only new entries.
+
+---
+
+## 6. Execution
+
+- **PAPER** (default): fully simulated; positions, partials, and PnL are bookkept, no on-chain orders.
+- **REAL**: opens/closes (including the partial scale-out's half-size reduce) execute on Jupiter Perps
+  via the CLI (`executeOnChainTradeServerSide`). A position is only tracked if it actually opened
+  on-chain (no phantom positions). See [[perps-execution-via-jup-cli]] in memory.
+
+---
+
+## 7. The three engines & parity
+
+| Engine | Location | Σ source | Entry gates | Exit | Use |
+|---|---|---|---|---|---|
+| **Live auto-trader** | `evaluateSignal` + Jupiter daemon, [server.ts](../server.ts) | `performCoreAnalysis` | `entryGateBlock` | `evaluateExit` (partial+trail) | Real/paper trading |
+| **Server backtest** | `getTickSignal` + `/api/backtest`, [server.ts](../server.ts) | `performCoreAnalysis` | `entryGateBlock` | swing-based hard TP/SL + time-limit + reversal | STRATEGY_RESULTS.md |
+| **Macro benchmark** | [scripts/macro-benchmark.ts](../scripts/macro-benchmark.ts) | `performCoreAnalysis` (imported) | `entryGateBlock` (imported) | `evaluateExit` (imported) | Macro A/B + new-exit view |
+
+- **Entries are now identical across all three** — they share `performCoreAnalysis` + `entryGateBlock`.
+- **Exits:** live and the benchmark share `evaluateExit` (partial scale-out + breakeven + trail). The
+  server `/api/backtest` (`getTickSignal`) still uses the older swing-based hard TP/SL + time-limit +
+  reversal — **this is the one remaining port.** Until it's done, use the benchmark for a faithful
+  view of the new exit, and treat the `/api/backtest` exit numbers as the pre-scale-out baseline.
+- **`src/lib/backtest.ts`** (UI panel) is a separate close-only engine with a *different composite* and
+  no gates — it is explicitly **non-authoritative** (flagged in its header). Use it for weight intuition only.
+
+---
+
+## 8. Configuration reference (env)
+
+| Var | Default | Effect |
+|---|---:|---|
+| `ADX_GATE_MIN` | 15 | Min ADX(14) for an entry to count as trending |
+| `EXIT_SL_MULT` | 1.5 | Initial stop distance, in ATR |
+| `EXIT_PARTIAL_MULT` | 1.5 | Scale-out trigger distance, in ATR |
+| `EXIT_PARTIAL_FRAC` | 0.5 | Fraction of position taken at scale-out |
+| `EXIT_TRAIL_MULT` | 2.0 | Trailing-stop distance behind peak, in ATR |
+| `EXIT_TP_MULT` | 4.0 | Hard take-profit cap, in ATR |
+| `ATR_SL_MULT` / `ATR_TP_MULT` | 1.5 / 3.0 | Legacy ATR TP/SL used when forming `pred` (entry-time levels) |
+
+Per-config (non-env) knobs: `useRegimeFilter`, `useMacroFilter`, `signalThreshold`, `leverage`,
+`maxConsecutiveLosses`, `minReversalProfitPct`.
+
+Benchmark env: `INTERVAL`, `LEVERAGE`, `POSITION_USD`, `FEE_BPS`, `WINDOWS`, `THRESHOLD`.
+
+---
+
+## 9. Reproducing the numbers
+
+```bash
+# Faithful macro-overlay benchmark (new gates + new exit), with fees:
+INTERVAL=1h FEE_BPS=6 WINDOWS=30,90 npx tsx scripts/macro-benchmark.ts
+
+# Server backtest (canonical, drives STRATEGY_RESULTS.md):
+curl -XPOST localhost:8080/api/backtest -d '{"token":"SOL","interval":"1h","lookbackDays":90,"signalThreshold":0.25,"useRegimeFilter":true}'
+```
+
+Always validate with **out-of-sample / walk-forward** windows and realistic fees before trusting any
+edge, and paper-trade the candidate for weeks before risking capital.
