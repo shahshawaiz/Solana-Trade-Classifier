@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Build-time version stamp (regenerated on every build/dev via scripts/gen-version.cjs)
+version.json

@@ -602,6 +602,12 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
+  // App version (commit-stamped, served by GET /api/version). Fetched once on mount.
+  const [appVersion, setAppVersion] = useState<{ display: string; version: string; commit: string; branch?: string; buildTime?: string } | null>(null);
+  useEffect(() => {
+    fetch("/api/version").then((r) => r.json()).then(setAppVersion).catch(() => {});
+  }, []);
+
   // Unified Forecast & Backtesting states
   const [forecastData, setForecastData] = useState<any | null>(null);
   const [forecastLoading, setForecastLoading] = useState(false);
@@ -2225,7 +2231,12 @@ export default function App() {
           <div className="flex flex-col">
             <h1 className="text-sm font-black uppercase tracking-[.3em] flex items-center gap-2">
               <span className="animated-gradient-text">{token === 'SOL' ? 'Solana' : token} Quant Alpha</span>
-              <span className="text-[9px] font-mono text-sol-purple bg-sol-purple/10 px-1 py-0.5 rounded border border-sol-purple/20 animate-pulse">V2.0</span>
+              <span
+                className="text-[9px] font-mono text-sol-purple bg-sol-purple/10 px-1 py-0.5 rounded border border-sol-purple/20 animate-pulse"
+                title={appVersion ? `commit ${appVersion.commit}${appVersion.branch ? ` · ${appVersion.branch}` : ''}${appVersion.buildTime ? ` · built ${appVersion.buildTime}` : ''}` : 'version'}
+              >
+                {appVersion?.display || 'V2.0'}
+              </span>
             </h1>
             <p className="text-[9px] text-text-dim uppercase tracking-widest font-medium">Multimodal Sentiment & Quantitative Arbitrage</p>
           </div>

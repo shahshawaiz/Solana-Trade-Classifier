@@ -43,6 +43,25 @@ const bs58: {
   return bs58Import as any;
 })();
 
+// ─────────────────────────── App version ───────────────────────────
+// Resolved once at startup from version.json (written by scripts/gen-version.cjs at build/dev time:
+// version = <major>.<minor>.<commitCount>, so every commit yields a new version). Falls back to the
+// platform commit SHA when version.json is absent (e.g. running an un-built checkout). Stamped onto
+// every automated trade's audit log + journal entry so each trade records the build it ran under.
+interface AppVersion { version: string; commit: string; fullCommit?: string; branch?: string; build?: number; buildTime?: string; display: string; }
+let APP_VERSION: AppVersion = (() => {
+  try {
+    const raw = fs.readFileSync(path.join(process.cwd(), "version.json"), "utf8");
+    const v = JSON.parse(raw);
+    if (v && v.display) return v as AppVersion;
+  } catch {}
+  const sha = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.DEPLOYMENT_ID || "";
+  const shortSha = sha ? sha.slice(0, 7) : "unknown";
+  const version = "2.0.0";
+  return { version, commit: shortSha, fullCommit: sha, branch: process.env.RAILWAY_GIT_BRANCH || "", display: `v${version} (${shortSha})` };
+})();
+export function getAppVersion(): AppVersion { return APP_VERSION; }
+
 // Fix for Node.js fetch DNS resolution error in Google Cloud Run environments (prefer IPv4)
 dns.setDefaultResultOrder("ipv4first");
 
@@ -433,6 +452,9 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json());
+
+// App version — the UI header reads this; auto-increments with every commit (see scripts/gen-version.cjs).
+app.get("/api/version", (_req, res) => res.json(getAppVersion()));
 
 // Initialize Gemini Client (Lazy)
 let aiClient: GoogleGenAI | null = null;
@@ -2344,6 +2366,7 @@ export interface JupiterConfig {
     partialTaken?: boolean;  // true once the +1.5×ATR 50% scale-out has fired
     realizedPnlPct?: number; // leveraged % already banked via partial scale-out(s)
     remainingFrac?: number;  // open fraction of the position (1 → 0.5 after scale-out)
+    version?: string;        // app version (commit-stamped) the trade was executed under
     positionPubkey?: string;
     sentiment?: number;
     technicalScore?: number;
@@ -3927,7 +3950,9 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           sentiment: activeTrade.sentiment !== undefined ? activeTrade.sentiment : pred.sentiment,
           technicalScore: activeTrade.technicalScore !== undefined ? activeTrade.technicalScore : (pred.strategyDetails?.technicalScore),
           news: activeTrade.news || pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || [],
-          mode: activeTrade.mode
+          mode: activeTrade.mode,
+          version: activeTrade.version || APP_VERSION.version,  // build the trade was opened/executed under
+          closeVersion: APP_VERSION.version                      // build active when it closed (may differ across deploys)
         };
         tradesHistory.push(closedTradeLog);
         if (tradesHistory.length > 25) tradesHistory.shift();
@@ -3937,7 +3962,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         activeTrade = null;
         closedThisTick = true;
         console.log(`[Jupiter Daemon] Position Closed! Reason: ${closeReason}. PnL: ${currentPnlPercent.toFixed(2)}%`);
-        addAuditLog(config, `CLOSE ${closedSide} @ $${exitPrice.toFixed(2)} — ${closeReason}. Realized ${currentPnlPercent >= 0 ? "+" : ""}${currentPnlPercent.toFixed(2)}% (${durationText}).`, "trade");
+        addAuditLog(config, `CLOSE ${closedSide} @ $${exitPrice.toFixed(2)} — ${closeReason}. Realized ${currentPnlPercent >= 0 ? "+" : ""}${currentPnlPercent.toFixed(2)}% (${durationText}). [executed under ${closedTradeLog.version}${closedTradeLog.closeVersion !== closedTradeLog.version ? `, closed under ${closedTradeLog.closeVersion}` : ""}]`, "trade");
 
         try {
           // Execute REAL on-chain close
@@ -4323,12 +4348,14 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             partialTaken: false,   // becomes true after the +1.5×ATR 50% scale-out fires
             realizedPnlPct: 0,     // leveraged % already banked via partial scale-out(s)
             remainingFrac: 1,      // open fraction of the position (1 → 0.5 after the scale-out)
+            version: APP_VERSION.version, // build the trade was executed under (commit-stamped)
             sentiment: pred.sentiment,
             technicalScore: pred.strategyDetails?.technicalScore,
             news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
           };
           config.lastTradeAddedAt = new Date().toISOString();
           console.log(`[Jupiter Daemon] Automated Position Opened! Side: ${enterSide}, Size: ${sizeInSol.toFixed(4)} SOL @ $${entryPrice.toFixed(2)} [Collateral: ${collateralAsset} (${mode})]`);
+          addAuditLog(config, `OPEN ${enterSide} @ $${entryPrice.toFixed(2)} [${mode}, ${sizeInSol.toFixed(4)} SOL, ${config.leverage || 5}x] — executed under ${APP_VERSION.display}`, "trade");
 
           let onChainSignature = "";
           let realOpenFailed = false;
@@ -4360,7 +4387,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
 
           if (activeTrade) try {
             const telegramConfig = loadTelegramConfig();
-            const logMsg = `Automated Open: ${enterSide} at $${entryPrice.toFixed(2)} [Size: ${sizeInSol.toFixed(4)} SOL, Lev: ${config.leverage || 5}x]` + (onChainSignature ? ` (Tx: ${onChainSignature.slice(0, 8)}...)` : "");
+            const logMsg = `Automated Open: ${enterSide} at $${entryPrice.toFixed(2)} [Size: ${sizeInSol.toFixed(4)} SOL, Lev: ${config.leverage || 5}x] [${APP_VERSION.display}]` + (onChainSignature ? ` (Tx: ${onChainSignature.slice(0, 8)}...)` : "");
             addAuditLog(telegramConfig, logMsg, "trade");
             saveTelegramConfig(telegramConfig);
             
@@ -6332,7 +6359,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server running on http://localhost:${PORT} — ${APP_VERSION.display} (branch ${APP_VERSION.branch || "?"})`);
   });
 }
 

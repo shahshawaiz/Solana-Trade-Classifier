@@ -1,11 +1,12 @@
 {
   "name": "react-example",
   "private": true,
-  "version": "0.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
-    "dev": "NODE_ENV=development tsx server.ts",
-    "build": "node scripts/reset-stats-build.cjs && vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "version:gen": "node scripts/gen-version.cjs",
+    "dev": "node scripts/gen-version.cjs && NODE_ENV=development tsx server.ts",
+    "build": "node scripts/gen-version.cjs && node scripts/reset-stats-build.cjs && vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "NODE_ENV=production node dist/server.cjs",
     "start:railway": "bash scripts/railway-start.sh",
     "clean": "rm -rf dist server.cjs",
