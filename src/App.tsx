@@ -753,7 +753,7 @@ export default function App() {
   const downloadJournalCSV = () => {
     const trades = journalData?.trades || [];
     if (!trades.length) return;
-    const header = ["Source", "Side", "Leverage", "Mode", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Realized PnL %", "Size (SOL)", "TP %", "SL %", "Duration (min)", "Sentiment", "Technical", "News Catalysts"];
+    const header = ["Source", "Side", "Leverage", "Mode", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Realized PnL %", "Size (SOL)", "TP %", "SL %", "Duration (min)", "Sentiment", "Technical", "News Catalysts", "Execution Version", "Close Version"];
     const rows = trades.map((t: any) => [
       t.source ?? "",
       t.side ?? "",
@@ -771,6 +771,8 @@ export default function App() {
       t.sentiment !== undefined && t.sentiment !== null ? t.sentiment : "",
       t.technicalScore !== undefined && t.technicalScore !== null ? t.technicalScore : "",
       (t.news || []).map((n: any) => (n && typeof n === "object" ? n.title : n)).filter(Boolean).join(" | "),
+      t.version ?? "",
+      t.closeVersion ?? "",
     ]);
     const csv = [header, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -1051,7 +1053,7 @@ export default function App() {
 
   const downloadJupiterTradeLogCSV = () => {
     if (!jupiterConfig || !jupiterConfig.tradesHistory || jupiterConfig.tradesHistory.length === 0) return;
-    const headers = ["Index", "Direction/Side", "Leverage Multiplier", "Entry Price (USD)", "Exit Price (USD)", "Realized Return PnL %", "Solana Size (SOL)", "Take Profit %", "Stop Loss %", "Hold Duration", "Settled Time (Eastern Time)"];
+    const headers = ["Index", "Direction/Side", "Leverage Multiplier", "Entry Price (USD)", "Exit Price (USD)", "Realized Return PnL %", "Solana Size (SOL)", "Take Profit %", "Stop Loss %", "Hold Duration", "Settled Time (Eastern Time)", "Execution Version", "Close Version"];
     const rows = jupiterConfig.tradesHistory.map((trade: any, idx: number) => {
       let settledDateStr = "";
       try {
@@ -1086,7 +1088,9 @@ export default function App() {
         trade.takeProfitPct !== undefined ? `${trade.takeProfitPct}%` : "4%",
         trade.stopLossPct !== undefined ? `-${trade.stopLossPct}%` : "-2%",
         durationStr || "N/A",
-        settledDateStr
+        settledDateStr,
+        trade.version || "",
+        trade.closeVersion || ""
       ];
     });
     const csvContent = [headers.join(","), ...rows.map((row: any[]) => row.join(","))].join("\n");
@@ -1103,7 +1107,7 @@ export default function App() {
 
   const downloadTelegramTradeLogCSV = () => {
     if (!telegramConfig || !telegramConfig.tradesHistory || telegramConfig.tradesHistory.length === 0) return;
-    const headers = ["Index", "Direction/Side", "Entry Price (USD)", "Exit Price (USD)", "Realized Return PnL %", "Take Profit %", "Stop Loss %", "Hold Duration", "Settled Time (Eastern Time)"];
+    const headers = ["Index", "Direction/Side", "Entry Price (USD)", "Exit Price (USD)", "Realized Return PnL %", "Take Profit %", "Stop Loss %", "Hold Duration", "Settled Time (Eastern Time)", "Execution Version", "Close Version"];
     const rows = telegramConfig.tradesHistory.map((trade: any, idx: number) => {
       let settledDateStr = "";
       try {
@@ -1136,7 +1140,9 @@ export default function App() {
         trade.takeProfitPct !== undefined ? `${trade.takeProfitPct}%` : "4%",
         trade.stopLossPct !== undefined ? `-${trade.stopLossPct}%` : "-2%",
         durationStr || "N/A",
-        settledDateStr
+        settledDateStr,
+        trade.version || "",
+        trade.closeVersion || ""
       ];
     });
     const csvContent = [headers.join(","), ...rows.map((row: any[]) => row.join(","))].join("\n");
@@ -5378,6 +5384,12 @@ export default function App() {
                                 {trade.side}{trade.leverage ? ` (${trade.leverage}x)` : ""}
                               </span>
                               <span className="text-[8.5px] uppercase tracking-wider text-text-dim font-bold px-1.5 py-0.5 rounded bg-bg-input border border-border-dim">{trade.source}</span>
+                              {trade.version && (
+                                <span className="text-[8.5px] font-mono text-text-dim px-1.5 py-0.5 rounded bg-bg-input border border-border-dim" title={`Executed under version ${trade.version}${trade.closeVersion && trade.closeVersion !== trade.version ? `, settled under ${trade.closeVersion}` : ""}`}>
+                                  {trade.version.startsWith("v") ? trade.version : `v${trade.version}`}
+                                  {trade.closeVersion && trade.closeVersion !== trade.version && ` ➔ ${trade.closeVersion.startsWith("v") ? trade.closeVersion : `v${trade.closeVersion}`}`}
+                                </span>
+                              )}
                             </div>
                             <span className={cn(
                               "font-black tracking-tight text-base font-mono",
@@ -5962,7 +5974,14 @@ export default function App() {
                                       )}>
                                         {log.type}
                                       </span>
-                                      <span className="text-[8px] text-text-dim font-mono">{timestampFormatted}</span>
+                                      <div className="flex items-center gap-1.5">
+                                        {log.version && (
+                                          <span className="text-[8px] font-mono text-text-dim/75 bg-bg-input border border-border-dim px-1 py-0.2 rounded" title={`Executed under version ${log.version}`}>
+                                            {log.version.startsWith("v") ? log.version : `v${log.version}`}
+                                          </span>
+                                        )}
+                                        <span className="text-[8px] text-text-dim font-mono">{timestampFormatted}</span>
+                                      </div>
                                     </div>
                                     <p className="text-text-heading/90 font-mono text-[9px] leading-normal">{log.message}</p>
                                   </div>
@@ -6578,6 +6597,11 @@ export default function App() {
                 <div key={e.id} className={cn("flex items-start gap-3 border-l-2 pl-3 py-1", toneClasses[auditTone(e)])}>
                   <span className="text-text-dim shrink-0 w-20">{new Date(e.timestamp).toLocaleTimeString()}</span>
                   <span className="text-[8px] uppercase tracking-widest opacity-70 shrink-0 w-16 pt-0.5">{e.source}</span>
+                  {e.version && (
+                    <span className="text-[8px] font-mono opacity-60 px-1 py-0.2 rounded bg-bg-input border border-border-dim shrink-0" title={`Executed under version ${e.version}`}>
+                      {e.version.startsWith("v") ? e.version : `v${e.version}`}
+                    </span>
+                  )}
                   <span className="text-text-body break-words flex-1">{e.message}</span>
                 </div>
               ))

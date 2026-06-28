@@ -914,6 +914,8 @@ app.get("/api/journal", async (_req, res) => {
         sentiment: t.sentiment,
         technicalScore: t.technicalScore,
         news: t.news || [],
+        version: t.version,
+        closeVersion: t.closeVersion,
       };
     }).sort((a, b) => new Date(b.exitTime || 0).getTime() - new Date(a.exitTime || 0).getTime());
 
@@ -2142,6 +2144,7 @@ interface AuditLogEntry {
   timestamp: string;
   message: string;
   type: "info" | "cooldown" | "trade" | "hold";
+  version?: string;
 }
 
 interface TelegramConfig {
@@ -2183,6 +2186,7 @@ interface TelegramConfig {
     sentiment?: number;
     technicalScore?: number;
     news?: string[];
+    version?: string;
   } | null;
   tradesHistory?: Array<{
     id: string;
@@ -2197,6 +2201,8 @@ interface TelegramConfig {
     sentiment?: number;
     technicalScore?: number;
     news?: string[];
+    version?: string;
+    closeVersion?: string;
   }>;
   auditLogs?: Array<AuditLogEntry>;
 }
@@ -2227,7 +2233,8 @@ function addAuditLog(config: { auditLogs?: Array<AuditLogEntry> }, message: stri
     id: Math.random().toString(36).substring(2, 9),
     timestamp: new Date().toISOString(),
     message,
-    type
+    type,
+    version: APP_VERSION.version
   });
   if (config.auditLogs.length > 500) {
     config.auditLogs.shift();
@@ -3031,7 +3038,9 @@ export async function checkPredictionAndAlert(forceAlert = false) {
           stopLossPct: slPct,
           sentiment: activeTrade.sentiment !== undefined ? activeTrade.sentiment : pred.sentiment,
           technicalScore: activeTrade.technicalScore !== undefined ? activeTrade.technicalScore : (pred.strategyDetails?.technicalScore),
-          news: activeTrade.news || pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
+          news: activeTrade.news || pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || [],
+          version: activeTrade.version || APP_VERSION.version,
+          closeVersion: APP_VERSION.version
         };
         tradesHistory.push(closedTradeLog);
         if (tradesHistory.length > 25) tradesHistory.shift();
@@ -3051,7 +3060,7 @@ export async function checkPredictionAndAlert(forceAlert = false) {
           `• *Trade PnL*: ${pnlPercent >= 0 ? "🟢 +" : "🔴 "}${pnlPercent.toFixed(2)}%\n` +
           `• *Cumulative Portfolio*: ${cumulativePnL >= 0 ? "🟢 +" : "🔴 "}${cumulativePnL.toFixed(2)}%\n\n`;
 
-        addAuditLog(config, `Position settled (${closeReason}): ${activeTrade.side} at exit price $${exitPrice.toFixed(2)} with PnL ${pnlPercent.toFixed(2)}% (TP: +${closedTradeLog.takeProfitPct}%, SL: -${closedTradeLog.stopLossPct}%, duration: ${durationText})`, "trade");
+        addAuditLog(config, `Position settled (${closeReason}): ${activeTrade.side} at exit price $${exitPrice.toFixed(2)} with PnL ${pnlPercent.toFixed(2)}% (TP: +${closedTradeLog.takeProfitPct}%, SL: -${closedTradeLog.stopLossPct}%, duration: ${durationText}) [executed under ${closedTradeLog.version}${closedTradeLog.closeVersion !== closedTradeLog.version ? `, closed under ${closedTradeLog.closeVersion}` : ""}]`, "trade");
         activeTrade = null;
       }
     }
@@ -3131,7 +3140,8 @@ export async function checkPredictionAndAlert(forceAlert = false) {
               stopLossPct: slPct,
               sentiment: pred.sentiment,
               technicalScore: pred.strategyDetails?.technicalScore,
-              news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
+              news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || [],
+              version: APP_VERSION.version
             };
             config.lastTradeAddedAt = new Date().toISOString();
 
@@ -3145,7 +3155,7 @@ export async function checkPredictionAndAlert(forceAlert = false) {
               `• *Stop Loss Limit*: -${slPct.toFixed(1)}% ($${slPrice.toFixed(2)})\n` +
               `• *Target Catalyst*: "${config.topic}"\n\n`;
 
-            addAuditLog(config, `Opened new ${enterSide} position at entering price $${pred.price.toFixed(2)} (Limits: TP: +${tpPct}%, SL: -${slPct})`, "trade");
+            addAuditLog(config, `Opened new ${enterSide} position at entering price $${pred.price.toFixed(2)} (Limits: TP: +${tpPct.toFixed(1)}%, SL: -${slPct.toFixed(1)}%) — executed under ${APP_VERSION.display}`, "trade");
           }
         }
       }
@@ -3989,7 +3999,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           const telegramConfig = loadTelegramConfig();
           const sideIcon = closedTradeLog.side === "LONG" ? "🟢" : "🔴";
           const pnlIcon = currentPnlPercent >= 0 ? "🔵 +" : "🔴 ";
-          addAuditLog(telegramConfig, `Automated Close: ${sideIcon} at $${closedTradeLog.exitPrice.toFixed(2)}. ${closeReason}. PnL: ${pnlIcon}${currentPnlPercent.toFixed(2)}%`, "trade");
+          addAuditLog(telegramConfig, `Automated Close: ${sideIcon} at $${closedTradeLog.exitPrice.toFixed(2)}. ${closeReason}. PnL: ${pnlIcon}${currentPnlPercent.toFixed(2)}% [executed under ${closedTradeLog.version}${closedTradeLog.closeVersion !== closedTradeLog.version ? `, closed under ${closedTradeLog.closeVersion}` : ""}]`, "trade");
           saveTelegramConfig(telegramConfig);
           
           const secrets = getTelegramSecrets();
