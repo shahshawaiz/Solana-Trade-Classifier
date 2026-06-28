@@ -18,7 +18,14 @@ RUN npm install --no-audit --no-fund
 # App source (node_modules / dist / test-trade excluded via .dockerignore)
 COPY . .
 
-# Build the UI + bundle the server to dist/server.cjs
+# Railway injects the commit SHA/branch as build args; surface them so gen-version.cjs can stamp
+# version.json even though .git is excluded from the image. (Runtime env is the ultimate fallback.)
+ARG RAILWAY_GIT_COMMIT_SHA=""
+ARG RAILWAY_GIT_BRANCH=""
+ENV RAILWAY_GIT_COMMIT_SHA=$RAILWAY_GIT_COMMIT_SHA
+ENV RAILWAY_GIT_BRANCH=$RAILWAY_GIT_BRANCH
+
+# Build the UI + bundle the server to dist/server.cjs (gen-version runs first; see package.json)
 RUN npm run build
 
 # Permanent runtime: import the jup signing key from env, then launch the long-lived server.
