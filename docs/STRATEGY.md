@@ -157,14 +157,15 @@ Exits are **never** blocked by these gates — only new entries.
 | Engine | Location | Σ source | Entry gates | Exit | Use |
 |---|---|---|---|---|---|
 | **Live auto-trader** | `evaluateSignal` + Jupiter daemon, [server.ts](../server.ts) | `performCoreAnalysis` | `entryGateBlock` | `evaluateExit` (partial+trail) | Real/paper trading |
-| **Server backtest** | `getTickSignal` + `/api/backtest`, [server.ts](../server.ts) | `performCoreAnalysis` | `entryGateBlock` | swing-based hard TP/SL + time-limit + reversal | STRATEGY_RESULTS.md |
-| **Macro benchmark** | [scripts/macro-benchmark.ts](../scripts/macro-benchmark.ts) | `performCoreAnalysis` (imported) | `entryGateBlock` (imported) | `evaluateExit` (imported) | Macro A/B + new-exit view |
+| **Server backtest** | `getTickSignal` + `/api/backtest`, [server.ts](../server.ts) | `performCoreAnalysis` | `entryGateBlock` | `evaluateExit` (partial+trail) | STRATEGY_RESULTS.md |
+| **Macro benchmark** | [scripts/macro-benchmark.ts](../scripts/macro-benchmark.ts) | `performCoreAnalysis` (imported) | `entryGateBlock` (imported) | `evaluateExit` (imported) | Macro A/B view |
 
-- **Entries are now identical across all three** — they share `performCoreAnalysis` + `entryGateBlock`.
-- **Exits:** live and the benchmark share `evaluateExit` (partial scale-out + breakeven + trail). The
-  server `/api/backtest` (`getTickSignal`) still uses the older swing-based hard TP/SL + time-limit +
-  reversal — **this is the one remaining port.** Until it's done, use the benchmark for a faithful
-  view of the new exit, and treat the `/api/backtest` exit numbers as the pre-scale-out baseline.
+- **Entries are identical across all three** — they share `performCoreAnalysis` + `entryGateBlock`.
+- **Exits are now identical across live, `/api/backtest`, and the benchmark** — all three drive the
+  shared `evaluateExit` (partial scale-out + breakeven + ATR trail + hard cap). In the `/api/backtest`
+  engine each partial leg is recorded as a `SCALE_OUT_*` event *without* a numeric `pnl`, so
+  profit-factor/expectancy count one realized result per position (the `CLOSE_*` record carries the
+  whole-trade total). If ATR is unavailable at entry, it falls back to the legacy swing-based TP/SL.
 - **`src/lib/backtest.ts`** (UI panel) is a separate close-only engine with a *different composite* and
   no gates — it is explicitly **non-authoritative** (flagged in its header). Use it for weight intuition only.
 

@@ -11,6 +11,35 @@ expectancy metrics). All runs: 1h candles, 5x leverage, CryptoCompare OHLC._
 - We tested 5 configs and report the best — that is **selection bias**. Treat the "winner" as a
   hypothesis to validate with walk-forward / out-of-sample testing, not a guarantee.
 
+## ✅ Current configuration & results (2026-06-28)
+
+The live strategy now runs the **moderate entry gates** (ADX>15 · 15m Supertrend · MACD-sign OR
+RSI-timing) plus a **volatility-adaptive exit** — partial scale-out (50% at +1.5×ATR) + breakeven +
+ATR trailing stop + 4×ATR hard cap. Entries and this exit are shared verbatim between the live
+daemon and this `/api/backtest` engine (see [docs/STRATEGY.md](docs/STRATEGY.md)). Regenerated from
+`/api/backtest` (1h, 5× leverage, 0.1%/close fee, CryptoCompare/Yahoo OHLC):
+
+| Market/Window | Sharpe | PnL% | Win% | Profit Factor | Trades | Scale-outs |
+|---|---:|---:|---:|---:|---:|---:|
+| SOL / 30d | −2.15 | −3.7 | 28.6 | 0.71 | 21 | 5 |
+| SOL / 90d | +1.51 | +5.9 | 33.3 | 1.27 | 57 | 17 |
+| BTC / 30d | +0.75 | +0.8 | 40.0 | 1.14 | 20 | 6 |
+| BTC / 90d | +0.15 | +0.3 | 38.2 | 1.02 | 55 | 16 |
+| ETH / 30d | +2.47 | +3.9 | 41.2 | 1.76 | 17 | 5 |
+| ETH / 90d | +1.85 | +7.1 | 41.2 | 1.57 | 51 | 17 |
+| **Median** | **+1.13** | **+2.3** | — | — | — | — |
+
+**Positive in 5/6 windows.** Versus the prior best config (§3 below: median Sharpe +0.58, PnL +0.9%,
+3–16 trades), the moderate gates restore a tradeable frequency (17–57 trades) and the partial/trail
+exit lifts the median while keeping the worst case shallow (SOL/30d −3.7%). Note the **low win rates
+(29–41%) with profit factors > 1** — by design: the scale-out + trail produces many small losers and
+fewer larger winners (avg win ≈ 2.5× avg loss).
+
+**Still be skeptical:** in-sample, no funding/slippage, only a 0.1%/close fee. The honest expectation
+remains break-even-to-slightly-positive after real costs. Validate out-of-sample and paper-trade first.
+
+---
+
 ## 1. Baseline (the shipped default) — it loses money
 Default config: all 4 components (Sentiment + MACD + RSI + Elliott Wave), threshold ±0.08, no regime filter.
 

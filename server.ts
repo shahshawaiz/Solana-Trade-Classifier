@@ -4873,14 +4873,22 @@ app.post("/api/backtest", async (req, res) => {
               dynamicSl = (Math.abs(suggestedSlPrice - currentPrice) / currentPrice) * 100 * leverage;
           }
 
+          // ATR (price) at entry drives the shared partial-scale-out/breakeven/trail exit.
+          const atrAtEntry = calculateATR(quotes.slice(0, i + 1), 14);
+
           if (positionSide === "LONG") {
             activePosition = {
               side: "LONG",
               entryPrice: currentPrice,
               size: sizeUnits,
+              fullSize: sizeUnits,    // original size, for reference
               entryDate: dateStr,
               tpPct: dynamicTp,
               slPct: dynamicSl,
+              atrAtEntry,
+              partialTaken: false,
+              remainingFrac: 1,
+              realizedPnl: 0,         // capital already banked via partial scale-out(s)
               sentimentScore: currentSig.sentimentScore,
               technicalScore: currentSig.emaScore,
               rsiScore: currentSig.rsiScore,
@@ -4909,9 +4917,14 @@ app.post("/api/backtest", async (req, res) => {
               side: "SHORT",
               entryPrice: currentPrice,
               size: sizeUnits,
+              fullSize: sizeUnits,
               entryDate: dateStr,
               tpPct: dynamicTp,
               slPct: dynamicSl,
+              atrAtEntry,
+              partialTaken: false,
+              remainingFrac: 1,
+              realizedPnl: 0,
               sentimentScore: currentSig.sentimentScore,
               technicalScore: currentSig.emaScore,
               rsiScore: currentSig.rsiScore,
@@ -4941,27 +4954,66 @@ app.post("/api/backtest", async (req, res) => {
         const pos = activePosition;
         let shouldClose = false;
         let closeReason = "";
-        
-        const currentTp = pos.tpPct; // We know pos.tpPct and slPct are already dynamically generated at entry
-        const currentSl = pos.slPct;
 
-        if (pos.side === "LONG") {
-          const gainPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 * leverage;
-          if (gainPct >= currentTp) {
-            shouldClose = true;
-            closeReason = `Target profit hit (+${currentTp.toFixed(1)}%)`;
-          } else if (gainPct <= -currentSl) {
-            shouldClose = true;
-            closeReason = `Stop-loss triggered (-${currentSl.toFixed(1)}%)`;
+        const atrEntry = pos.atrAtEntry || 0;
+        if (atrEntry > 0) {
+          // Shared partial-scale-out + breakeven + ATR trailing + hard TP cap (same as live/benchmark).
+          if (pos.stopPrice === undefined) {
+            pos.stopPrice = pos.side === "LONG" ? pos.entryPrice - EXIT_SL_MULT * atrEntry : pos.entryPrice + EXIT_SL_MULT * atrEntry;
           }
-        } else if (pos.side === "SHORT") {
-          const gainPct = ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100 * leverage;
-          if (gainPct >= currentTp) {
+          if (pos.peak === undefined) pos.peak = pos.entryPrice;
+          const res = evaluateExit({ side: pos.side, entryPrice: pos.entryPrice, atr: atrEntry, peak: pos.peak, stopPrice: pos.stopPrice, partialTaken: !!pos.partialTaken }, currentPrice);
+          pos.peak = res.state.peak;
+          pos.stopPrice = res.state.stopPrice;
+
+          // Partial scale-out: realize a fraction of the position, bank it, stop → breakeven.
+          if (res.partialFrac > 0 && !pos.partialTaken) {
+            const frac = res.partialFrac;
+            const closeUnits = pos.size * frac;
+            const rawPnl = pos.side === "LONG" ? closeUnits * (currentPrice - pos.entryPrice) : closeUnits * (pos.entryPrice - currentPrice);
+            const fee = Math.abs(rawPnl * 0.001);
+            const netPnl = rawPnl - fee;
+            capital += netPnl;
+            pos.realizedPnl = (pos.realizedPnl || 0) + netPnl;
+            pos.size -= closeUnits;
+            pos.remainingFrac = (pos.remainingFrac ?? 1) - frac;
+            pos.partialTaken = true;
+            // Recorded WITHOUT a numeric `pnl` so the profit-factor/expectancy filter (which keys on
+            // typeof pnl === "number") counts one realized result per position, not per fill.
+            trades.push({
+              type: pos.side === "LONG" ? "SCALE_OUT_LONG" : "SCALE_OUT_SHORT",
+              date: dateStr,
+              price: currentPrice,
+              partialPnlUsd: netPnl,
+              capitalAfter: capital,
+              openDate: pos.entryDate,
+              note: `Partial scale-out ${(frac * 100).toFixed(0)}% (+${EXIT_PARTIAL_MULT}×ATR); stop → breakeven`
+            });
+          }
+
+          if (res.close) {
             shouldClose = true;
-            closeReason = `Target profit hit (+${currentTp.toFixed(1)}%)`;
-          } else if (gainPct <= -currentSl) {
-            shouldClose = true;
-            closeReason = `Stop-loss triggered (-${currentSl.toFixed(1)}%)`;
+            if (res.close === "Take Profit Cap") {
+              const cap = pos.side === "LONG" ? pos.entryPrice + EXIT_TP_MULT * atrEntry : pos.entryPrice - EXIT_TP_MULT * atrEntry;
+              closeReason = `Take Profit Cap (${EXIT_TP_MULT}×ATR, $${cap.toFixed(2)})`;
+            } else if (res.close === "Trailing Stop") {
+              closeReason = `Trailing Stop ($${pos.stopPrice.toFixed(2)}, peak $${pos.peak.toFixed(2)})`;
+            } else {
+              closeReason = `Stop Loss ($${pos.stopPrice.toFixed(2)})`;
+            }
+          }
+        } else {
+          // Legacy fallback (no ATR): swing-based fixed TP/SL on leveraged %.
+          const currentTp = pos.tpPct;
+          const currentSl = pos.slPct;
+          if (pos.side === "LONG") {
+            const gainPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 * leverage;
+            if (gainPct >= currentTp) { shouldClose = true; closeReason = `Target profit hit (+${currentTp.toFixed(1)}%)`; }
+            else if (gainPct <= -currentSl) { shouldClose = true; closeReason = `Stop-loss triggered (-${currentSl.toFixed(1)}%)`; }
+          } else if (pos.side === "SHORT") {
+            const gainPct = ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100 * leverage;
+            if (gainPct >= currentTp) { shouldClose = true; closeReason = `Target profit hit (+${currentTp.toFixed(1)}%)`; }
+            else if (gainPct <= -currentSl) { shouldClose = true; closeReason = `Stop-loss triggered (-${currentSl.toFixed(1)}%)`; }
           }
         }
 
@@ -4970,32 +5022,38 @@ app.post("/api/backtest", async (req, res) => {
           ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 * leverage
           : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100 * leverage;
 
-        if (!shouldClose && elapsedMinutes >= 90 && unrealizedPnL < 0.5) {
+        // Time-limit only matters before the runner is locked in (post-scale-out we're risk-free).
+        if (!shouldClose && !pos.partialTaken && elapsedMinutes >= 90 && unrealizedPnL < 0.5) {
           shouldClose = true;
           closeReason = `PnL Threshold Time Limit Exceeded (Duration: ${Math.round(elapsedMinutes)} mins, PnL: ${unrealizedPnL.toFixed(2)}% < +0.5%)`;
         }
-        
-        if (!shouldClose && positionSide !== "HOLD" && positionSide !== pos.side) {
+
+        // Reversal only banks a winner (matches the live in-profit reversal rule).
+        if (!shouldClose && positionSide !== "HOLD" && positionSide !== pos.side && unrealizedPnL > 0) {
             shouldClose = true;
-            closeReason = `Trend Reversal (Signal flipped to ${positionSide})`;
+            closeReason = `Trend Reversal — banked +${unrealizedPnL.toFixed(2)}% (signal flipped to ${positionSide})`;
         }
 
         if (shouldClose) {
+          // Close the remaining size; fold any banked partial scale-out into the whole-trade total
+          // so wins/losses and profit-factor see one realized result per position.
           const rawPnl = pos.side === "LONG" ? (pos.size * (currentPrice - pos.entryPrice)) : (pos.size * (pos.entryPrice - currentPrice));
           const fee = Math.abs(rawPnl * 0.001); // 0.1% transaction drag
           const netPnl = rawPnl - fee;
           capital += netPnl;
-          
-          if (netPnl > 0) wins++; else losses++;
-          
+          const tradeTotalPnl = (pos.realizedPnl || 0) + netPnl;
+
+          if (tradeTotalPnl > 0) wins++; else losses++;
+
           trades.push({
             type: pos.side === "LONG" ? "CLOSE_LONG" : "CLOSE_SHORT",
             date: dateStr,
             price: currentPrice,
-            pnl: netPnl,
-            pnlPct: (netPnl / sizeInUsd) * 100,
+            pnl: tradeTotalPnl,
+            pnlPct: (tradeTotalPnl / sizeInUsd) * 100,
             capitalAfter: capital,
             openDate: pos.entryDate,
+            scaledOut: !!pos.partialTaken,
             note: closeReason,
             sentimentScore: currentSig.sentimentScore,
             technicalScore: currentSig.emaScore,
@@ -5040,18 +5098,20 @@ app.post("/api/backtest", async (req, res) => {
         : pos.size * (pos.entryPrice - finalPrice);
       const fee = Math.abs(rawPnl * 0.001);
       const netPnl = rawPnl - fee;
-      
+
       capital += netPnl;
-      if (netPnl > 0) wins++; else losses++;
-      
+      const tradeTotalPnl = (pos.realizedPnl || 0) + netPnl; // include any banked partial
+      if (tradeTotalPnl > 0) wins++; else losses++;
+
       trades.push({
         type: pos.side === "LONG" ? "CLOSE_LONG" : "CLOSE_SHORT",
         date: finalDateStr,
         price: finalPrice,
-        pnl: netPnl,
-        pnlPct: (netPnl / (capital * 0.15)) * 100,
+        pnl: tradeTotalPnl,
+        pnlPct: (tradeTotalPnl / (capital * 0.15)) * 100,
         capitalAfter: capital,
         openDate: pos.entryDate,
+        scaledOut: !!pos.partialTaken,
         note: "Forced settlement at final historical tick boundary"
       });
     }
