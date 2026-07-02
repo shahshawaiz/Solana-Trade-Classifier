@@ -873,6 +873,91 @@ function appendJournalEntry(source: string, trade: any) {
   catch (e: any) { console.error("[Journal] Failed to append closed trade:", e?.message || e); }
 }
 
+// --- Fee/price reconciliation against Jupiter's own on-chain trade history --
+// The bot's own `pnl`/`entryPrice`/`exitPrice` are computed from its OWN signal-time price
+// snapshot (Yahoo/CryptoCompare), never the actual Jupiter fill — and never account for
+// open/close/borrow fees. `jup perps history` (the same feed Phantom's activity tab reads)
+// returns the real fill price, fee, and (on the closing/"Decrease" leg) Jupiter's own
+// net-of-fees realized PnL — so we reconcile against it lazily, once per trade, and cache
+// the result on the trade record (`feesReconciled`) so repeat reads never re-shell to the CLI.
+async function reconcileJournalTrades(stored: any[]): Promise<{ store: any[]; changed: boolean }> {
+  const candidates = stored.filter((t: any) =>
+    t.source === "Auto-Trade (Jupiter)" && t.mode === "REAL" && !t.feesReconciled && t.entryTime && t.exitTime
+  );
+  if (candidates.length === 0) return { store: stored, changed: false };
+
+  const config = loadJupiterConfig();
+  const keyName = jupCliKeyName(config);
+
+  // Group by asset (nearly always just SOL in practice) so we shell out to the CLI once per
+  // asset rather than once per trade.
+  const byAsset = new Map<string, any[]>();
+  for (const t of candidates) {
+    const asset = String(t.token || config.token || "SOL").toUpperCase();
+    if (!byAsset.has(asset)) byAsset.set(asset, []);
+    byAsset.get(asset)!.push(t);
+  }
+
+  let changed = false;
+  const TOLERANCE_MS = 10 * 60 * 1000; // 10 min — the daemon fires the CLI immediately on signal
+
+  for (const [asset, trades] of byAsset) {
+    const limit = Math.min(2000, Math.max(500, trades.length * 20));
+    let rows: any[];
+    try {
+      rows = await runJupPerpsHistory(keyName, asset, limit);
+    } catch (e: any) {
+      console.error(`[Journal] Failed to fetch jup perps history for ${asset}:`, e?.message || e);
+      continue; // leave these trades unreconciled; retried on the next /api/journal read
+    }
+    if (!rows.length) continue;
+
+    const increases = rows.filter((r: any) => r.action === "Increase");
+    const decreases = rows.filter((r: any) => r.action === "Decrease");
+    const claimed = new Set<string>();
+
+    const matchLeg = (pool: any[], side: string, targetMs: number): any | null => {
+      let best: any = null;
+      let bestDiff = Infinity;
+      for (const row of pool) {
+        if (!row.signature || claimed.has(row.signature)) continue;
+        if (String(row.side || "").toUpperCase() !== side) continue;
+        const rowMs = new Date(row.time).getTime();
+        if (!Number.isFinite(rowMs)) continue;
+        const diff = Math.abs(rowMs - targetMs);
+        if (diff < bestDiff) { bestDiff = diff; best = row; }
+      }
+      return best && bestDiff <= TOLERANCE_MS ? best : null;
+    };
+
+    // Oldest-entry-first so ambiguous near-simultaneous trades claim fills in trade order.
+    const ordered = [...trades].sort((a, b) => new Date(a.entryTime).getTime() - new Date(b.entryTime).getTime());
+    for (const t of ordered) {
+      const side = String(t.side || "").toUpperCase();
+      const entryMatch = matchLeg(increases, side, new Date(t.entryTime).getTime());
+      const exitMatch = matchLeg(decreases, side, new Date(t.exitTime).getTime());
+      if (!entryMatch || !exitMatch) continue; // retry on a later read (CLI indexing lag, etc.)
+
+      claimed.add(entryMatch.signature);
+      claimed.add(exitMatch.signature);
+
+      t.entryPriceActual = Number(entryMatch.priceUsd);
+      t.exitPriceActual = Number(exitMatch.priceUsd);
+      t.openFeeUsd = Number(entryMatch.feeUsd) || 0;
+      t.closeFeeUsd = Number(exitMatch.feeUsd) || 0;
+      t.totalFeesUsd = t.openFeeUsd + t.closeFeeUsd;
+      t.realizedPnlUsd = typeof exitMatch.pnlUsd === "number" ? exitMatch.pnlUsd : Number(exitMatch.pnlUsd) || 0;
+      t.realizedPnlPct = typeof exitMatch.pnlPct === "number" ? exitMatch.pnlPct : Number(exitMatch.pnlPct) || 0;
+      t.openSignature = t.openSignature || entryMatch.signature;
+      t.closeSignature = t.closeSignature || exitMatch.signature;
+      t.feesReconciled = true;
+      changed = true;
+    }
+  }
+
+  return { store: stored, changed };
+}
+
 // --- Trade journal ----------------------------------------------------------
 // Returns the full retained closed-trade history from both autonomous daemons
 // (the shared Telegram alert engine and the on-chain Jupiter auto-trader),
@@ -891,17 +976,44 @@ app.get("/api/journal", async (_req, res) => {
 
     const stored = syncJournalStore(incoming);
 
-    const trades = stored.map((t: any) => {
+    // Reconcile any not-yet-reconciled REAL Jupiter trades against `jup perps history`
+    // (the actual on-chain fill/fee/PnL Phantom's activity feed shows). Cheap no-op once
+    // every trade has been reconciled — persisted via `feesReconciled` so it never re-runs.
+    let reconciled = stored;
+    try {
+      const result = await reconcileJournalTrades(stored);
+      reconciled = result.store;
+      if (result.changed) saveJournalStore(reconciled);
+    } catch (e: any) {
+      console.error("[Journal] Reconciliation pass failed:", e?.message || e);
+    }
+
+    const trades = reconciled.map((t: any) => {
       const durationMins = (t.entryTime && t.exitTime)
         ? Math.max(0, Math.round((new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime()) / 60000))
         : null;
+      const isReconciled = t.feesReconciled === true;
+      const pnlEstimated = typeof t.pnl === "number" ? t.pnl : 0;
+      const pnlHeadline = isReconciled && typeof t.realizedPnlPct === "number" ? t.realizedPnlPct : pnlEstimated;
       return {
         id: t.id,
         source: t.source,
         side: t.side,
         entryPrice: t.entryPrice,
         exitPrice: t.exitPrice,
-        pnl: typeof t.pnl === "number" ? t.pnl : 0,
+        pnl: pnlHeadline,          // headline number: on-chain reconciled (net of fees) when available
+        pnlEstimated,               // the bot's own pre-fee, signal-time-price estimate
+        reconciled: isReconciled,
+        entryPriceActual: t.entryPriceActual,
+        exitPriceActual: t.exitPriceActual,
+        openFeeUsd: t.openFeeUsd,
+        closeFeeUsd: t.closeFeeUsd,
+        feesUsd: isReconciled ? t.totalFeesUsd : undefined,
+        realizedPnlUsd: t.realizedPnlUsd,
+        openSignature: t.openSignature,
+        closeSignature: t.closeSignature,
+        closeReason: t.closeReason,
+        token: t.token,
         entryTime: t.entryTime,
         exitTime: t.exitTime,
         durationMins,
@@ -2198,6 +2310,7 @@ interface TelegramConfig {
     exitTime: string;
     takeProfitPct?: number;
     stopLossPct?: number;
+    closeReason?: string;
     sentiment?: number;
     technicalScore?: number;
     news?: string[];
@@ -2381,6 +2494,8 @@ export interface JupiterConfig {
     remainingFrac?: number;  // open fraction of the position (1 → 0.5 after scale-out)
     version?: string;        // app version (commit-stamped) the trade was executed under
     positionPubkey?: string;
+    token?: string;          // traded asset (SOL/BTC/ETH) — for fee-reconciliation lookups
+    openSignature?: string;  // on-chain tx signature of the OPEN leg
     sentiment?: number;
     technicalScore?: number;
     news?: string[];
@@ -2399,6 +2514,10 @@ export interface JupiterConfig {
     mode?: string;
     takeProfitPct?: number;
     stopLossPct?: number;
+    closeReason?: string;
+    token?: string;
+    openSignature?: string;
+    closeSignature?: string;
     sentiment?: number;
     technicalScore?: number;
     news?: string[];
@@ -3036,6 +3155,7 @@ export async function checkPredictionAndAlert(forceAlert = false) {
           exitTime: exitTimeStr,
           takeProfitPct: tpPct,
           stopLossPct: slPct,
+          closeReason,
           sentiment: activeTrade.sentiment !== undefined ? activeTrade.sentiment : pred.sentiment,
           technicalScore: activeTrade.technicalScore !== undefined ? activeTrade.technicalScore : (pred.strategyDetails?.technicalScore),
           news: activeTrade.news || pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || [],
@@ -3556,6 +3676,15 @@ function runJupCli(args: string[]): Promise<any> {
   });
 }
 
+// Fetch this wallet's closed-trade activity (Increase/Decrease legs with real fill price,
+// fee, and — for Decrease/close legs — Jupiter's own net-of-fees realized PnL). This is the
+// authoritative source that Phantom's activity feed itself reads from; used to reconcile the
+// bot's own signal-price PnL estimate against what actually happened on-chain.
+async function runJupPerpsHistory(keyName: string, asset: string, limit = 500): Promise<any[]> {
+  const res = await runJupCli(["perps", "history", "--key", keyName, "--asset", asset, "--limit", String(limit)]);
+  return (res && Array.isArray(res.trades)) ? res.trades : [];
+}
+
 // Fetch the current USD price for a perps market asset (SOL/BTC/ETH) from the CLI.
 async function getPerpMarketPrice(asset: string): Promise<number> {
   const markets = await runJupCli(["perps", "markets"]);
@@ -3963,6 +4092,9 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           exitTime: exitTimeStr,
           takeProfitPct: tpPct,
           stopLossPct: slPct,
+          closeReason,
+          token: activeTrade.token || String(config.token || "SOL").toUpperCase(),
+          openSignature: activeTrade.openSignature,
           sentiment: activeTrade.sentiment !== undefined ? activeTrade.sentiment : pred.sentiment,
           technicalScore: activeTrade.technicalScore !== undefined ? activeTrade.technicalScore : (pred.strategyDetails?.technicalScore),
           news: activeTrade.news || pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || [],
@@ -4365,6 +4497,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             realizedPnlPct: 0,     // leveraged % already banked via partial scale-out(s)
             remainingFrac: 1,      // open fraction of the position (1 → 0.5 after the scale-out)
             version: APP_VERSION.version, // build the trade was executed under (commit-stamped)
+            token: String(config.token || "SOL").toUpperCase(),
             sentiment: pred.sentiment,
             technicalScore: pred.strategyDetails?.technicalScore,
             news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
@@ -4382,6 +4515,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
               const signature = await executeOnChainTradeServerSide(enterSide as "LONG" | "SHORT", sizeInSol, { tpPct, slPct, collateralAsset });
               if (signature) {
                 onChainSignature = signature;
+                if (activeTrade) activeTrade.openSignature = signature;
               } else {
                 realOpenFailed = true;
               }

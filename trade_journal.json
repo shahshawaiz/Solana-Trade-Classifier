@@ -13,7 +13,17 @@
     "stopLossPct": 3.4,
     "entryTime": "2026-06-21T21:22:00.000Z",
     "exitTime": "2026-06-22T00:41:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryPriceActual": 72.8,
+    "exitPriceActual": 73.29,
+    "openFeeUsd": 0.04,
+    "closeFeeUsd": 0.08,
+    "totalFeesUsd": 0.12,
+    "realizedPnlUsd": -0.92,
+    "realizedPnlPct": -4.4,
+    "openSignature": "56SkusmS8jNJaAKtHJLpj7FkfApx4A9xCVhqSzf5YNZ58BMq3W6yjrLXRCqaCjoX8FcSFLakaG6WduwSn6UHB8uS",
+    "closeSignature": "3f7g9gQEpSQSL1NeFdqfGEjCQYP9d87Fng6ymEVu8PJb2XtaQXWqYvCbDG6LyotzcQ7rLHj8F1cXYKQHgEcUcvyb",
+    "feesReconciled": true
   },
   {
     "id": "seed-2",
@@ -29,7 +39,17 @@
     "stopLossPct": 4.39,
     "entryTime": "2026-06-22T01:32:00.000Z",
     "exitTime": "2026-06-22T02:06:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryPriceActual": 74.47,
+    "exitPriceActual": 74.12,
+    "openFeeUsd": 0.04,
+    "closeFeeUsd": 0.07,
+    "totalFeesUsd": 0.11000000000000001,
+    "realizedPnlUsd": -0.53,
+    "realizedPnlPct": -2.53,
+    "openSignature": "5g38XWvR5Sw8UGA1VpXF7wytfTXjdZfHJxsv3qecBCEmaaAQ8E5JD2VSHfAphCtdpbiDZf8E6qmKHxG5xRVRt1M2",
+    "closeSignature": "417CU8UyicWawDD8disjbGd5pAMTBG76ennXEFgBHrdDusoVuNCnY2hyzxiKTea9ngjdLm6gx8KqVmNLosszFEta",
+    "feesReconciled": true
   },
   {
     "id": "seed-3",
@@ -45,7 +65,17 @@
     "stopLossPct": 3.17,
     "entryTime": "2026-06-22T07:27:00.000Z",
     "exitTime": "2026-06-22T07:31:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryPriceActual": 74.27,
+    "exitPriceActual": 74.18,
+    "openFeeUsd": 0.04,
+    "closeFeeUsd": 0.04,
+    "totalFeesUsd": 0.08,
+    "realizedPnlUsd": 0.06,
+    "realizedPnlPct": 0.6,
+    "openSignature": "65JCwqvsh7kwSJYqZGyZeom9wTRq5FoQi3qS5k2bD9vcTeH4E7CDpikvL6ngAZivdy89eVr2FM45jgFDruwDUMzK",
+    "closeSignature": "5qN25Xc5CBevwqxNip4eV9vhsDLZpwT1jJ5esigPCawJDe9PjNfSbfhPXHq1FTn3kCNkNZNKXk7uBkeJqcZfqDyE",
+    "feesReconciled": true
   },
   {
     "id": "seed-4",
@@ -61,7 +91,17 @@
     "stopLossPct": 3.11,
     "entryTime": "2026-06-22T07:41:00.000Z",
     "exitTime": "2026-06-22T09:15:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryPriceActual": 74.26,
+    "exitPriceActual": 73.8,
+    "openFeeUsd": 0.04,
+    "closeFeeUsd": 0.04,
+    "totalFeesUsd": 0.08,
+    "realizedPnlUsd": 0.33,
+    "realizedPnlPct": 3.12,
+    "openSignature": "5dJNWtgvsiWuq722ygKvDVrcxzG38o5EbEweMk8ZccUHeJCf1J56AMUQxccgjErHm3uuH9JuuztYLQejnTPdYbsE",
+    "closeSignature": "3y7fA3ZEuzskyqhUdxtZwLVSxmJgS6EkJbq8yo4snrJpdTW5DXUyY98pTXFhgH7arahKYLitG6i2TgCq4ZExWyGo",
+    "feesReconciled": true
   },
   {
     "id": "seed-5",
@@ -77,7 +117,17 @@
     "stopLossPct": 2.96,
     "entryTime": "2026-06-22T12:40:00.000Z",
     "exitTime": "2026-06-22T12:45:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryPriceActual": 74.26,
+    "exitPriceActual": 74.29,
+    "openFeeUsd": 0.04,
+    "closeFeeUsd": 0.04,
+    "totalFeesUsd": 0.08,
+    "realizedPnlUsd": -0.02,
+    "realizedPnlPct": -0.15,
+    "openSignature": "2BZ826XD8FXt7mVLdhdS2kvwMCCnFSgkLqHz3a7tB8irde7g3kJ4PMiyNofhJ995vwnE4WwD2eJkzdNeBBLQwJVC",
+    "closeSignature": "5MgEivPHQrEyLyBpHD2C8Qd3axzKRo1Hu4EzkxtUum4x2tvGgvzCW76DDbhNVqMTkjSQQGL22hWtydLdrmhoitvL",
+    "feesReconciled": true
   },
   {
     "id": "seed-6",
@@ -89,8 +139,8 @@
     "exitPrice": 74.08,
     "pnl": -1.66,
     "sizeInSol": 0.6727,
-    "takeProfitPct": 6.0,
-    "stopLossPct": 3.0,
+    "takeProfitPct": 6,
+    "stopLossPct": 3,
     "entryTime": "2026-06-22T13:16:00.000Z",
     "exitTime": "2026-06-22T13:20:00.000Z",
     "seeded": true
@@ -125,6 +175,16 @@
     "stopLossPct": 3.14,
     "entryTime": "2026-06-22T13:41:00.000Z",
     "exitTime": "2026-06-22T14:08:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryPriceActual": 74.63,
+    "exitPriceActual": 74.38,
+    "openFeeUsd": 0.04,
+    "closeFeeUsd": 0.04,
+    "totalFeesUsd": 0.08,
+    "realizedPnlUsd": -0.17,
+    "realizedPnlPct": -1.65,
+    "openSignature": "3fyKwQnvymFzsHpLfNxjFq3emF1BrL1rJZ7SuWSR8rP9N37sJGXJy5Q3N8y7F6j4nW9Eeb7RvMr1qS8XRXjLQHwA",
+    "closeSignature": "4bxewbSKZ9JJ5gftUwcjAEbN7SSWEFV5vJy5CxwcoKKg3bAhLXXnLdZGyBXrHQUsTBE1hLnyLWMWBdihHWSv48dv",
+    "feesReconciled": true
   }
 ]

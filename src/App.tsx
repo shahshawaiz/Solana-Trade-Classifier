@@ -50,6 +50,7 @@ import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { LiquidityHeatmap } from "./components/LiquidityHeatmap";
 import { LiquidationHistogram } from "./components/LiquidationHistogram";
+import { TradeChart } from "./components/TradeChart";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -597,6 +598,7 @@ export default function App() {
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [journalData, setJournalData] = useState<any | null>(null);
   const [journalLoading, setJournalLoading] = useState(false);
+  const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
   const [macroData, setMacroData] = useState<any | null>(null);
   const [macroLoading, setMacroLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -5391,29 +5393,86 @@ export default function App() {
                                 </span>
                               )}
                             </div>
-                            <span className={cn(
-                              "font-black tracking-tight text-base font-mono",
-                              trade.pnl >= 0 ? "text-sol-green" : "text-red-500"
-                            )}>
-                              {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}%
-                            </span>
+                            <div className="flex flex-col items-end">
+                              <span className={cn(
+                                "font-black tracking-tight text-base font-mono",
+                                trade.pnl >= 0 ? "text-sol-green" : "text-red-500"
+                              )}>
+                                {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}%
+                              </span>
+                              {trade.reconciled && Math.abs(trade.pnlEstimated - trade.pnl) > 0.005 && (
+                                <span className="text-[8px] text-text-dim font-mono">est. {trade.pnlEstimated >= 0 ? "+" : ""}{trade.pnlEstimated.toFixed(2)}%</span>
+                              )}
+                            </div>
                           </div>
-                          
-                          <div className="text-[9px] text-text-dim font-mono flex justify-between items-center">
-                            {exitStr && <span>Settled: {exitStr} {tzAbbr}</span>}
-                            {trade.mode && (
-                              <span className="text-[8px] uppercase tracking-wider px-1 py-0.2 rounded bg-bg-input border border-border-dim">{trade.mode}</span>
+
+                          <div className="flex justify-between items-center flex-wrap gap-1">
+                            <div className="text-[9px] text-text-dim font-mono flex items-center gap-2">
+                              {exitStr && <span>Settled: {exitStr} {tzAbbr}</span>}
+                              {trade.mode && (
+                                <span className="text-[8px] uppercase tracking-wider px-1 py-0.2 rounded bg-bg-input border border-border-dim">{trade.mode}</span>
+                              )}
+                            </div>
+                            {trade.source === "Auto-Trade (Jupiter)" && trade.mode === "REAL" ? (
+                              trade.reconciled ? (
+                                <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-sol-green/10 text-sol-green border border-sol-green/30" title="Reconciled against actual on-chain fills via Jupiter's own trade history — matches your Phantom wallet.">
+                                  ✓ On-chain verified
+                                </span>
+                              ) : (
+                                <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-500 border border-amber-500/30" title="Not yet matched against Jupiter's on-chain trade history — showing the bot's own pre-fee estimate. Will update automatically.">
+                                  Est. — pending match
+                                </span>
+                              )
+                            ) : trade.source === "Auto-Trade (Jupiter)" && trade.mode === "PAPER" ? (
+                              <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-bg-input text-text-dim border border-border-dim" title="Simulated trade — no real funds or fees involved.">
+                                Paper — simulated
+                              </span>
+                            ) : (
+                              <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-bg-input text-text-dim border border-border-dim" title="Signal-only alert — never executed on-chain, no real fill or fees.">
+                                Estimated — signal only
+                              </span>
                             )}
                           </div>
 
                           <div className="space-y-1 text-text-dim border-t border-border-dim/20 pt-2 font-mono">
-                            <div className="flex justify-between"><span>Price Swap:</span><span className="text-text-heading font-medium">${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)}</span></div>
+                            <div className="flex justify-between">
+                              <span>Price Swap:</span>
+                              <span className="text-text-heading font-medium">
+                                ${(trade.entryPriceActual ?? trade.entryPrice)?.toFixed(2)} ➔ ${(trade.exitPriceActual ?? trade.exitPrice)?.toFixed(2)}
+                                {trade.reconciled && trade.entryPriceActual !== undefined && (
+                                  <span className="text-text-dim font-normal"> (est. ${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)})</span>
+                                )}
+                              </span>
+                            </div>
                             {trade.sizeInSol !== undefined && trade.sizeInSol !== null && (
                               <div className="flex justify-between"><span>Sizing:</span><span className="text-text-heading font-medium">{Number(trade.sizeInSol).toFixed(3)} SOL</span></div>
+                            )}
+                            {trade.reconciled && trade.feesUsd !== undefined && (
+                              <div className="flex justify-between">
+                                <span>Fees:</span>
+                                <span className="text-text-heading font-medium">
+                                  ${Number(trade.feesUsd).toFixed(2)}
+                                  {(trade.openFeeUsd !== undefined && trade.closeFeeUsd !== undefined) && (
+                                    <span className="text-text-dim font-normal"> (open ${Number(trade.openFeeUsd).toFixed(2)} + close ${Number(trade.closeFeeUsd).toFixed(2)})</span>
+                                  )}
+                                </span>
+                              </div>
                             )}
                             <div className="flex justify-between"><span>Duration:</span><span className="text-text-heading font-medium">{durationStr}</span></div>
                             {trade.takeProfitPct !== undefined && (
                               <div className="flex justify-between"><span>Limits:</span><span>TP: <span className="text-sol-green font-semibold">+{Number(trade.takeProfitPct).toFixed(1)}%</span> · SL: <span className="text-red-400 font-semibold">-{Number(trade.stopLossPct ?? 0).toFixed(1)}%</span></span></div>
+                            )}
+                            {trade.closeReason && (
+                              <div className="flex justify-between gap-2"><span className="shrink-0">Exit:</span><span className="text-text-heading font-medium text-right">{trade.closeReason}</span></div>
+                            )}
+                            {(trade.openSignature || trade.closeSignature) && (
+                              <div className="flex justify-between gap-2 text-[8.5px]">
+                                <span>Tx:</span>
+                                <span className="flex gap-2">
+                                  {trade.openSignature && <a href={`https://solscan.io/tx/${trade.openSignature}`} target="_blank" rel="noopener noreferrer" className="text-sol-purple hover:underline">open ↗</a>}
+                                  {trade.closeSignature && <a href={`https://solscan.io/tx/${trade.closeSignature}`} target="_blank" rel="noopener noreferrer" className="text-sol-purple hover:underline">close ↗</a>}
+                                </span>
+                              </div>
                             )}
                           </div>
 
@@ -5464,6 +5523,20 @@ export default function App() {
                               </div>
                             </div>
                           )}
+
+                          <div className="border-t border-border-dim/20 pt-2">
+                            <button
+                              type="button"
+                              onClick={() => setExpandedTradeId(expandedTradeId === trade.id ? null : trade.id)}
+                              className="w-full flex items-center justify-center gap-1.5 text-[9px] font-bold uppercase tracking-wider text-sol-purple hover:text-sol-purple/80 cursor-pointer transition-colors"
+                            >
+                              {expandedTradeId === trade.id ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                              Price Chart
+                            </button>
+                            {expandedTradeId === trade.id && (
+                              <TradeChart trade={trade} token={trade.token || token} />
+                            )}
+                          </div>
                         </div>
                       );
                     })}

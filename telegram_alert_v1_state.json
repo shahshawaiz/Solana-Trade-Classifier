@@ -13,7 +13,7 @@
     "fvg": 0,
     "dca": 0
   },
-  "lastAction": "Hold Chop Zone",
+  "lastAction": "Hold (Σ below threshold)",
   "lastSentDirection": "HOLD",
   "frequency": 5,
   "cooldownMinutes": 30,
@@ -29,6 +29,5 @@
   "tradesHistory": [],
   "auditLogs": [],
   "newsTelegramChannel": "https://t.me/+1C0c6rUVmjo3Y2Y8",
-  "lastCheckedAt": "2026-06-22T20:38:15.407Z",
-  "error": "Telegram response error: {\"ok\":false,\"error_code\":404,\"description\":\"Not Found\"}"
+  "lastCheckedAt": "2026-07-02T20:54:55.324Z"
 }
