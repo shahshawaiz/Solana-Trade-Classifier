@@ -1140,13 +1140,21 @@ async function backfillJupiterHistoryIfNeeded(stored: any[]): Promise<{ store: a
 
   const backfilledTrades = buildTradesFromJupHistory(rows, asset);
 
-  const existingCloseSignatures = new Set(
-    stored
-      .filter((t: any) => t.source === "Auto-Trade (Jupiter)" && !String(t.id).startsWith("seed-") && t.closeSignature)
-      .map((t: any) => t.closeSignature)
-  );
+  const existingRealTrades = stored.filter((t: any) => t.source === "Auto-Trade (Jupiter)" && t.mode === "REAL" && !String(t.id).startsWith("seed-"));
+  const existingCloseSignatures = new Set(existingRealTrades.filter((t: any) => t.closeSignature).map((t: any) => t.closeSignature));
+  // Fallback for trades reconciliation couldn't signature-match (e.g. outside its 10-min
+  // tolerance): also treat a backfilled row as already covered if an existing daemon-recorded
+  // row of the same side closed within 2 minutes of it — avoids double-counting the same trade.
+  const CLOSE_DEDUPE_TOLERANCE_MS = 2 * 60 * 1000;
+  const isAlreadyRecorded = (t: any) =>
+    existingCloseSignatures.has(t.closeSignature) ||
+    existingRealTrades.some((e: any) =>
+      String(e.side).toUpperCase() === t.side &&
+      e.exitTime &&
+      Math.abs(new Date(e.exitTime).getTime() - new Date(t.exitTime).getTime()) <= CLOSE_DEDUPE_TOLERANCE_MS
+    );
   const newRows = backfilledTrades
-    .filter((t: any) => !existingCloseSignatures.has(t.closeSignature))
+    .filter((t: any) => !isAlreadyRecorded(t))
     .map((t: any) => ({ ...t, source: "Auto-Trade (Jupiter)" }));
 
   // Drop old placeholder/demo rows — they're being replaced by the real thing.
@@ -1181,19 +1189,12 @@ app.get("/api/journal", async (_req, res) => {
 
     let stored = syncJournalStore(incoming);
 
-    // One-time import of the wallet's FULL on-chain history (replaces old placeholder/demo
-    // rows with real trades and resets the ledger's aggregate stats from this point forward).
-    // No-op after the first successful run (gated by `jupHistoryBackfilledAt`).
-    try {
-      const backfill = await backfillJupiterHistoryIfNeeded(stored);
-      if (backfill.changed) { stored = backfill.store; saveJournalStore(stored); }
-    } catch (e: any) {
-      console.error("[Journal] History backfill pass failed:", e?.message || e);
-    }
-
-    // Reconcile any not-yet-reconciled REAL Jupiter trades against `jup perps history`
-    // (the actual on-chain fill/fee/PnL Phantom's activity feed shows). Cheap no-op once
-    // every trade has been reconciled — persisted via `feesReconciled` so it never re-runs.
+    // Reconcile any not-yet-reconciled REAL Jupiter trades against `jup perps history` FIRST —
+    // this attaches `closeSignature` to every daemon-recorded trade the CLI history can match by
+    // timestamp. Must run BEFORE the backfill below: the backfill dedupes against existing
+    // `closeSignature`s, so running it first (before any existing rows had signatures attached)
+    // would see an empty dedupe set and re-insert every trade the daemon already recorded —
+    // duplicating the ledger instead of just filling gaps.
     let reconciled = stored;
     try {
       const result = await reconcileJournalTrades(stored);
@@ -1201,6 +1202,17 @@ app.get("/api/journal", async (_req, res) => {
       if (result.changed) saveJournalStore(reconciled);
     } catch (e: any) {
       console.error("[Journal] Reconciliation pass failed:", e?.message || e);
+    }
+    stored = reconciled;
+
+    // One-time import of the wallet's FULL on-chain history (fills in trades the daemon never
+    // captured — e.g. before this reconciliation feature existed — and replaces old
+    // placeholder/demo rows). No-op after the first successful run (gated by `jupHistoryBackfilledAt`).
+    try {
+      const backfill = await backfillJupiterHistoryIfNeeded(stored);
+      if (backfill.changed) { stored = backfill.store; reconciled = stored; saveJournalStore(stored); }
+    } catch (e: any) {
+      console.error("[Journal] History backfill pass failed:", e?.message || e);
     }
 
     const trades = reconciled.map((t: any) => {
