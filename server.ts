@@ -252,6 +252,99 @@ export function entryGateBlock(
   return null;
 }
 
+// ───────────────────── Mean-reversion range-fade regime ─────────────────────
+// Momentum (MACD/RSI/Supertrend) works when a market is trending — ADX confirms that. Below
+// ADX_GATE_MIN the market is ranging/choppy, and today the bot simply stands aside for the whole
+// duration. That's exactly the regime mean-reversion is built for: fade price back toward the
+// middle of its recent range instead of chasing a trend that isn't there.
+//
+// Rule ("no knife catching"): never enter on the mere TOUCH of a range edge — only on a REJECTION,
+// i.e. the bar wicks beyond the N-bar high/low but CLOSES back inside it by a meaningful fraction
+// of its own range. A touch with no rejection, or a touch that closes through (a real breakout),
+// does not fire.
+const MEAN_REVERSION_LOOKBACK_MINUTES = Number(process.env.MEAN_REVERSION_LOOKBACK_MINUTES) || 60;
+const MEAN_REVERSION_MIN_LOOKBACK_BARS = 6; // floor so coarse intervals (1h+) still see a real range, not 1 candle
+const MEAN_REVERSION_REJECTION_FRAC = Number(process.env.MEAN_REVERSION_REJECTION_FRAC) || 0.35; // close must retrace this fraction of the bar's own range back from the touched extreme
+
+function intervalToMinutes(interval: string): number {
+  const map: Record<string, number> = { "1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "90m": 90, "1h": 60, "1d": 1440 };
+  return map[interval] || 15;
+}
+
+export function evaluateMeanReversionSignal(quotes: any[], interval: string): { side: "LONG" | "SHORT"; aRec: string } | null {
+  const minutesPerBar = intervalToMinutes(interval);
+  const lookback = Math.max(MEAN_REVERSION_MIN_LOOKBACK_BARS, Math.round(MEAN_REVERSION_LOOKBACK_MINUTES / minutesPerBar));
+  if (quotes.length < lookback + 2) return null;
+
+  // Range excludes the most-recent CLOSED bar itself — we're testing whether THIS bar rejected
+  // off structure built by the bars before it, not off itself.
+  const rangeBars = quotes.slice(-(lookback + 1), -1);
+  const highs = rangeBars.map((q: any) => Number(q.high ?? q.close));
+  const lows = rangeBars.map((q: any) => Number(q.low ?? q.close));
+  const rangeHigh = Math.max(...highs);
+  const rangeLow = Math.min(...lows);
+  if (!(rangeHigh > rangeLow)) return null;
+
+  const last = quotes[quotes.length - 1];
+  const barHigh = Number(last.high ?? last.close);
+  const barLow = Number(last.low ?? last.close);
+  const barClose = Number(last.close);
+  const barRange = barHigh - barLow;
+  if (barRange <= 0) return null;
+
+  // Rejected off the HIGH (wicked above/at the range high, closed back down inside it) -> fade SHORT.
+  const touchedHigh = barHigh >= rangeHigh;
+  const closeBackFromHighFrac = (barHigh - barClose) / barRange;
+  if (touchedHigh && closeBackFromHighFrac >= MEAN_REVERSION_REJECTION_FRAC && barClose < rangeHigh) {
+    return { side: "SHORT", aRec: `Range Fade — rejected off ${lookback}-bar high $${rangeHigh.toFixed(2)} (closed back ${(closeBackFromHighFrac * 100).toFixed(0)}% into the bar — no knife catching)` };
+  }
+
+  // Rejected off the LOW -> fade LONG.
+  const touchedLow = barLow <= rangeLow;
+  const closeBackFromLowFrac = (barClose - barLow) / barRange;
+  if (touchedLow && closeBackFromLowFrac >= MEAN_REVERSION_REJECTION_FRAC && barClose > rangeLow) {
+    return { side: "LONG", aRec: `Range Fade — rejected off ${lookback}-bar low $${rangeLow.toFixed(2)} (closed back ${(closeBackFromLowFrac * 100).toFixed(0)}% into the bar — no knife catching)` };
+  }
+
+  return null;
+}
+
+// ───────────────────── Regime switch: momentum vs mean-reversion ─────────────────────
+// Single source of truth for BOTH live engines (evaluateSignal / getPredictionData, consumed by
+// both the Telegram Alert Daemon and the real Jupiter auto-trader) and /api/backtest's
+// getTickSignal — so a strategy change here is automatically reflected everywhere, never drifts.
+//
+// ADX > ADX_GATE_MIN  -> TRENDING: unchanged momentum path (candidateSide from composite score,
+//                         gated by entryGateBlock's Supertrend + MACD/RSI checks).
+// ADX <= ADX_GATE_MIN -> RANGING: momentum's composite score is unreliable by definition here
+//                         (that's WHY it's ranging) — ignore candidateSide entirely and instead
+//                         look for a range-edge rejection to fade back toward the middle.
+export function resolveEntry(
+  candidateSide: "LONG" | "SHORT" | "HOLD",
+  closes: number[],
+  quotes: any[],
+  interval: string,
+  meanReversionEnabled = true
+): { side: "LONG" | "SHORT" | "HOLD"; aRec: string; regime: "TRENDING" | "RANGING" } {
+  const adxVal = calculateADX(quotes, 14);
+
+  if (adxVal > ADX_GATE_MIN) {
+    if (candidateSide === "HOLD") return { side: "HOLD", aRec: "Hold", regime: "TRENDING" };
+    const block = entryGateBlock(candidateSide, closes, quotes, interval);
+    if (block) return { side: "HOLD", aRec: block.aRec, regime: "TRENDING" };
+    return { side: candidateSide, aRec: candidateSide === "LONG" ? "Long Buy" : "Short Sell", regime: "TRENDING" };
+  }
+
+  if (!meanReversionEnabled) {
+    return { side: "HOLD", aRec: `Hold (ADX is ranging: ${adxVal.toFixed(1)} <= ${ADX_GATE_MIN})`, regime: "RANGING" };
+  }
+  const mr = evaluateMeanReversionSignal(quotes, interval);
+  if (!mr) {
+    return { side: "HOLD", aRec: `Hold (ADX ranging: ${adxVal.toFixed(1)} <= ${ADX_GATE_MIN}; no range-edge rejection yet)`, regime: "RANGING" };
+  }
+  return { side: mr.side, aRec: mr.aRec, regime: "RANGING" };
+}
+
 // ───────────────────────── Exit strategy (shared) ─────────────────────────
 // Volatility-adaptive exit: partial scale-out + breakeven + ATR trailing stop. One source of
 // truth for the live daemon, the /api/backtest engine, and scripts/macro-benchmark.ts, so the
@@ -873,6 +966,21 @@ function appendJournalEntry(source: string, trade: any) {
   catch (e: any) { console.error("[Journal] Failed to append closed trade:", e?.message || e); }
 }
 
+// The CLI's `pnlUsd`/`pnlPct` on a Decrease (close) row already nets out the OPEN fee and any
+// accrued borrow/funding fee, but NOT that same leg's own close fee (`feeUsd`) — Phantom's
+// activity feed subtracts it separately (its "Incl. close/borrow fees" PnL line already excludes
+// the close fee shown right below it). Verified against real pasted Phantom data: CLI pnlUsd
+// 0.16/0.39 minus feeUsd 0.02 == Phantom's displayed +$0.14/+$0.37 exactly, on two independent
+// closes. Scale pnlPct by the same ratio so the leveraged % stays internally consistent.
+function netCloseLegPnl(closeRow: any): { pnlUsd: number; pnlPct: number } {
+  const grossUsd = typeof closeRow.pnlUsd === "number" ? closeRow.pnlUsd : Number(closeRow.pnlUsd) || 0;
+  const grossPct = typeof closeRow.pnlPct === "number" ? closeRow.pnlPct : Number(closeRow.pnlPct) || 0;
+  const closeFeeUsd = Number(closeRow.feeUsd) || 0;
+  const netUsd = grossUsd - closeFeeUsd;
+  const netPct = grossUsd !== 0 ? grossPct * (netUsd / grossUsd) : grossPct;
+  return { pnlUsd: netUsd, pnlPct: netPct };
+}
+
 // --- Fee/price reconciliation against Jupiter's own on-chain trade history --
 // The bot's own `pnl`/`entryPrice`/`exitPrice` are computed from its OWN signal-time price
 // snapshot (Yahoo/CryptoCompare), never the actual Jupiter fill — and never account for
@@ -946,8 +1054,9 @@ async function reconcileJournalTrades(stored: any[]): Promise<{ store: any[]; ch
       t.openFeeUsd = Number(entryMatch.feeUsd) || 0;
       t.closeFeeUsd = Number(exitMatch.feeUsd) || 0;
       t.totalFeesUsd = t.openFeeUsd + t.closeFeeUsd;
-      t.realizedPnlUsd = typeof exitMatch.pnlUsd === "number" ? exitMatch.pnlUsd : Number(exitMatch.pnlUsd) || 0;
-      t.realizedPnlPct = typeof exitMatch.pnlPct === "number" ? exitMatch.pnlPct : Number(exitMatch.pnlPct) || 0;
+      const net = netCloseLegPnl(exitMatch);
+      t.realizedPnlUsd = net.pnlUsd;
+      t.realizedPnlPct = net.pnlPct;
       t.openSignature = t.openSignature || entryMatch.signature;
       t.closeSignature = t.closeSignature || exitMatch.signature;
       t.feesReconciled = true;
@@ -956,6 +1065,102 @@ async function reconcileJournalTrades(stored: any[]): Promise<{ store: any[]; ch
   }
 
   return { store: stored, changed };
+}
+
+// Convert raw `jup perps history` rows (chronological) into journal-shaped closed-trade
+// records by FIFO-pairing each side's Increase (open) with its next Decrease (close) — the
+// bot only ever holds one position at a time, so per-side FIFO exactly reconstructs each
+// round trip. Every field is the real on-chain value, so these rows are born fully reconciled.
+function buildTradesFromJupHistory(rows: any[], asset: string): any[] {
+  const chronological = [...rows]
+    .filter((r: any) => r && r.time && r.action && r.side)
+    .sort((a: any, b: any) => new Date(a.time).getTime() - new Date(b.time).getTime());
+
+  const openQueue: Record<string, any[]> = { LONG: [], SHORT: [] };
+  const trades: any[] = [];
+
+  for (const row of chronological) {
+    const side = String(row.side).toUpperCase();
+    if (side !== "LONG" && side !== "SHORT") continue;
+    if (row.action === "Increase") {
+      openQueue[side].push(row);
+    } else if (row.action === "Decrease") {
+      const openRow = openQueue[side].shift();
+      if (!openRow) continue; // Decrease with no matching Increase in this window — skip, can't attribute
+      const openFeeUsd = Number(openRow.feeUsd) || 0;
+      const closeFeeUsd = Number(row.feeUsd) || 0;
+      const net = netCloseLegPnl(row);
+      trades.push({
+        id: `jup-${String(row.signature || "").slice(0, 12) || Math.random().toString(36).slice(2, 9)}`,
+        side,
+        entryPrice: Number(openRow.priceUsd),
+        exitPrice: Number(row.priceUsd),
+        entryPriceActual: Number(openRow.priceUsd),
+        exitPriceActual: Number(row.priceUsd),
+        pnl: net.pnlPct,
+        pnlEstimated: net.pnlPct,
+        realizedPnlUsd: net.pnlUsd,
+        realizedPnlPct: net.pnlPct,
+        openFeeUsd,
+        closeFeeUsd,
+        totalFeesUsd: openFeeUsd + closeFeeUsd,
+        entryTime: openRow.time,
+        exitTime: row.time,
+        openSignature: openRow.signature,
+        closeSignature: row.signature,
+        token: asset,
+        mode: "REAL",
+        feesReconciled: true,
+        backfilled: true, // imported from on-chain history, not recorded live by the daemon
+      });
+    }
+  }
+  return trades;
+}
+
+// One-time import of the WALLET'S FULL on-chain trade history into the journal, so the ledger
+// reflects reality even for trades that predate this reconciliation feature (or were never
+// captured live due to a daemon restart/reset). Runs once per key+asset (gated by
+// `jupHistoryBackfilledAt`); replaces any old placeholder/demo rows and dedupes against
+// already-recorded live rows by closeSignature so nothing double-counts.
+async function backfillJupiterHistoryIfNeeded(stored: any[]): Promise<{ store: any[]; changed: boolean }> {
+  const config = loadJupiterConfig();
+  if (config.jupHistoryBackfilledAt) return { store: stored, changed: false };
+
+  const keyName = jupCliKeyName(config);
+  const asset = String(config.token || "SOL").toUpperCase();
+
+  let rows: any[];
+  try {
+    rows = await runJupPerpsHistory(keyName, asset, 5000);
+  } catch (e: any) {
+    console.error(`[Journal] Full history backfill fetch failed for ${asset}:`, e?.message || e);
+    return { store: stored, changed: false }; // retry on a later /api/journal read
+  }
+
+  const backfilledTrades = buildTradesFromJupHistory(rows, asset);
+
+  const existingCloseSignatures = new Set(
+    stored
+      .filter((t: any) => t.source === "Auto-Trade (Jupiter)" && !String(t.id).startsWith("seed-") && t.closeSignature)
+      .map((t: any) => t.closeSignature)
+  );
+  const newRows = backfilledTrades
+    .filter((t: any) => !existingCloseSignatures.has(t.closeSignature))
+    .map((t: any) => ({ ...t, source: "Auto-Trade (Jupiter)" }));
+
+  // Drop old placeholder/demo rows — they're being replaced by the real thing.
+  const withoutSeeds = stored.filter((t: any) => !(t.source === "Auto-Trade (Jupiter)" && String(t.id).startsWith("seed-")));
+
+  const merged = [...withoutSeeds, ...newRows];
+
+  const now = new Date().toISOString();
+  config.jupHistoryBackfilledAt = now;
+  config.statsResetAt = now; // full history now visible in the ledger — stats start counting fresh from here
+  try { saveJupiterConfig(config); } catch (e: any) { console.error("[Journal] Failed to persist backfill marker:", e?.message || e); }
+
+  console.log(`[Journal] Backfilled ${newRows.length} real trade(s) from jup perps history for ${asset}; stats reset at ${now}.`);
+  return { store: merged, changed: true };
 }
 
 // --- Trade journal ----------------------------------------------------------
@@ -974,7 +1179,17 @@ app.get("/api/journal", async (_req, res) => {
       (jup.tradesHistory || []).forEach((t: any) => incoming.push({ source: "Auto-Trade (Jupiter)", trade: t }));
     } catch (e) {}
 
-    const stored = syncJournalStore(incoming);
+    let stored = syncJournalStore(incoming);
+
+    // One-time import of the wallet's FULL on-chain history (replaces old placeholder/demo
+    // rows with real trades and resets the ledger's aggregate stats from this point forward).
+    // No-op after the first successful run (gated by `jupHistoryBackfilledAt`).
+    try {
+      const backfill = await backfillJupiterHistoryIfNeeded(stored);
+      if (backfill.changed) { stored = backfill.store; saveJournalStore(stored); }
+    } catch (e: any) {
+      console.error("[Journal] History backfill pass failed:", e?.message || e);
+    }
 
     // Reconcile any not-yet-reconciled REAL Jupiter trades against `jup perps history`
     // (the actual on-chain fill/fee/PnL Phantom's activity feed shows). Cheap no-op once
@@ -1031,18 +1246,23 @@ app.get("/api/journal", async (_req, res) => {
       };
     }).sort((a, b) => new Date(b.exitTime || 0).getTime() - new Date(a.exitTime || 0).getTime());
 
-    // Aggregate analytics.
-    const total = trades.length;
-    const wins = trades.filter((t) => t.pnl > 0);
-    const losses = trades.filter((t) => t.pnl < 0);
-    const totalPnL = trades.reduce((s, t) => s + (t.pnl || 0), 0);
+    // Aggregate analytics — the ledger (`trades`) always shows FULL history, but stats only
+    // count trades closed after the last reset (e.g. the one-time history backfill above, which
+    // would otherwise flood win-rate/PnL with everything the wallet has ever done).
+    const statsResetAt = loadJupiterConfig().statsResetAt;
+    const statsScope = statsResetAt ? trades.filter((t) => new Date(t.exitTime || 0).getTime() >= new Date(statsResetAt).getTime()) : trades;
+
+    const total = statsScope.length;
+    const wins = statsScope.filter((t) => t.pnl > 0);
+    const losses = statsScope.filter((t) => t.pnl < 0);
+    const totalPnL = statsScope.reduce((s, t) => s + (t.pnl || 0), 0);
     const avgPnL = total ? totalPnL / total : 0;
     const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
     const avgLoss = losses.length ? losses.reduce((s, t) => s + t.pnl, 0) / losses.length : 0;
-    const durations = trades.map((t) => t.durationMins).filter((d): d is number => typeof d === "number");
+    const durations = statsScope.map((t) => t.durationMins).filter((d): d is number => typeof d === "number");
     const avgDurationMins = durations.length ? Math.round(durations.reduce((s, d) => s + d, 0) / durations.length) : 0;
-    const best = trades.reduce<any>((m, t) => (m === null || t.pnl > m.pnl ? t : m), null);
-    const worst = trades.reduce<any>((m, t) => (m === null || t.pnl < m.pnl ? t : m), null);
+    const best = statsScope.reduce<any>((m, t) => (m === null || t.pnl > m.pnl ? t : m), null);
+    const worst = statsScope.reduce<any>((m, t) => (m === null || t.pnl < m.pnl ? t : m), null);
 
     const stats = {
       total,
@@ -1055,10 +1275,11 @@ app.get("/api/journal", async (_req, res) => {
       avgLoss,
       profitFactor: avgLoss !== 0 ? Math.abs((avgWin * wins.length) / (avgLoss * losses.length || 1)) : null,
       avgDurationMins,
-      longCount: trades.filter((t) => t.side === "LONG").length,
-      shortCount: trades.filter((t) => t.side === "SHORT").length,
+      longCount: statsScope.filter((t) => t.side === "LONG").length,
+      shortCount: statsScope.filter((t) => t.side === "SHORT").length,
       best: best ? { pnl: best.pnl, side: best.side, source: best.source, exitTime: best.exitTime } : null,
       worst: worst ? { pnl: worst.pnl, side: worst.side, source: worst.source, exitTime: worst.exitTime } : null,
+      resetAt: statsResetAt || null,
     };
 
     return res.json({ trades, stats, updatedAt: new Date().toISOString() });
@@ -1950,8 +2171,8 @@ export function getNewsAgeString(publishedAt: string): string {
   }
 }
 
-export async function getPredictionData(token: string, topic: string, weights: any, interval: string = "15m", newsQueryKeywords: string = "", isAutoSync: boolean = false) {
-  const predictCacheKey = `${token.toUpperCase()}_${interval}_${topic.substring(0, 50)}_${newsQueryKeywords.substring(0, 50)}_${JSON.stringify(weights)}`;
+export async function getPredictionData(token: string, topic: string, weights: any, interval: string = "15m", newsQueryKeywords: string = "", isAutoSync: boolean = false, meanReversionEnabled: boolean = true) {
+  const predictCacheKey = `${token.toUpperCase()}_${interval}_${topic.substring(0, 50)}_${newsQueryKeywords.substring(0, 50)}_${JSON.stringify(weights)}_mr${meanReversionEnabled ? 1 : 0}`;
   const cached = predictCache.get(predictCacheKey);
   if (cached && (Date.now() - cached.timestamp) < PREDICT_CACHE_TTL_MS) {
     console.log(`[Cache Hit] Serving cached getPredictionData for ${token}`);
@@ -2083,16 +2304,14 @@ export async function getPredictionData(token: string, topic: string, weights: a
           aRec = sData.isChop ? "Hold Chop Zone" : "Hold (Σ below threshold)";
       }
 
-      // Apply the shared moderate entry-gate stack (ADX strength · 15m Supertrend direction ·
-      // MACD-sign OR RSI-timing momentum). Single source of truth shared with /api/backtest.
-      if (pSide === "LONG" || pSide === "SHORT") {
-          const block = entryGateBlock(pSide as any, priceCloses, localQuotes, validInterval);
-          if (block) {
-              pSide = "HOLD";
-              aRec = block.aRec;
-              trnd = "CHOP/HOLD";
-          }
-      }
+      // Regime switch — single source of truth shared with /api/backtest (resolveEntry):
+      // TRENDING (ADX > gate) keeps the momentum path above, gated by Supertrend + MACD/RSI.
+      // RANGING (ADX <= gate) ignores the momentum pSide entirely (unreliable by definition in
+      // chop) and instead looks for a mean-reversion range-edge rejection.
+      const resolved = resolveEntry(pSide as any, priceCloses, localQuotes, validInterval, meanReversionEnabled);
+      pSide = resolved.side;
+      aRec = resolved.aRec;
+      trnd = resolved.regime === "RANGING" && resolved.side !== "HOLD" ? "RANGE-FADE" : (resolved.side === "HOLD" ? "CHOP/HOLD" : trnd);
 
       return { pSide, aRec, trnd, overrule: sData.overrule };
   }
@@ -2109,7 +2328,10 @@ export async function getPredictionData(token: string, topic: string, weights: a
   // Direction confirmation: enter only on the 2nd confirmation — current and previous candle
   // must agree on direction. An authoritative catalyst overrule (extreme sentiment) fires
   // immediately and bypasses the 2-bar wait. (Field name kept for downstream compatibility.)
-  let isTrendConfirmed3x = (positionSide !== "HOLD" && positionSide === prevSig1.pSide) || currentSig.overrule;
+  // Mean-reversion range-fade signals ALSO bypass it: the rejection candle (wick beyond the
+  // range edge, closing back in) is itself the confirmation — persistence isn't meaningful for a
+  // single-bar rejection event the way it is for a momentum trend.
+  let isTrendConfirmed3x = (positionSide !== "HOLD" && positionSide === prevSig1.pSide) || currentSig.overrule || currentSig.trnd === "RANGE-FADE";
 
   const volatilityPct = 1.45; 
   const confidence = Math.min(Math.max((0.50 + (Math.abs(compositeScore) * 0.45)), 0.1), 0.95);
@@ -2476,6 +2698,9 @@ export interface JupiterConfig {
   convictionSizeFloor?: number; // smallest fraction of base size for a threshold-strength signal (default 0.6).
   lastFailedEntry?: { price: number; side: "LONG" | "SHORT"; at: number }; // last losing entry (for re-entry block).
   auditLogs?: Array<AuditLogEntry>; // per-sync reasoning trail (why each tick entered/held/skipped).
+  jupHistoryBackfilledAt?: string; // set once the full on-chain trade history has been imported into the journal (one-time).
+  statsResetAt?: string; // journal ledger keeps full history, but aggregate stats only count trades closed after this.
+  meanReversionEnabled?: boolean; // range-fade entries when ADX says the market is ranging (default ON — see resolveEntry).
   activeTrade: {
     side: "LONG" | "SHORT";
     entryPrice: number;
@@ -2585,6 +2810,7 @@ function loadJupiterConfig(): JupiterConfig {
       if (parsed.cooldownMinutes === undefined) parsed.cooldownMinutes = 30;
       if (parsed.lastTradeAddedAt === undefined) parsed.lastTradeAddedAt = "";
       if (parsed.token === undefined) parsed.token = "SOL";
+      if (parsed.meanReversionEnabled === undefined) parsed.meanReversionEnabled = true;
       if (parsed.topic === undefined || parsed.topic === "market" || parsed.topic === "Crypto") parsed.topic = "crypto,war";
       const legacyLosingWeights = parsed.weights && parsed.weights.sentiment === 0.9 && parsed.weights.elliottWave === 0.85;
       if (!parsed.weights || legacyLosingWeights) {
@@ -3908,7 +4134,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
     // Run the signal on the configured timeframe (default 1h). Previously the interval arg was
     // omitted → silently defaulted to 15m, contradicting the 1h move in STRATEGY_RESULTS.md §9/§10
     // (5m/fast scalping is a structurally losing config: tiny edge × high trade count × fees).
-    const pred = await getPredictionData(config.token, config.topic, config.weights, config.interval || "1h");
+    const pred = await getPredictionData(config.token, config.topic, config.weights, config.interval || "1h", "", false, config.meanReversionEnabled !== false);
     config.lastCheckedAt = new Date().toISOString();
     delete config.error;
 
@@ -4901,19 +5127,16 @@ app.post("/api/backtest", async (req, res) => {
           aRec = sData.isChop ? "Hold Chop Zone" : "Hold (Σ below threshold)";
         }
 
-        // Apply the SAME shared moderate entry-gate stack the live trader uses, so this
-        // backtest stays faithful to live behaviour (single source of truth: entryGateBlock).
-        if (pSide === "LONG" || pSide === "SHORT") {
-          const tickQuotes = quotes.slice(0, tickIdx + 1);
-          const block = entryGateBlock(pSide as any, tickCloses, tickQuotes, interval);
-          if (block) {
-            pSide = "HOLD";
-            aRec = block.aRec;
-            trnd = "CHOP/HOLD";
-          }
-        }
-        
-        return { 
+        // Apply the SAME shared regime switch the live trader uses (resolveEntry: momentum when
+        // trending, mean-reversion range-fade when ranging), so this backtest stays faithful to
+        // live behaviour — single source of truth.
+        const tickQuotes = quotes.slice(0, tickIdx + 1);
+        const resolved = resolveEntry(pSide as any, tickCloses, tickQuotes, interval);
+        pSide = resolved.side;
+        aRec = resolved.aRec;
+        trnd = resolved.regime === "RANGING" && resolved.side !== "HOLD" ? "RANGE-FADE" : (resolved.side === "HOLD" ? "CHOP/HOLD" : trnd);
+
+        return {
           positionSide: pSide, 
           actionRecommendation: aRec, 
           finalScore: fScore,
@@ -4933,7 +5156,9 @@ app.post("/api/backtest", async (req, res) => {
       let actionRecommendation = currentSig.actionRecommendation;
       const finalScore = currentSig.finalScore;
       
-      const isTrendConfirmed3x = (positionSide !== "HOLD" && positionSide === prevSig1.positionSide);
+      // Mean-reversion range-fade signals bypass the 2-bar persistence check (same reasoning as
+      // the live engine — see evaluateSignal): the rejection candle IS the confirmation.
+      const isTrendConfirmed3x = (positionSide !== "HOLD" && positionSide === prevSig1.positionSide) || currentSig.trnd === "RANGE-FADE";
 
 
       // Measure prediction quality: directional hit rate
