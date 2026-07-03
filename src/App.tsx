@@ -5656,14 +5656,14 @@ export default function App() {
                     <Zap className="w-4 h-4 text-yellow-300" />
                     <span className="text-xs uppercase font-extrabold tracking-widest font-mono">Optimal Strategy Recommendation</span>
                   </div>
-                  <h3 className="text-base font-bold text-text-heading font-serif italic">MACD + RSI + Supertrend Core Strategy</h3>
+                  <h3 className="text-base font-bold text-text-heading font-serif italic">Dual-Regime: Momentum + Mean-Reversion Core Strategy</h3>
                   <p className="text-xs text-text-dim leading-relaxed">
-                    Through rigorous multi-asset sweep testing across historical windows (BTC, ETH, SOL), the most robust and consistent yield performance was achieved using a unified <strong>Technical Trend (MACD)</strong>, <strong>Oscillator (RSI)</strong>, and <strong>Supertrend (ATR)</strong> configuration with a <strong>0.25</strong> conviction threshold and active trend-regime filtering.
+                    Through rigorous multi-asset sweep testing across historical windows (BTC, ETH, SOL), the most robust and consistent yield performance was achieved using a unified <strong>Technical Trend (MACD)</strong>, <strong>Oscillator (RSI)</strong>, and <strong>Supertrend (ATR)</strong> configuration with a <strong>0.25</strong> conviction threshold and active trend-regime filtering. The engine switches strategy by regime: <strong>momentum</strong> when ADX confirms a trend, <strong>mean-reversion range-fades</strong> (fade rejections off the recent range high/low) when ADX says the market is ranging / chop-zone.
                   </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => {
+                  onClick={async () => {
                     setWeights({
                       sentiment: 0,
                       technical: 0.9,
@@ -5683,7 +5683,23 @@ export default function App() {
                       dca: false
                     });
                     setThreshold(0.25);
-                    alert("System configuration updated to recommended optimal defaults:\n• Weights: MACD: 0.9, RSI: 0.85, Supertrend: 0.9\n• Enabled: MACD, RSI, Supertrend (others disabled)\n• Conviction Threshold: 0.25");
+                    // Persist the regime switch on the auto-trader: momentum when ADX trends,
+                    // mean-reversion range-fades when ADX says ranging/chop (resolveEntry).
+                    // The engine defaults ON, but applying "recommended" must also repair a
+                    // config where it was previously turned off.
+                    let mrNote = "• Mean-Reversion range-fade in chop-zone (ADX ranging): ENABLED";
+                    try {
+                      const res = await fetch("/api/jupiter-config", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ meanReversionEnabled: true })
+                      });
+                      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                      fetchJupiterConfig();
+                    } catch (e: any) {
+                      mrNote = `• Mean-Reversion toggle could not be saved (${e.message || e}) — engine default is ON`;
+                    }
+                    alert(`System configuration updated to recommended optimal defaults:\n• Weights: MACD: 0.9, RSI: 0.85, Supertrend: 0.9\n• Enabled: MACD, RSI, Supertrend (others disabled)\n• Conviction Threshold: 0.25\n• Momentum strategy when ADX confirms a trend\n${mrNote}`);
                   }}
                   className="py-2.5 px-5 bg-sol-purple hover:bg-sol-purple/90 text-white font-extrabold uppercase text-[10px] tracking-wider rounded-xl transition-all shadow-md shrink-0 cursor-pointer animate-pulse"
                 >

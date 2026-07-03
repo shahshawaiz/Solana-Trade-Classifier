@@ -6413,10 +6413,11 @@ app.post("/api/jupiter-config", async (req, res) => {
       stopLossPct,
       frequencyMinutes,
       cooldownMinutes,
-      token, 
-      topic, 
-      weights, 
+      token,
+      topic,
+      weights,
       interval,
+      meanReversionEnabled,
       resetStats,
       resetConsecutiveLosses,
       forceClose,
@@ -6566,6 +6567,9 @@ app.post("/api/jupiter-config", async (req, res) => {
     if (topic) current.topic = topic;
     if (weights) current.weights = weights;
     if (interval) current.interval = interval;
+    // Regime-switching toggle: momentum when ADX says TRENDING, range-fade mean reversion when
+    // RANGING (see resolveEntry). Engine default is ON; this lets the UI set it explicitly.
+    if (meanReversionEnabled !== undefined) current.meanReversionEnabled = meanReversionEnabled !== false;
 
     if (resetStats) {
       current.lastTradePnL = 0;
