@@ -778,7 +778,7 @@ export default function App() {
   const downloadJournalCSV = () => {
     const trades = journalData?.trades || [];
     if (!trades.length) return;
-    const header = ["Source", "Side", "Leverage", "Mode", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Realized PnL %", "Size (SOL)", "TP %", "SL %", "Duration (min)", "Market (Entry)", "Entry Reason", "Market (Exit)", "Exit Reason", "Sentiment", "Technical", "News Catalysts", "Execution Version", "Close Version"];
+    const header = ["Source", "Side", "Leverage", "Mode", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Realized PnL %", "Realized PnL $", "Fees Included?", "Size (SOL)", "TP %", "SL %", "Duration (min)", "Market (Entry)", "Entry Reason", "Market (Exit)", "Exit Reason", "Sentiment", "Technical", "News Catalysts", "Execution Version", "Close Version"];
     const rows = trades.map((t: any) => [
       t.source ?? "",
       t.side ?? "",
@@ -789,6 +789,8 @@ export default function App() {
       t.entryPrice ?? "",
       t.exitPrice ?? "",
       typeof t.pnl === "number" ? t.pnl.toFixed(2) : "",
+      typeof t.pnlUsd === "number" ? t.pnlUsd.toFixed(2) : "",
+      t.reconciled ? "Yes (on-chain)" : "No (pre-fee estimate)",
       t.sizeInSol ?? "",
       t.takeProfitPct ?? "",
       t.stopLossPct ?? "",
@@ -1080,9 +1082,19 @@ export default function App() {
     document.body.removeChild(link);
   };
 
+  // Leveraged % is a return on collateral, so $ = collateral × pct/100 and collateral =
+  // sizeInSol × entryPrice / leverage — the same relationship the daemon used to size the
+  // trade. Used for the Jupiter panel's own settlement log, which reads the daemon's raw
+  // tradesHistory (no server-computed pnlUsd like the /api/journal-backed Trade Journal tab).
+  const estimatePnlUsd = (trade: any): number | undefined => {
+    if (typeof trade.sizeInSol !== "number" || typeof trade.leverage !== "number" || !trade.leverage || typeof trade.entryPrice !== "number" || typeof trade.pnl !== "number") return undefined;
+    const collateralUsd = (trade.sizeInSol * trade.entryPrice) / trade.leverage;
+    return collateralUsd * (trade.pnl / 100);
+  };
+
   const downloadJupiterTradeLogCSV = () => {
     if (!jupiterConfig || !jupiterConfig.tradesHistory || jupiterConfig.tradesHistory.length === 0) return;
-    const headers = ["Index", "Direction/Side", "Leverage Multiplier", "Entry Price (USD)", "Exit Price (USD)", "Realized Return PnL %", "Solana Size (SOL)", "Take Profit %", "Stop Loss %", "Hold Duration", "Settled Time (Eastern Time)", "Market (Entry)", "Entry Reason", "Market (Exit)", "Exit Reason", "Execution Version", "Close Version"];
+    const headers = ["Index", "Direction/Side", "Leverage Multiplier", "Entry Price (USD)", "Exit Price (USD)", "Realized Return PnL %", "Realized PnL ($, est. pre-fee)", "Solana Size (SOL)", "Take Profit %", "Stop Loss %", "Hold Duration", "Settled Time (Eastern Time)", "Market (Entry)", "Entry Reason", "Market (Exit)", "Exit Reason", "Execution Version", "Close Version"];
     const rows = jupiterConfig.tradesHistory.map((trade: any, idx: number) => {
       let settledDateStr = "";
       try {
@@ -1113,6 +1125,7 @@ export default function App() {
         (trade.entryPrice || 0).toFixed(2),
         (trade.exitPrice || 0).toFixed(2),
         (trade.pnl || 0).toFixed(2),
+        (() => { const est = estimatePnlUsd(trade); return est !== undefined ? est.toFixed(2) : ""; })(),
         (trade.sizeInSol || 0).toFixed(4),
         trade.takeProfitPct !== undefined ? `${trade.takeProfitPct}%` : "4%",
         trade.stopLossPct !== undefined ? `-${trade.stopLossPct}%` : "-2%",
@@ -4223,10 +4236,15 @@ export default function App() {
                                        {trade.side} ({trade.leverage}x)
                                      </span>
                                      <span className={cn(
-                                       "font-black tracking-tight",
+                                       "font-black tracking-tight flex flex-col items-end",
                                        trade.pnl >= 0 ? "text-sol-green" : "text-red-500"
                                      )}>
-                                       {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}% réalisé
+                                       <span>{trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}% réalisé</span>
+                                       {estimatePnlUsd(trade) !== undefined && (
+                                         <span className="text-[9px] opacity-80">
+                                           {estimatePnlUsd(trade)! >= 0 ? "+" : "-"}${Math.abs(estimatePnlUsd(trade)!).toFixed(2)}
+                                         </span>
+                                       )}
                                      </span>
                                    </div>
                                    <div className="flex justify-between items-center text-[9px] text-text-dim border-b border-border-dim/10 pb-1 mb-1">
@@ -5461,6 +5479,14 @@ export default function App() {
                               )}>
                                 {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}%
                               </span>
+                              {trade.pnlUsd !== undefined && trade.pnlUsd !== null && (
+                                <span
+                                  className={cn("text-[10px] font-bold font-mono", trade.pnlUsd >= 0 ? "text-sol-green/80" : "text-red-400/80")}
+                                  title={trade.reconciled ? "Realized PnL, net of open + close fees (on-chain)" : "Estimated PnL — pre-fee, based on the bot's own entry/exit snapshot"}
+                                >
+                                  {trade.pnlUsd >= 0 ? "+" : "-"}${Math.abs(trade.pnlUsd).toFixed(2)}
+                                </span>
+                              )}
                               {trade.reconciled && Math.abs(trade.pnlEstimated - trade.pnl) > 0.005 && (
                                 <span className="text-[8px] text-text-dim font-mono">est. {trade.pnlEstimated >= 0 ? "+" : ""}{trade.pnlEstimated.toFixed(2)}%</span>
                               )}

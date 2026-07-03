@@ -1293,14 +1293,31 @@ function mapJournalTrades(reconciled: any[]) {
     const isReconciled = t.feesReconciled === true;
     const pnlEstimated = typeof t.pnl === "number" ? t.pnl : 0;
     const pnlHeadline = isReconciled && typeof t.realizedPnlPct === "number" ? t.realizedPnlPct : pnlEstimated;
+
+    // Dollar PnL alongside the % — a leveraged % is a return on COLLATERAL, so
+    // $ = collateral × pct/100, and collateral = sizeInSol × entryPrice / leverage (the same
+    // relationship the daemon used to size the trade in the first place). Only computable for
+    // trades that actually had a real/paper position (sizeInSol + leverage); Alert Daemon
+    // "signal only" trades never sized a position, so pnlUsd stays undefined for those — the UI
+    // already flags them "Estimated — signal only" with no $ fill to reconcile against.
+    const collateralUsd = (typeof t.sizeInSol === "number" && typeof t.leverage === "number" && t.leverage > 0 && typeof t.entryPrice === "number")
+      ? (t.sizeInSol * t.entryPrice) / t.leverage
+      : undefined;
+    const pnlUsdEstimated = collateralUsd !== undefined ? collateralUsd * (pnlEstimated / 100) : undefined;
+    // realizedPnlUsd (from on-chain reconciliation) is already net of BOTH legs' fees — see
+    // netCloseLegPnl. The estimate has no fee data yet, so it stays pre-fee until reconciled.
+    const pnlUsdHeadline = isReconciled && typeof t.realizedPnlUsd === "number" ? t.realizedPnlUsd : pnlUsdEstimated;
+
     return {
       id: t.id,
       source: t.source,
       side: t.side,
       entryPrice: t.entryPrice,
       exitPrice: t.exitPrice,
-      pnl: pnlHeadline,          // headline number: on-chain reconciled (net of fees) when available
-      pnlEstimated,               // the bot's own pre-fee, signal-time-price estimate
+      pnl: pnlHeadline,          // headline %: on-chain reconciled (net of fees) when available
+      pnlEstimated,               // the bot's own pre-fee, signal-time-price % estimate
+      pnlUsd: pnlUsdHeadline,     // headline $: on-chain reconciled (net of fees) when available
+      pnlUsdEstimated,            // pre-fee $ estimate, always present when a position was sized
       reconciled: isReconciled,
       entryPriceActual: t.entryPriceActual,
       exitPriceActual: t.exitPriceActual,
