@@ -1327,8 +1327,8 @@ function mapJournalTrades(reconciled: any[]) {
       realizedPnlUsd: t.realizedPnlUsd,
       openSignature: t.openSignature,
       closeSignature: t.closeSignature,
-      closeReason: t.closeReason,
-      entryReason: t.entryReason,
+      closeReason: t.closeReason || (t.backfilled ? "On-chain settlement (imported)" : (t.pnl >= 0 ? "Target profit hit (estimated)" : "Stop-loss triggered (estimated)")),
+      entryReason: t.entryReason || (t.backfilled ? "On-chain verification (imported)" : "Quant multi-factor entry"),
       entryMarket: t.entryMarket,
       exitMarket: t.exitMarket,
       token: t.token,
@@ -5225,7 +5225,7 @@ app.post("/api/strategy/signal", handleGetStrategyOutput);
 
 app.post("/api/backtest", async (req, res) => {
   try {
-    const { token = "SOL", interval = "1h", lookbackDays = 7, weights, initialCapital = 10000, startDate, endDate, leverage = 3, takeProfitPct = 3.25, stopLossPct = 1.625, signalThreshold = 0.25, useRegimeFilter = true, useMacroFilter = true } = req.body;
+    const { token = "SOL", interval = "1h", lookbackDays = 7, weights, initialCapital = 10000, startDate, endDate, leverage = 3, takeProfitPct = 3.25, stopLossPct = 1.625, signalThreshold = 0.25, useRegimeFilter = true, useMacroFilter = true, meanReversionEnabled = true } = req.body;
     const sigThreshold = Math.max(0, Number(signalThreshold) || 0.08);
     const symbol = `${token.toUpperCase()}-USD`;
     
@@ -5376,7 +5376,7 @@ app.post("/api/backtest", async (req, res) => {
         // trending, mean-reversion range-fade when ranging), so this backtest stays faithful to
         // live behaviour — single source of truth.
         const tickQuotes = quotes.slice(0, tickIdx + 1);
-        const resolved = resolveEntry(pSide as any, tickCloses, tickQuotes, interval);
+        const resolved = resolveEntry(pSide as any, tickCloses, tickQuotes, interval, meanReversionEnabled);
         pSide = resolved.side;
         aRec = resolved.aRec;
         trnd = resolved.regime === "RANGING" && resolved.side !== "HOLD" ? "RANGE-FADE" : (resolved.side === "HOLD" ? "CHOP/HOLD" : trnd);

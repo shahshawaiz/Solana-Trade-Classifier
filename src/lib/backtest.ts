@@ -27,6 +27,8 @@ export interface MarketData {
   emaFast?: number;
   emaSlow?: number;
   newsHeadline?: string;
+  high?: number;
+  low?: number;
 }
 
 export interface Trade {
@@ -45,6 +47,7 @@ export interface Trade {
   rsiScore?: number;
   compositeScore?: number;
   elliotWavePhase?: string;
+  entryReason?: string;
 }
 
 export interface BacktestResult {
@@ -82,7 +85,9 @@ export function runBacktest(
   // Optional macro-regime overlay, one entry per bar ("RISK-ON" | "RISK-OFF" | "NEUTRAL").
   // When supplied, counter-macro entries are suppressed: no new LONGs while RISK-OFF,
   // no new SHORTs while RISK-ON. Omit (undefined) for the original macro-agnostic behaviour.
-  macroRegime?: Array<"RISK-ON" | "RISK-OFF" | "NEUTRAL">
+  macroRegime?: Array<"RISK-ON" | "RISK-OFF" | "NEUTRAL">,
+  interval: string = "1h",
+  meanReversionEnabled: boolean = true
 ): BacktestResult {
   let marketCum = 1;
   let strategyCum = 1;
@@ -130,13 +135,13 @@ export function runBacktest(
     const score = weightedSent + weightedTech + weightedRsi;
 
     // 5-Point Elliot Wave FIRST GATE
-    const evaluateEwSig = (index: number) => {
+    const evaluateEwSig = (index: number): { side: "LONG" | "SHORT" | "HOLD"; aRec: string; regime: "TRENDING" | "RANGING"; trnd?: string } => {
       const isEwEnabled = weights.elliottWave !== 0 && weights.elliottWave !== undefined;
       const isTechEnabled = weights.technical !== 0 && weights.technical !== undefined;
       const isLiqEnabled = weights.liquidity !== 0 && weights.liquidity !== undefined;
 
       // Return HOLD if not enough data AND Elliott Wave is enabled
-      if (isEwEnabled && index < 33) return "HOLD";
+      if (isEwEnabled && index < 33) return { side: "HOLD", aRec: "Hold (Elliott Wave priming)", regime: "TRENDING" };
       const currentCloses = data.slice(0, index + 1).map(x => x.close);
       let ewDir = "HOLD";
       if (isEwEnabled) {
@@ -151,7 +156,7 @@ export function runBacktest(
         ewDir = "BOTH";
       }
       
-      let pSide = "HOLD";
+      let candidateSide: "LONG" | "SHORT" | "HOLD" = "HOLD";
       // ONLY evaluate rest of strategy if Elliot Wave gate passes
       if (ewDir !== "HOLD") {
         const sc = evaluateStrategyAtIndex(index);
@@ -163,19 +168,44 @@ export function runBacktest(
         const passesLongEw = ewDir === "BOTH" || ewDir === "LONG";
         const passesShortEw = ewDir === "BOTH" || ewDir === "SHORT";
 
-        if (sc > threshold && passesLongEw && passesLongTrend) pSide = "LONG";
-        else if (sc < -threshold && passesShortEw && passesShortTrend) pSide = "SHORT";
+        if (sc > threshold && passesLongEw && passesLongTrend) candidateSide = "LONG";
+        else if (sc < -threshold && passesShortEw && passesShortTrend) candidateSide = "SHORT";
         
         if (isLiqEnabled) {
           const rVal = data[index].rsi || 50;
-          if (rVal > 70 && passesShortEw && passesShortTrend) pSide = "SHORT";
-          if (rVal < 30 && passesLongEw && passesLongTrend) pSide = "LONG";
+          if (rVal > 70 && passesShortEw && passesShortTrend) candidateSide = "SHORT";
+          if (rVal < 30 && passesLongEw && passesLongTrend) candidateSide = "LONG";
         }
       }
-      return pSide;
+
+      // Regime switch!
+      const sliceQuotes = data.slice(0, index + 1);
+      const adxVal = calculateADX(sliceQuotes, 14);
+
+      if (adxVal > ADX_GATE_MIN) {
+        return { 
+          side: candidateSide, 
+          aRec: candidateSide === "LONG" ? "Long Buy" : (candidateSide === "SHORT" ? "Short Sell" : "Hold"), 
+          regime: "TRENDING",
+          trnd: candidateSide === "LONG" ? "UP" : (candidateSide === "SHORT" ? "DOWN" : "SIDEWAYS")
+        };
+      }
+
+      if (!meanReversionEnabled) {
+        return { side: "HOLD", aRec: `Hold (ADX is ranging: ${adxVal.toFixed(1)} <= ${ADX_GATE_MIN})`, regime: "RANGING", trnd: "CHOP/HOLD" };
+      }
+
+      const mr = evaluateMeanReversionSignal(sliceQuotes, interval);
+      if (!mr) {
+        return { side: "HOLD", aRec: `Hold (ADX ranging: ${adxVal.toFixed(1)} <= ${ADX_GATE_MIN}; no range-edge rejection yet)`, regime: "RANGING", trnd: "CHOP/HOLD" };
+      }
+      return { side: mr.side, aRec: mr.aRec, regime: "RANGING", trnd: "RANGE-FADE" };
     };
 
-    let pSide = evaluateEwSig(i);
+    const sigRes = evaluateEwSig(i);
+    let pSide = sigRes.side;
+    let actionRecommendation = sigRes.aRec;
+    let currentRegime = sigRes.regime;
 
     // 3. Signal Generation
     let signal = 0;
@@ -187,11 +217,13 @@ export function runBacktest(
     let prevSig1 = "HOLD";
     let prevSig2 = "HOLD";
     if (i >= 1) {
-      prevSig1 = evaluateEwSig(i - 1);
+      prevSig1 = evaluateEwSig(i - 1).side;
       if (i >= 2) {
-        prevSig2 = evaluateEwSig(i - 2);
+        prevSig2 = evaluateEwSig(i - 2).side;
       }
-      isTrendConfirmed3x = (pSide !== "HOLD" && pSide === prevSig1);
+      isTrendConfirmed3x = (pSide !== "HOLD" && pSide === prevSig1) || sigRes.trnd === "RANGE-FADE";
+    } else if (sigRes.trnd === "RANGE-FADE") {
+      isTrendConfirmed3x = true;
     }
     
     if (currentTrade === null && !isCooldown) {
@@ -330,7 +362,8 @@ export function runBacktest(
           exitPrice: exitPrice,
           pnl: pnl,
           cumPnL: runningPnL,
-          closeReason: reason
+          closeReason: reason,
+          entryReason: currentTrade.entryReason
         };
         trades.push(finishedTrade);
         currentTrade = null;
@@ -349,6 +382,10 @@ export function runBacktest(
         if (currentPosition < 0) closeTrade("Trend Reversal");
         currentPosition = tradeSize;
         const currentEw = calculateElliotWave(data.slice(0, i + 1).map(x => x.close));
+        const entryReason = currentRegime === "RANGING" 
+          ? actionRecommendation 
+          : `Technical composite score: ${score.toFixed(2)} (${pSide === "LONG" ? "Bullish" : "Bearish"})` + (d.rsi ? ` · RSI(21): ${d.rsi.toFixed(0)}` : "") + ` · EW: ${currentEw.phase}`;
+
         currentTrade = {
           type: 'Long',
           entryTime: d.time,
@@ -361,7 +398,8 @@ export function runBacktest(
           technicalScore: techSig,
           rsiScore: rsiSig,
           compositeScore: score,
-          elliotWavePhase: currentEw.phase
+          elliotWavePhase: currentEw.phase,
+          entryReason
         };
         lastExecutedTrend = "LONG";
         lastTradeTime = currentTimestamp;
@@ -377,6 +415,10 @@ export function runBacktest(
         if (currentPosition > 0) closeTrade("Trend Reversal");
         currentPosition = -tradeSize;
         const currentEw = calculateElliotWave(data.slice(0, i + 1).map(x => x.close));
+        const entryReason = currentRegime === "RANGING" 
+          ? actionRecommendation 
+          : `Technical composite score: ${score.toFixed(2)} (${pSide === "SHORT" ? "Bearish" : "Bullish"})` + (d.rsi ? ` · RSI(21): ${d.rsi.toFixed(0)}` : "") + ` · EW: ${currentEw.phase}`;
+
         currentTrade = {
           type: 'Short',
           entryTime: d.time,
@@ -389,7 +431,8 @@ export function runBacktest(
           technicalScore: techSig,
           rsiScore: rsiSig,
           compositeScore: score,
-          elliotWavePhase: currentEw.phase
+          elliotWavePhase: currentEw.phase,
+          entryReason
         };
         lastExecutedTrend = "SHORT";
         lastTradeTime = currentTimestamp;
@@ -580,4 +623,83 @@ export function calculateElliotWave(closes: number[]): { score: number; phase: s
     details,
     value: currentEwo
   };
+}
+
+const MEAN_REVERSION_LOOKBACK_MINUTES = 60;
+const MEAN_REVERSION_MIN_LOOKBACK_BARS = 6;
+const MEAN_REVERSION_REJECTION_FRAC = 0.35;
+const ADX_GATE_MIN = 15;
+
+function intervalToMinutes(interval: string): number {
+  const map: Record<string, number> = { "1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "90m": 90, "1h": 60, "1d": 1440 };
+  return map[interval] || 15;
+}
+
+export function calculateADX(quotes: any[], period: number = 14): number {
+  if (!Array.isArray(quotes) || quotes.length < period * 2 + 1) return 0;
+  const plusDM: number[] = [], minusDM: number[] = [], tr: number[] = [];
+  for (let i = 1; i < quotes.length; i++) {
+    const h = quotes[i].high ?? quotes[i].close;
+    const l = quotes[i].low ?? quotes[i].close;
+    const ph = quotes[i - 1].high ?? quotes[i - 1].close;
+    const pl = quotes[i - 1].low ?? quotes[i - 1].close;
+    const pc = quotes[i - 1].close;
+    const up = h - ph, dn = pl - l;
+    plusDM.push(up > dn && up > 0 ? up : 0);
+    minusDM.push(dn > up && dn > 0 ? dn : 0);
+    tr.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  if (tr.length < period) return 0;
+  const smooth = (arr: number[]) => {
+    let s = arr.slice(0, period).reduce((a, b) => a + b, 0);
+    const out: number[] = [s];
+    for (let i = period; i < arr.length; i++) { s = s - s / period + arr[i]; out.push(s); }
+    return out;
+  };
+  const trS = smooth(tr), pdmS = smooth(plusDM), mdmS = smooth(minusDM);
+  const dx: number[] = [];
+  for (let i = 0; i < trS.length; i++) {
+    const pdi = trS[i] ? 100 * pdmS[i] / trS[i] : 0;
+    const mdi = trS[i] ? 100 * mdmS[i] / trS[i] : 0;
+    const sum = pdi + mdi;
+    dx.push(sum ? 100 * Math.abs(pdi - mdi) / sum : 0);
+  }
+  if (dx.length < period) return dx.length ? dx[dx.length - 1] : 0;
+  let adx = dx.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < dx.length; i++) adx = (adx * (period - 1) + dx[i]) / period;
+  return adx;
+}
+
+export function evaluateMeanReversionSignal(quotes: any[], interval: string): { side: "LONG" | "SHORT"; aRec: string } | null {
+  const minutesPerBar = intervalToMinutes(interval);
+  const lookback = Math.max(MEAN_REVERSION_MIN_LOOKBACK_BARS, Math.round(MEAN_REVERSION_LOOKBACK_MINUTES / minutesPerBar));
+  if (quotes.length < lookback + 2) return null;
+
+  const rangeBars = quotes.slice(-(lookback + 1), -1);
+  const highs = rangeBars.map((q: any) => Number(q.high ?? q.close));
+  const lows = rangeBars.map((q: any) => Number(q.low ?? q.close));
+  const rangeHigh = Math.max(...highs);
+  const rangeLow = Math.min(...lows);
+  if (!(rangeHigh > rangeLow)) return null;
+
+  const last = quotes[quotes.length - 1];
+  const barHigh = Number(last.high ?? last.close);
+  const barLow = Number(last.low ?? last.close);
+  const barClose = Number(last.close);
+  const barRange = barHigh - barLow;
+  if (barRange <= 0) return null;
+
+  const touchedHigh = barHigh >= rangeHigh;
+  const closeBackFromHighFrac = (barHigh - barClose) / barRange;
+  if (touchedHigh && closeBackFromHighFrac >= MEAN_REVERSION_REJECTION_FRAC && barClose < rangeHigh) {
+    return { side: "SHORT", aRec: `Range Fade — rejected off ${lookback}-bar high $${rangeHigh.toFixed(2)} (closed back ${(closeBackFromHighFrac * 100).toFixed(0)}% into the bar)` };
+  }
+
+  const touchedLow = barLow <= rangeLow;
+  const closeBackFromLowFrac = (barClose - barLow) / barRange;
+  if (touchedLow && closeBackFromLowFrac >= MEAN_REVERSION_REJECTION_FRAC && barClose > rangeLow) {
+    return { side: "LONG", aRec: `Range Fade — rejected off ${lookback}-bar low $${rangeLow.toFixed(2)} (closed back ${(closeBackFromLowFrac * 100).toFixed(0)}% into the bar)` };
+  }
+
+  return null;
 }

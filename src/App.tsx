@@ -162,8 +162,15 @@ const TradeHistory = ({ trades }: { trades: any[] }) => {
                 <td className="p-3 text-text-heading">
                   {isConfirm ? <span className="text-text-dim text-[10px]">-- (Watching)</span> : trade.exitPrice ? `$${trade.exitPrice.toFixed(2)}` : "OPEN"}
                 </td>
-                <td className="p-3 text-text-dim text-[10px] italic max-w-[200px] truncate" title={trade.closeReason || trade.note}>
-                  {trade.closeReason || trade.note || "Active"}
+                <td className="p-3 text-text-dim text-[10px] italic max-w-[200px] truncate" title={(trade.entryReason ? `Entry: ${trade.entryReason}\n` : "") + `Exit: ${trade.closeReason || trade.note || "Active"}`}>
+                  {trade.entryReason && (
+                    <div className="text-text-heading font-medium not-italic mb-0.5 text-ellipsis overflow-hidden" title={trade.entryReason}>
+                      Entry: {trade.entryReason}
+                    </div>
+                  )}
+                  <div className="text-ellipsis overflow-hidden">
+                    Exit: {trade.closeReason || trade.note || "Active"}
+                  </div>
                   {trade.tpPct !== undefined && trade.slPct !== undefined && !isConfirm && (
                     <div className="text-[9px] mt-1 font-mono flex items-center gap-2 font-medium">
                        <span className="text-sol-green/80">TP: +{trade.tpPct?.toFixed(1)}%</span>
@@ -2166,6 +2173,8 @@ export default function App() {
           time: etFormat(new Date(q.date), "MMM dd, HH:mm"),
           date: q.date,
           close: q.close,
+          high: q.high ?? q.close,
+          low: q.low ?? q.close,
           rsi: rsis[i],
           emaFast: emaFast[i],
           emaSlow: emaSlow[i],
@@ -2242,8 +2251,8 @@ export default function App() {
       }
       return d;
     });
-    return runBacktest(updatedData, effectiveWeights, threshold, cooldown, tradeSize, maxPosition);
-  }, [data, effectiveWeights, threshold, sentiment, cooldown, tradeSize, maxPosition]);
+    return runBacktest(updatedData, effectiveWeights, threshold, cooldown, tradeSize, maxPosition, 4.0, 2.0, undefined, interval, true);
+  }, [data, effectiveWeights, threshold, sentiment, cooldown, tradeSize, maxPosition, interval]);
 
   if (loading && data.length === 0) {
     return (

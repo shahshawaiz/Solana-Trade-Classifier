@@ -13,7 +13,9 @@
     "stopLossPct": 3.4,
     "entryTime": "2026-06-21T21:22:00.000Z",
     "exitTime": "2026-06-22T00:41:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryReason": "Momentum breakdown confirmed: MACD sign cross under zero + RSI(21) bearish expansion",
+    "closeReason": "Stop-loss triggered (-3.4% limit reached)"
   },
   {
     "id": "seed-2",
@@ -29,7 +31,9 @@
     "stopLossPct": 4.39,
     "entryTime": "2026-06-22T01:32:00.000Z",
     "exitTime": "2026-06-22T02:06:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryReason": "EMA 12/26 bullish crossover with strong RSI buying support",
+    "closeReason": "Stop-loss triggered (-4.39% boundary hit)"
   },
   {
     "id": "seed-3",
@@ -45,7 +49,9 @@
     "stopLossPct": 3.17,
     "entryTime": "2026-06-22T07:27:00.000Z",
     "exitTime": "2026-06-22T07:31:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryReason": "Overbought RSI rejection at 72.50 with descending MACD histogram",
+    "closeReason": "Trailing stop hit (PnL target achieved)"
   },
   {
     "id": "seed-4",
@@ -61,7 +67,9 @@
     "stopLossPct": 3.11,
     "entryTime": "2026-06-22T07:41:00.000Z",
     "exitTime": "2026-06-22T09:15:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryReason": "RSI overbought reversal fade under 74.14 resistance",
+    "closeReason": "Target profit hit (+3.23% limit)"
   },
   {
     "id": "seed-5",
@@ -77,7 +85,9 @@
     "stopLossPct": 2.96,
     "entryTime": "2026-06-22T12:40:00.000Z",
     "exitTime": "2026-06-22T12:45:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryReason": "Elliott Wave 5 completion pulse with bearish divergence",
+    "closeReason": "Breakeven / Time Limit exit"
   },
   {
     "id": "seed-6",
@@ -93,7 +103,9 @@
     "stopLossPct": 3.0,
     "entryTime": "2026-06-22T13:16:00.000Z",
     "exitTime": "2026-06-22T13:20:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryReason": "Oversold RSI correction off support + EMA fast trigger",
+    "closeReason": "Stop-loss hit (-3.0% boundary)"
   },
   {
     "id": "seed-7",
@@ -109,7 +121,9 @@
     "stopLossPct": 2.87,
     "entryTime": "2026-06-22T13:34:00.000Z",
     "exitTime": "2026-06-22T13:48:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryReason": "Supertrend bullish confirmation + macro risk-on shift",
+    "closeReason": "Time Limit Exit (unrealized PnL below threshold)"
   },
   {
     "id": "seed-8",
@@ -125,6 +139,8 @@
     "stopLossPct": 3.14,
     "entryTime": "2026-06-22T13:41:00.000Z",
     "exitTime": "2026-06-22T14:08:00.000Z",
-    "seeded": true
+    "seeded": true,
+    "entryReason": "Bullish MACD histogram expansion above EMA 200 regime",
+    "closeReason": "Stop-loss triggered (-3.14% limit)"
   }
 ]
