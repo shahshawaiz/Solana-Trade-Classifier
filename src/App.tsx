@@ -598,6 +598,8 @@ export default function App() {
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [journalData, setJournalData] = useState<any | null>(null);
   const [journalLoading, setJournalLoading] = useState(false);
+  const [journalResyncing, setJournalResyncing] = useState(false);
+  const [journalResyncMsg, setJournalResyncMsg] = useState<string | null>(null);
   const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
   const [macroData, setMacroData] = useState<any | null>(null);
   const [macroLoading, setMacroLoading] = useState(false);
@@ -730,6 +732,27 @@ export default function App() {
       setJournalData({ trades: [], stats: null });
     } finally {
       setJournalLoading(false);
+    }
+  };
+
+  const resyncJournalWallet = async () => {
+    setJournalResyncing(true);
+    setJournalResyncMsg(null);
+    try {
+      const res = await fetch("/api/journal/resync", { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "Resync failed");
+      setJournalData(json);
+      setJournalResyncMsg(
+        `Synced ${json.addedTrades > 0 ? `${json.addedTrades} new trade(s) from ` : ""}wallet — balance $${(json.walletBalance ?? 0).toFixed(4)} SOL / $${(json.usdcBalance ?? 0).toFixed(2)} USDC.`
+      );
+      // Wallet balances/address shown in the Jupiter panel come from a separate cached
+      // endpoint — refresh it too so the two views can't disagree right after a resync.
+      fetchJupiterConfig();
+    } catch (e: any) {
+      setJournalResyncMsg(`Resync failed: ${e.message || e}`);
+    } finally {
+      setJournalResyncing(false);
     }
   };
 
@@ -5330,6 +5353,15 @@ export default function App() {
                   </button>
                   <button
                     type="button"
+                    onClick={resyncJournalWallet}
+                    disabled={journalResyncing}
+                    title="Force a fresh pull of the wallet's on-chain trade history and wallet balances — use if the ledger or balances look stale."
+                    className="text-[10px] font-bold uppercase tracking-wider py-2 px-3 rounded bg-sol-green/10 hover:bg-sol-green/20 text-sol-green border border-sol-green/30 flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Wallet className={cn("w-3 h-3", journalResyncing && "animate-pulse")} /> {journalResyncing ? "Resyncing…" : "Resync Wallet"}
+                  </button>
+                  <button
+                    type="button"
                     onClick={downloadJournalCSV}
                     disabled={!journalData?.trades?.length}
                     className="text-[10px] font-bold uppercase tracking-wider py-2 px-3 rounded bg-sol-purple/10 hover:bg-sol-purple/20 text-sol-purple border border-sol-purple/30 flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -5339,7 +5371,16 @@ export default function App() {
                 </div>
               </div>
 
-
+              {journalResyncMsg && (
+                <div className={cn(
+                  "text-[10.5px] font-mono px-3 py-2 rounded-lg border",
+                  journalResyncMsg.startsWith("Resync failed")
+                    ? "bg-red-500/10 border-red-500/30 text-red-400"
+                    : "bg-sol-green/10 border-sol-green/30 text-sol-green"
+                )}>
+                  {journalResyncMsg}
+                </div>
+              )}
 
               {/* Performance stats */}
               {journalData?.stats && journalData.stats.total > 0 && (

@@ -1220,33 +1220,20 @@ function buildTradesFromJupHistory(rows: any[], asset: string): any[] {
   return trades;
 }
 
-// One-time import of the WALLET'S FULL on-chain trade history into the journal, so the ledger
-// reflects reality even for trades that predate this reconciliation feature (or were never
-// captured live due to a daemon restart/reset). Runs once per key+asset (gated by
-// `jupHistoryBackfilledAt`); replaces any old placeholder/demo rows and dedupes against
-// already-recorded live rows by closeSignature so nothing double-counts.
-async function backfillJupiterHistoryIfNeeded(stored: any[]): Promise<{ store: any[]; changed: boolean }> {
-  const config = loadJupiterConfig();
-  if (config.jupHistoryBackfilledAt) return { store: stored, changed: false };
-
+// Pull the WALLET'S FULL on-chain trade history for `asset` and merge any trades missing from
+// `stored` into it (deduped by closeSignature, with a 2-min same-side/time fallback for rows
+// reconciliation couldn't signature-match). Shared by the one-time startup backfill AND the
+// manual "Resync Wallet Data" button — both need the identical merge/dedupe rule so neither
+// path can double-count a trade the other already recorded.
+async function syncFullJupiterHistory(stored: any[], config: JupiterConfig): Promise<{ store: any[]; changed: boolean; added: number }> {
   const keyName = jupCliKeyName(config);
   const asset = String(config.token || "SOL").toUpperCase();
 
-  let rows: any[];
-  try {
-    rows = await runJupPerpsHistory(keyName, asset, 5000);
-  } catch (e: any) {
-    console.error(`[Journal] Full history backfill fetch failed for ${asset}:`, e?.message || e);
-    return { store: stored, changed: false }; // retry on a later /api/journal read
-  }
-
+  const rows = await runJupPerpsHistory(keyName, asset, 5000);
   const backfilledTrades = buildTradesFromJupHistory(rows, asset);
 
   const existingRealTrades = stored.filter((t: any) => t.source === "Auto-Trade (Jupiter)" && t.mode === "REAL" && !String(t.id).startsWith("seed-"));
   const existingCloseSignatures = new Set(existingRealTrades.filter((t: any) => t.closeSignature).map((t: any) => t.closeSignature));
-  // Fallback for trades reconciliation couldn't signature-match (e.g. outside its 10-min
-  // tolerance): also treat a backfilled row as already covered if an existing daemon-recorded
-  // row of the same side closed within 2 minutes of it — avoids double-counting the same trade.
   const CLOSE_DEDUPE_TOLERANCE_MS = 2 * 60 * 1000;
   const isAlreadyRecorded = (t: any) =>
     existingCloseSignatures.has(t.closeSignature) ||
@@ -1263,20 +1250,89 @@ async function backfillJupiterHistoryIfNeeded(stored: any[]): Promise<{ store: a
   const withoutSeeds = stored.filter((t: any) => !(t.source === "Auto-Trade (Jupiter)" && String(t.id).startsWith("seed-")));
 
   const merged = [...withoutSeeds, ...newRows];
+  return { store: merged, changed: newRows.length > 0 || withoutSeeds.length !== stored.length, added: newRows.length };
+}
+
+// One-time import of the WALLET'S FULL on-chain trade history into the journal, so the ledger
+// reflects reality even for trades that predate this reconciliation feature (or were never
+// captured live due to a daemon restart/reset). Runs once per key+asset (gated by
+// `jupHistoryBackfilledAt`); replaces any old placeholder/demo rows and dedupes against
+// already-recorded live rows by closeSignature so nothing double-counts.
+async function backfillJupiterHistoryIfNeeded(stored: any[]): Promise<{ store: any[]; changed: boolean }> {
+  const config = loadJupiterConfig();
+  if (config.jupHistoryBackfilledAt) return { store: stored, changed: false };
+
+  let result: { store: any[]; changed: boolean; added: number };
+  try {
+    result = await syncFullJupiterHistory(stored, config);
+  } catch (e: any) {
+    console.error(`[Journal] Full history backfill fetch failed:`, e?.message || e);
+    return { store: stored, changed: false }; // retry on a later /api/journal read
+  }
 
   const now = new Date().toISOString();
   config.jupHistoryBackfilledAt = now;
   config.statsResetAt = now; // full history now visible in the ledger — stats start counting fresh from here
   try { saveJupiterConfig(config); } catch (e: any) { console.error("[Journal] Failed to persist backfill marker:", e?.message || e); }
 
-  console.log(`[Journal] Backfilled ${newRows.length} real trade(s) from jup perps history for ${asset}; stats reset at ${now}.`);
-  return { store: merged, changed: true };
+  console.log(`[Journal] Backfilled ${result.added} real trade(s) from jup perps history; stats reset at ${now}.`);
+  return { store: result.store, changed: result.changed };
 }
 
 // --- Trade journal ----------------------------------------------------------
 // Returns the full retained closed-trade history from both autonomous daemons
 // (the shared Telegram alert engine and the on-chain Jupiter auto-trader),
 // consolidated with aggregate performance analytics.
+// Shapes raw journal-store rows into the API-facing trade records (fee-reconciled headline PnL,
+// duration, etc). Shared by /api/journal and /api/journal/resync so both return identical shapes.
+function mapJournalTrades(reconciled: any[]) {
+  return reconciled.map((t: any) => {
+    const durationMins = (t.entryTime && t.exitTime)
+      ? Math.max(0, Math.round((new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime()) / 60000))
+      : null;
+    const isReconciled = t.feesReconciled === true;
+    const pnlEstimated = typeof t.pnl === "number" ? t.pnl : 0;
+    const pnlHeadline = isReconciled && typeof t.realizedPnlPct === "number" ? t.realizedPnlPct : pnlEstimated;
+    return {
+      id: t.id,
+      source: t.source,
+      side: t.side,
+      entryPrice: t.entryPrice,
+      exitPrice: t.exitPrice,
+      pnl: pnlHeadline,          // headline number: on-chain reconciled (net of fees) when available
+      pnlEstimated,               // the bot's own pre-fee, signal-time-price estimate
+      reconciled: isReconciled,
+      entryPriceActual: t.entryPriceActual,
+      exitPriceActual: t.exitPriceActual,
+      openFeeUsd: t.openFeeUsd,
+      closeFeeUsd: t.closeFeeUsd,
+      feesUsd: isReconciled ? t.totalFeesUsd : undefined,
+      realizedPnlUsd: t.realizedPnlUsd,
+      openSignature: t.openSignature,
+      closeSignature: t.closeSignature,
+      closeReason: t.closeReason,
+      entryReason: t.entryReason,
+      entryMarket: t.entryMarket,
+      exitMarket: t.exitMarket,
+      token: t.token,
+      entryTime: t.entryTime,
+      exitTime: t.exitTime,
+      durationMins,
+      takeProfitPct: t.takeProfitPct,
+      stopLossPct: t.stopLossPct,
+      leverage: t.leverage,
+      sizeInSol: t.sizeInSol,
+      mode: t.mode,
+      // Signal breakdown / rationale captured at trade time:
+      sentiment: t.sentiment,
+      technicalScore: t.technicalScore,
+      news: t.news || [],
+      version: t.version,
+      closeVersion: t.closeVersion,
+    };
+  }).sort((a, b) => new Date(b.exitTime || 0).getTime() - new Date(a.exitTime || 0).getTime());
+}
+
 app.get("/api/journal", async (_req, res) => {
   try {
     const incoming: Array<{ source: string; trade: any }> = [];
@@ -1317,51 +1373,7 @@ app.get("/api/journal", async (_req, res) => {
       console.error("[Journal] History backfill pass failed:", e?.message || e);
     }
 
-    const trades = reconciled.map((t: any) => {
-      const durationMins = (t.entryTime && t.exitTime)
-        ? Math.max(0, Math.round((new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime()) / 60000))
-        : null;
-      const isReconciled = t.feesReconciled === true;
-      const pnlEstimated = typeof t.pnl === "number" ? t.pnl : 0;
-      const pnlHeadline = isReconciled && typeof t.realizedPnlPct === "number" ? t.realizedPnlPct : pnlEstimated;
-      return {
-        id: t.id,
-        source: t.source,
-        side: t.side,
-        entryPrice: t.entryPrice,
-        exitPrice: t.exitPrice,
-        pnl: pnlHeadline,          // headline number: on-chain reconciled (net of fees) when available
-        pnlEstimated,               // the bot's own pre-fee, signal-time-price estimate
-        reconciled: isReconciled,
-        entryPriceActual: t.entryPriceActual,
-        exitPriceActual: t.exitPriceActual,
-        openFeeUsd: t.openFeeUsd,
-        closeFeeUsd: t.closeFeeUsd,
-        feesUsd: isReconciled ? t.totalFeesUsd : undefined,
-        realizedPnlUsd: t.realizedPnlUsd,
-        openSignature: t.openSignature,
-        closeSignature: t.closeSignature,
-        closeReason: t.closeReason,
-        entryReason: t.entryReason,
-        entryMarket: t.entryMarket,
-        exitMarket: t.exitMarket,
-        token: t.token,
-        entryTime: t.entryTime,
-        exitTime: t.exitTime,
-        durationMins,
-        takeProfitPct: t.takeProfitPct,
-        stopLossPct: t.stopLossPct,
-        leverage: t.leverage,
-        sizeInSol: t.sizeInSol,
-        mode: t.mode,
-        // Signal breakdown / rationale captured at trade time:
-        sentiment: t.sentiment,
-        technicalScore: t.technicalScore,
-        news: t.news || [],
-        version: t.version,
-        closeVersion: t.closeVersion,
-      };
-    }).sort((a, b) => new Date(b.exitTime || 0).getTime() - new Date(a.exitTime || 0).getTime());
+    const trades = mapJournalTrades(reconciled);
 
     // Aggregate analytics — the ledger (`trades`) always shows FULL history, but stats only
     // count trades closed after the last reset (e.g. the one-time history backfill above, which
@@ -1372,6 +1384,69 @@ app.get("/api/journal", async (_req, res) => {
     return res.json({ trades, stats, updatedAt: new Date().toISOString() });
   } catch (error: any) {
     return res.status(200).json({ trades: [], stats: null, error: error?.message || "journal error" });
+  }
+});
+
+// Manual "Resync Wallet Data" — unlike the passive /api/journal read (which only reconciles
+// already-recorded trades and backfills history ONCE, ever), this always re-pulls the wallet's
+// full on-chain perps history AND forces a fresh wallet balance fetch (bypassing the 15s/cache),
+// so a user who suspects the ledger or balances are stale can force a hard resync on demand.
+app.post("/api/journal/resync", async (_req, res) => {
+  try {
+    const incoming: Array<{ source: string; trade: any }> = [];
+    try {
+      const tg = loadTelegramConfig();
+      (tg.tradesHistory || []).forEach((t: any) => incoming.push({ source: "Alert Daemon", trade: t }));
+    } catch (e) {}
+    const jupConfig = loadJupiterConfig();
+    (jupConfig.tradesHistory || []).forEach((t: any) => incoming.push({ source: "Auto-Trade (Jupiter)", trade: t }));
+
+    let stored = syncJournalStore(incoming);
+
+    let addedTrades = 0;
+    try {
+      const synced = await syncFullJupiterHistory(stored, jupConfig);
+      if (synced.changed) { stored = synced.store; saveJournalStore(stored); }
+      addedTrades = synced.added;
+    } catch (e: any) {
+      console.error("[Journal] Manual resync — full history pull failed:", e?.message || e);
+      return res.status(502).json({ error: `Wallet history resync failed: ${e?.message || e}` });
+    }
+
+    let reconciled = stored;
+    try {
+      const result = await reconcileJournalTrades(stored);
+      reconciled = result.store;
+      if (result.changed) saveJournalStore(reconciled);
+    } catch (e: any) {
+      console.error("[Journal] Manual resync — fee reconciliation pass failed:", e?.message || e);
+    }
+
+    // Force-refresh wallet balances: drop the cached entry so buildJupiterConfigResponse can't
+    // serve a stale (up to 15s old, or REAL-mode-stale-on-error) balance for this resync.
+    let walletAddress = jupConfig.walletAddress || "";
+    if (jupConfig.privateKey && !jupConfig.disconnected) {
+      try { walletAddress = getKeypairFromPrivateKey(jupConfig.privateKey).publicKey.toBase58(); } catch (e) {}
+    }
+    if (walletAddress) delete balancesCache[walletAddress];
+    const walletResp = await buildJupiterConfigResponse(jupConfig);
+
+    const trades = mapJournalTrades(reconciled);
+    const stats = buildJournalStats(trades, loadJupiterConfig().statsResetAt);
+
+    console.log(`[Journal] Manual wallet resync complete: ${addedTrades} trade(s) added from on-chain history, wallet balances refreshed.`);
+    return res.json({
+      trades,
+      stats,
+      updatedAt: new Date().toISOString(),
+      addedTrades,
+      walletAddress: walletResp.walletAddress,
+      walletBalance: walletResp.walletBalance,
+      usdcBalance: walletResp.usdcBalance,
+      usdtBalance: walletResp.usdtBalance,
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error?.message || "journal resync error" });
   }
 });
 
