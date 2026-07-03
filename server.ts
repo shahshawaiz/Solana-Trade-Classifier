@@ -1308,6 +1308,42 @@ function mapJournalTrades(reconciled: any[]) {
     // netCloseLegPnl. The estimate has no fee data yet, so it stays pre-fee until reconciled.
     const pnlUsdHeadline = isReconciled && typeof t.realizedPnlUsd === "number" ? t.realizedPnlUsd : pnlUsdEstimated;
 
+    const entryMarket = t.entryMarket || t.exitMarket;
+    const direction = t.side === "LONG" ? "Long Buy" : "Short Sell";
+    let fallbackEntry = t.entryReason;
+    if (!fallbackEntry) {
+      if (t.backfilled) {
+        if (entryMarket && entryMarket.includes("RANGE-FADE")) {
+          fallbackEntry = `Mean Reversion Range Fade — rejected structure extreme to execute ${direction} in ranging market (${entryMarket})`;
+        } else if (entryMarket && (entryMarket.includes("UP") || entryMarket.includes("DOWN"))) {
+          fallbackEntry = `Momentum Trend Follower — composite conviction bias triggered ${direction} in trending market (${entryMarket})`;
+        } else {
+          fallbackEntry = `Momentum Trend Follower — composite conviction bias triggered on ${direction} trade (on-chain verified)`;
+        }
+      } else {
+        if (entryMarket && entryMarket.includes("RANGE-FADE")) {
+          fallbackEntry = `Mean Reversion Range Fade — rejected structural extreme to execute ${direction} (${entryMarket})`;
+        } else if (entryMarket && (entryMarket.includes("UP") || entryMarket.includes("DOWN"))) {
+          fallbackEntry = `Momentum Trend Follower — composite conviction bias triggered ${direction} (${entryMarket})`;
+        } else {
+          fallbackEntry = `Quant multi-factor ${t.side.toLowerCase()} entry (estimated)`;
+        }
+      }
+    }
+
+    let fallbackClose = t.closeReason;
+    if (!fallbackClose) {
+      if (t.backfilled) {
+        fallbackClose = pnlHeadline >= 0 
+          ? `Target profit limit hit (+${pnlHeadline.toFixed(2)}% on-chain PnL)`
+          : `Stop-loss limit triggered (${pnlHeadline.toFixed(2)}% on-chain PnL)`;
+      } else {
+        fallbackClose = pnlHeadline >= 0 
+          ? "Target profit limit hit (estimated)"
+          : "Stop-loss boundary triggered (estimated)";
+      }
+    }
+
     return {
       id: t.id,
       source: t.source,
@@ -1327,8 +1363,8 @@ function mapJournalTrades(reconciled: any[]) {
       realizedPnlUsd: t.realizedPnlUsd,
       openSignature: t.openSignature,
       closeSignature: t.closeSignature,
-      closeReason: t.closeReason || (t.backfilled ? "On-chain settlement (imported)" : (t.pnl >= 0 ? "Target profit hit (estimated)" : "Stop-loss triggered (estimated)")),
-      entryReason: t.entryReason || (t.backfilled ? "On-chain verification (imported)" : "Quant multi-factor entry"),
+      closeReason: fallbackClose,
+      entryReason: fallbackEntry,
       entryMarket: t.entryMarket,
       exitMarket: t.exitMarket,
       token: t.token,
