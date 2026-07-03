@@ -755,7 +755,7 @@ export default function App() {
   const downloadJournalCSV = () => {
     const trades = journalData?.trades || [];
     if (!trades.length) return;
-    const header = ["Source", "Side", "Leverage", "Mode", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Realized PnL %", "Size (SOL)", "TP %", "SL %", "Duration (min)", "Entry Reason", "Exit Reason", "Sentiment", "Technical", "News Catalysts", "Execution Version", "Close Version"];
+    const header = ["Source", "Side", "Leverage", "Mode", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Realized PnL %", "Size (SOL)", "TP %", "SL %", "Duration (min)", "Market (Entry)", "Entry Reason", "Market (Exit)", "Exit Reason", "Sentiment", "Technical", "News Catalysts", "Execution Version", "Close Version"];
     const rows = trades.map((t: any) => [
       t.source ?? "",
       t.side ?? "",
@@ -770,7 +770,9 @@ export default function App() {
       t.takeProfitPct ?? "",
       t.stopLossPct ?? "",
       t.durationMins ?? "",
+      t.entryMarket ?? "",
       t.entryReason ?? "",
+      t.exitMarket ?? "",
       t.closeReason ?? "",
       t.sentiment !== undefined && t.sentiment !== null ? t.sentiment : "",
       t.technicalScore !== undefined && t.technicalScore !== null ? t.technicalScore : "",
@@ -1057,7 +1059,7 @@ export default function App() {
 
   const downloadJupiterTradeLogCSV = () => {
     if (!jupiterConfig || !jupiterConfig.tradesHistory || jupiterConfig.tradesHistory.length === 0) return;
-    const headers = ["Index", "Direction/Side", "Leverage Multiplier", "Entry Price (USD)", "Exit Price (USD)", "Realized Return PnL %", "Solana Size (SOL)", "Take Profit %", "Stop Loss %", "Hold Duration", "Settled Time (Eastern Time)", "Entry Reason", "Exit Reason", "Execution Version", "Close Version"];
+    const headers = ["Index", "Direction/Side", "Leverage Multiplier", "Entry Price (USD)", "Exit Price (USD)", "Realized Return PnL %", "Solana Size (SOL)", "Take Profit %", "Stop Loss %", "Hold Duration", "Settled Time (Eastern Time)", "Market (Entry)", "Entry Reason", "Market (Exit)", "Exit Reason", "Execution Version", "Close Version"];
     const rows = jupiterConfig.tradesHistory.map((trade: any, idx: number) => {
       let settledDateStr = "";
       try {
@@ -1093,7 +1095,9 @@ export default function App() {
         trade.stopLossPct !== undefined ? `-${trade.stopLossPct}%` : "-2%",
         durationStr || "N/A",
         settledDateStr,
+        `"${String(trade.entryMarket || "").replace(/"/g, '""')}"`,
         `"${String(trade.entryReason || "").replace(/"/g, '""')}"`,
+        `"${String(trade.exitMarket || "").replace(/"/g, '""')}"`,
         `"${String(trade.closeReason || "").replace(/"/g, '""')}"`,
         trade.version || "",
         trade.closeVersion || ""
@@ -4206,9 +4210,19 @@ export default function App() {
                                      <span>${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)}</span>
                                      <span>{trade.sizeInSol?.toFixed(3)} SOL</span>
                                    </div>
+                                   {trade.entryMarket && (
+                                     <div className="text-[8.5px] text-text-dim leading-snug">
+                                       <span className="font-bold uppercase tracking-wider text-[7.5px]">Market (Entry):</span> <span className="text-text-heading">{trade.entryMarket}</span>
+                                     </div>
+                                   )}
                                    {trade.entryReason && (
                                      <div className="text-[8.5px] text-text-dim leading-snug" title={trade.entryReason}>
                                        <span className="font-bold uppercase tracking-wider text-[7.5px]">Entry:</span> <span className="text-text-heading">{trade.entryReason}</span>
+                                     </div>
+                                   )}
+                                   {trade.exitMarket && trade.exitMarket !== trade.entryMarket && (
+                                     <div className="text-[8.5px] text-text-dim leading-snug">
+                                       <span className="font-bold uppercase tracking-wider text-[7.5px]">Market (Exit):</span> <span className="text-text-heading">{trade.exitMarket}</span>
                                      </div>
                                    )}
                                    {trade.closeReason && (
@@ -5468,8 +5482,14 @@ export default function App() {
                             {trade.takeProfitPct !== undefined && (
                               <div className="flex justify-between"><span>Limits:</span><span>TP: <span className="text-sol-green font-semibold">+{Number(trade.takeProfitPct).toFixed(1)}%</span> · SL: <span className="text-red-400 font-semibold">-{Number(trade.stopLossPct ?? 0).toFixed(1)}%</span></span></div>
                             )}
+                            {trade.entryMarket && (
+                              <div className="flex justify-between gap-2"><span className="shrink-0">Market (Entry):</span><span className="text-text-heading font-medium text-right">{trade.entryMarket}</span></div>
+                            )}
                             {trade.entryReason && (
                               <div className="flex justify-between gap-2"><span className="shrink-0">Entry:</span><span className="text-text-heading font-medium text-right">{trade.entryReason}</span></div>
+                            )}
+                            {trade.exitMarket && trade.exitMarket !== trade.entryMarket && (
+                              <div className="flex justify-between gap-2"><span className="shrink-0">Market (Exit):</span><span className="text-text-heading font-medium text-right">{trade.exitMarket}</span></div>
                             )}
                             {trade.closeReason && (
                               <div className="flex justify-between gap-2"><span className="shrink-0">Exit:</span><span className="text-text-heading font-medium text-right">{trade.closeReason}</span></div>

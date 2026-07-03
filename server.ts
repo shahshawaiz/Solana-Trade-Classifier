@@ -879,6 +879,14 @@ async function getMacroRegimeCached(): Promise<MacroRegime> {
   catch { return "NEUTRAL"; }
 }
 
+// One-line market-state snapshot ("📈 BULLISH · macro RISK-ON") shared by the journal
+// (entryMarket/exitMarket), the Telegram open/close alerts, and the audit log — so all three
+// surfaces describe the market identically instead of drifting.
+function marketStateStr(trend: string, macro: string): string {
+  const trendLabel = trend === "BULLISH" ? "📈 BULLISH" : trend === "BEARISH" ? "📉 BEARISH" : `↔️ ${trend}`;
+  return `${trendLabel} · macro ${macro}`;
+}
+
 // Should a new entry of `side` be allowed under the current/given regime?
 // RISK-OFF blocks new LONGs; RISK-ON blocks new SHORTs; NEUTRAL allows both.
 function macroAllowsEntry(side: string, regime: MacroRegime): boolean {
@@ -1335,6 +1343,8 @@ app.get("/api/journal", async (_req, res) => {
         closeSignature: t.closeSignature,
         closeReason: t.closeReason,
         entryReason: t.entryReason,
+        entryMarket: t.entryMarket,
+        exitMarket: t.exitMarket,
         token: t.token,
         entryTime: t.entryTime,
         exitTime: t.exitTime,
@@ -2595,6 +2605,7 @@ interface TelegramConfig {
     takeProfitPct?: number;
     stopLossPct?: number;
     entryReason?: string; // human-readable WHY the position was opened (signal ctx at entry)
+    entryMarket?: string; // trend + macro regime snapshot AT ENTRY ("📈 BULLISH · macro RISK-ON")
     sentiment?: number;
     technicalScore?: number;
     news?: string[];
@@ -2612,6 +2623,8 @@ interface TelegramConfig {
     stopLossPct?: number;
     closeReason?: string;
     entryReason?: string;
+    entryMarket?: string; // trend + macro regime snapshot AT ENTRY
+    exitMarket?: string;  // trend + macro regime snapshot AT EXIT (same tick as the close)
     sentiment?: number;
     technicalScore?: number;
     news?: string[];
@@ -2801,6 +2814,7 @@ export interface JupiterConfig {
     token?: string;          // traded asset (SOL/BTC/ETH) — for fee-reconciliation lookups
     openSignature?: string;  // on-chain tx signature of the OPEN leg
     entryReason?: string;    // human-readable WHY the position was opened (signal ctx at entry)
+    entryMarket?: string;    // trend + macro regime snapshot AT ENTRY ("📈 BULLISH · macro RISK-ON")
     sentiment?: number;
     technicalScore?: number;
     news?: string[];
@@ -2821,6 +2835,8 @@ export interface JupiterConfig {
     stopLossPct?: number;
     closeReason?: string;
     entryReason?: string;
+    entryMarket?: string;    // trend + macro regime snapshot AT ENTRY
+    exitMarket?: string;     // trend + macro regime snapshot AT EXIT (same tick as the close)
     token?: string;
     openSignature?: string;
     closeSignature?: string;
@@ -3452,6 +3468,9 @@ export async function checkPredictionAndAlert(forceAlert = false) {
         const tpPct = activeTrade.takeProfitPct ?? (config.takeProfitPct || 3.25);
         const slPct = activeTrade.stopLossPct ?? (config.stopLossPct || 1.625);
 
+        // Market snapshot AT EXIT (may differ from entryMarket if trend/macro shifted mid-trade).
+        const exitMarket = marketStateStr(pred.trend, (config as any).useMacroFilter !== false ? await getMacroRegimeCached() : "NEUTRAL");
+
         const closedTradeLog = {
           id: closedId,
           side: activeTrade.side,
@@ -3464,6 +3483,8 @@ export async function checkPredictionAndAlert(forceAlert = false) {
           stopLossPct: slPct,
           closeReason,
           entryReason: activeTrade.entryReason,
+          entryMarket: activeTrade.entryMarket,
+          exitMarket,
           sentiment: activeTrade.sentiment !== undefined ? activeTrade.sentiment : pred.sentiment,
           technicalScore: activeTrade.technicalScore !== undefined ? activeTrade.technicalScore : (pred.strategyDetails?.technicalScore),
           news: activeTrade.news || pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || [],
@@ -3479,8 +3500,10 @@ export async function checkPredictionAndAlert(forceAlert = false) {
         const slPriceClosed = activeTrade.side === "LONG" ? entryPrice * (1 - (closedTradeLog.stopLossPct / 100) / levClosed) : entryPrice * (1 + (closedTradeLog.stopLossPct / 100) / levClosed);
 
         tradeClosedMsg = `🏁 *Cortex Alpha - Position Closed realizations* 🏁\n` +
+          `• *Market*: ${exitMarket}\n` +
           `• *Exit Reason*: ${closeReason}\n` +
           (activeTrade.entryReason ? `• *Entry Reason*: ${activeTrade.entryReason}\n` : "") +
+          (activeTrade.entryMarket && activeTrade.entryMarket !== exitMarket ? `• *Market at Entry*: ${activeTrade.entryMarket}\n` : "") +
           `• *Direction*: ${activeTrade.side === "LONG" ? "🟢 LONG" : activeTrade.side === "SHORT" ? "🔴 SHORT" : "⚪ HOLD"}\n` +
           `• *Entry Price*: $${entryPrice.toFixed(2)} ➔ *Exit Price*: $${exitPrice.toFixed(2)}\n` +
           `• *Take Profit Limit*: +${closedTradeLog.takeProfitPct.toFixed(1)}% ($${tpPriceClosed.toFixed(2)})\n` +
@@ -3490,7 +3513,7 @@ export async function checkPredictionAndAlert(forceAlert = false) {
           // Journal-backed stats (this close is already in the store) — matches the app.
           journalStatsTelegramBlock();
 
-        addAuditLog(config, `Position settled (${closeReason}): ${activeTrade.side} at exit price $${exitPrice.toFixed(2)} with PnL ${pnlPercent.toFixed(2)}% (TP: +${closedTradeLog.takeProfitPct}%, SL: -${closedTradeLog.stopLossPct}%, duration: ${durationText}) [executed under ${closedTradeLog.version}${closedTradeLog.closeVersion !== closedTradeLog.version ? `, closed under ${closedTradeLog.closeVersion}` : ""}]`, "trade");
+        addAuditLog(config, `Position settled (${closeReason}): ${activeTrade.side} at exit price $${exitPrice.toFixed(2)} with PnL ${pnlPercent.toFixed(2)}% (TP: +${closedTradeLog.takeProfitPct}%, SL: -${closedTradeLog.stopLossPct}%, duration: ${durationText}, market: ${exitMarket}) [executed under ${closedTradeLog.version}${closedTradeLog.closeVersion !== closedTradeLog.version ? `, closed under ${closedTradeLog.closeVersion}` : ""}]`, "trade");
         activeTrade = null;
       }
     }
@@ -3565,6 +3588,7 @@ export async function checkPredictionAndAlert(forceAlert = false) {
             const sigmaT = pred.strategyDetails?.compositeScore ?? 0;
             const entryReason = `${pred.action} · Σ=${(sigmaT >= 0 ? "+" : "") + sigmaT.toFixed(3)} · trend ${pred.trend} (3x confirmed)` +
               ` · macro ${macroRegimeT} · px $${pred.price.toFixed(2)}`;
+            const entryMarket = marketStateStr(pred.trend, macroRegimeT);
 
             activeTrade = {
               side: enterSide,
@@ -3573,6 +3597,7 @@ export async function checkPredictionAndAlert(forceAlert = false) {
               takeProfitPct: tpPct,
               stopLossPct: slPct,
               entryReason,
+              entryMarket,
               sentiment: pred.sentiment,
               technicalScore: pred.strategyDetails?.technicalScore,
               news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || [],
@@ -3585,13 +3610,14 @@ export async function checkPredictionAndAlert(forceAlert = false) {
 
             tradeOpenedMsg = `🚀 *Cortex Alpha - New Position Entered* 🚀\n` +
               `• *Direction*: ${enterSide === "LONG" ? "🟢 LONG" : "🔴 SHORT"}\n` +
+              `• *Market*: ${entryMarket}\n` +
               `• *Entry Reason*: ${entryReason}\n` +
               `• *Entry Price*: $${pred.price.toFixed(2)}\n` +
               `• *Take Profit Limit*: +${tpPct.toFixed(1)}% ($${tpPrice.toFixed(2)})\n` +
               `• *Stop Loss Limit*: -${slPct.toFixed(1)}% ($${slPrice.toFixed(2)})\n` +
               `• *Target Catalyst*: "${config.topic}"\n\n`;
 
-            addAuditLog(config, `Opened new ${enterSide} position at entering price $${pred.price.toFixed(2)} (Limits: TP: +${tpPct.toFixed(1)}%, SL: -${slPct.toFixed(1)}%) — executed under ${APP_VERSION.display}`, "trade");
+            addAuditLog(config, `Opened new ${enterSide} position at entering price $${pred.price.toFixed(2)} (Limits: TP: +${tpPct.toFixed(1)}%, SL: -${slPct.toFixed(1)}%, market: ${entryMarket}) — executed under ${APP_VERSION.display}`, "trade");
           }
         }
       }
@@ -4397,6 +4423,9 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         const tpPct = activeTrade.takeProfitPct ?? (config.takeProfitPct || 4);
         const slPct = activeTrade.stopLossPct ?? (config.stopLossPct || 2);
 
+        // Market snapshot AT EXIT (may differ from entryMarket if trend/macro shifted mid-trade).
+        const exitMarket = marketStateStr(pred.trend, await getMacroRegimeCached());
+
         const closedTradeLog = {
           id: closedId,
           side: activeTrade.side,
@@ -4411,6 +4440,8 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           stopLossPct: slPct,
           closeReason,
           entryReason: activeTrade.entryReason,
+          entryMarket: activeTrade.entryMarket,
+          exitMarket,
           token: activeTrade.token || String(config.token || "SOL").toUpperCase(),
           openSignature: activeTrade.openSignature,
           sentiment: activeTrade.sentiment !== undefined ? activeTrade.sentiment : pred.sentiment,
@@ -4428,7 +4459,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         activeTrade = null;
         closedThisTick = true;
         console.log(`[Jupiter Daemon] Position Closed! Reason: ${closeReason}. PnL: ${currentPnlPercent.toFixed(2)}%`);
-        addAuditLog(config, `CLOSE ${closedSide} @ $${exitPrice.toFixed(2)} — ${closeReason}. Realized ${currentPnlPercent >= 0 ? "+" : ""}${currentPnlPercent.toFixed(2)}% (${durationText}). [executed under ${closedTradeLog.version}${closedTradeLog.closeVersion !== closedTradeLog.version ? `, closed under ${closedTradeLog.closeVersion}` : ""}]`, "trade");
+        addAuditLog(config, `CLOSE ${closedSide} @ $${exitPrice.toFixed(2)} — ${closeReason}. Market: ${exitMarket}. Realized ${currentPnlPercent >= 0 ? "+" : ""}${currentPnlPercent.toFixed(2)}% (${durationText}). [executed under ${closedTradeLog.version}${closedTradeLog.closeVersion !== closedTradeLog.version ? `, closed under ${closedTradeLog.closeVersion}` : ""}]`, "trade");
 
         try {
           // Execute REAL on-chain close
@@ -4466,9 +4497,10 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
 
             let tlgMsg = `🤖 *Automated Trade Closed!*\n\n` +
               `*Action*: CLOSE ${sideIcon} ${closedTradeLog.side}\n` +
-              `*Market*: ${pred.trend === "BULLISH" ? "📈 BULLISH" : pred.trend === "BEARISH" ? "📉 BEARISH" : "↔️ " + pred.trend}\n` +
+              `*Market*: ${closedTradeLog.exitMarket}\n` +
               `*Exit Reason*: ${closeReason}\n` +
               (closedTradeLog.entryReason ? `*Entry Reason*: ${closedTradeLog.entryReason}\n` : "") +
+              (closedTradeLog.entryMarket && closedTradeLog.entryMarket !== closedTradeLog.exitMarket ? `*Market at Entry*: ${closedTradeLog.entryMarket}\n` : "") +
               `*Asset*: ${config.token}\n` +
               `*Entry Price*: $${closedTradeLog.entryPrice.toFixed(2)}\n` +
               `*Exit Price*: $${closedTradeLog.exitPrice.toFixed(2)}\n` +
@@ -4609,6 +4641,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       // composite bias Σ vs the conviction threshold, trend, ADX strength, primary-trend regime,
       // and the macro backdrop. This makes every strategy-output sync explainable after the fact.
       let entryReason = ""; // persisted on the trade → journal + Telegram, so every entry is explainable
+      const entryMarket = marketStateStr(pred.trend, macroRegimeNote); // same field surfaced in journal + Telegram + audit log
       {
         const sigma = pred.strategyDetails?.compositeScore ?? 0;
         const adx = (pred as any).indicators?.adx14;
@@ -4834,6 +4867,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             version: APP_VERSION.version, // build the trade was executed under (commit-stamped)
             token: String(config.token || "SOL").toUpperCase(),
             entryReason,
+            entryMarket,
             sentiment: pred.sentiment,
             technicalScore: pred.strategyDetails?.technicalScore,
             news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
@@ -4895,7 +4929,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
 
               let tlgMsg = `🤖 *Automated Trade Opened!*\n\n` +
                 `*Action*: OPEN ${sideIcon} ${enterSide}\n` +
-                `*Market*: ${pred.trend === "BULLISH" ? "📈 BULLISH" : pred.trend === "BEARISH" ? "📉 BEARISH" : "↔️ " + pred.trend} · macro ${macroRegimeNote}\n` +
+                `*Market*: ${entryMarket}\n` +
                 (entryReason ? `*Entry Reason*: ${entryReason}\n` : "") +
                 `*Asset*: ${config.token}\n` +
                 `*Size*: ${sizeInSol.toFixed(4)} SOL\n` +
