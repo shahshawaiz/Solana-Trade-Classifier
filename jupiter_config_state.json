@@ -6,7 +6,7 @@
   "allocationPercent": 5,
   "takeProfitPct": 3.25,
   "stopLossPct": 1.625,
-  "frequencyMinutes": 5,
+  "frequencyMinutes": 20,
   "cooldownMinutes": 30,
   "lastTradeAddedAt": "",
   "token": "SOL",

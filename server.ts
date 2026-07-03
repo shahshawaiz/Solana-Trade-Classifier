@@ -362,6 +362,29 @@ export const EXIT_TP_MULT = Number(process.env.EXIT_TP_MULT) || 4.0;
 export const EXIT_PARTIAL_MULT = Number(process.env.EXIT_PARTIAL_MULT) || 1.5;
 export const EXIT_PARTIAL_FRAC = Number(process.env.EXIT_PARTIAL_FRAC) || 0.5;
 export const EXIT_TRAIL_MULT = Number(process.env.EXIT_TRAIL_MULT) || 2.0;
+// ATR floor as a % of price. A quiet tape (or a sub-hourly interval) can produce an ATR so
+// small that entry ∓ 1.5×ATR sits ~0.3% from entry — inside SOL's ordinary minute-to-minute
+// noise, which is exactly how the live wallet got stopped out of every position within
+// ~10–20 min on 2026-07-03 (on-chain Trigger fills at -0.29%…-0.33% price moves). Flooring
+// the ATR at 0.4% of price guarantees the initial stop is at least ~0.6% away (1.5×0.4%),
+// with the partial/TP/trail distances scaling up consistently. Env-tunable; 0 disables.
+export const EXIT_MIN_ATR_PCT = process.env.EXIT_MIN_ATR_PCT !== undefined ? Number(process.env.EXIT_MIN_ATR_PCT) : 0.4;
+export function flooredAtr(atr: number, price: number): number {
+  const a = Number(atr) || 0;
+  if (a <= 0) return a; // no ATR at all → callers keep their legacy fixed-% fallback
+  const floor = (EXIT_MIN_ATR_PCT / 100) * (Number(price) || 0);
+  return Math.max(a, floor);
+}
+
+// Minimum daemon sync (check-loop) cadence in minutes. Sub-20m polling re-marked open
+// positions against every wiggle of the tape and, combined with tight ATR stops, produced
+// the ~10–20 min stop-out churn seen on-chain. All frequency inputs (config file, API,
+// defaults) are clamped through this. Env-tunable via MIN_SYNC_MINUTES.
+export const MIN_SYNC_MINUTES = Number(process.env.MIN_SYNC_MINUTES) || 20;
+export function clampSyncMinutes(minutes: any): number {
+  const m = Number(minutes);
+  return Math.max(m > 0 ? m : MIN_SYNC_MINUTES, MIN_SYNC_MINUTES);
+}
 
 export interface ExitState {
   side: "LONG" | "SHORT";
@@ -373,7 +396,7 @@ export interface ExitState {
 }
 
 export function initExitState(side: "LONG" | "SHORT", entryPrice: number, atr: number): ExitState {
-  const a = atr > 0 ? atr : 0;
+  const a = atr > 0 ? flooredAtr(atr, entryPrice) : 0;
   const stopPrice = side === "LONG" ? entryPrice - EXIT_SL_MULT * a : entryPrice + EXIT_SL_MULT * a;
   return { side, entryPrice, atr: a, peak: entryPrice, stopPrice, partialTaken: false };
 }
@@ -966,6 +989,77 @@ function appendJournalEntry(source: string, trade: any) {
   catch (e: any) { console.error("[Journal] Failed to append closed trade:", e?.message || e); }
 }
 
+// Aggregate performance analytics over closed trades. SINGLE source of truth for the
+// /api/journal endpoint AND every Telegram stats line, so the numbers shown in the bot
+// can never drift from what the classifier app's Journal tab shows. Items need
+// { pnl, side, exitTime, durationMins?, source? } where pnl is already the headline
+// (on-chain fee-reconciled when available) figure; statsResetAt scopes the window.
+function buildJournalStats(trades: any[], statsResetAt?: string | null) {
+  const statsScope = statsResetAt ? trades.filter((t) => new Date(t.exitTime || 0).getTime() >= new Date(statsResetAt).getTime()) : trades;
+
+  const total = statsScope.length;
+  const wins = statsScope.filter((t) => t.pnl > 0);
+  const losses = statsScope.filter((t) => t.pnl < 0);
+  const totalPnL = statsScope.reduce((s, t) => s + (t.pnl || 0), 0);
+  const avgPnL = total ? totalPnL / total : 0;
+  const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
+  const avgLoss = losses.length ? losses.reduce((s, t) => s + t.pnl, 0) / losses.length : 0;
+  const durations = statsScope.map((t) => t.durationMins).filter((d): d is number => typeof d === "number");
+  const avgDurationMins = durations.length ? Math.round(durations.reduce((s, d) => s + d, 0) / durations.length) : 0;
+  const best = statsScope.reduce<any>((m, t) => (m === null || t.pnl > m.pnl ? t : m), null);
+  const worst = statsScope.reduce<any>((m, t) => (m === null || t.pnl < m.pnl ? t : m), null);
+
+  return {
+    total,
+    wins: wins.length,
+    losses: losses.length,
+    winRate: total ? (wins.length / total) * 100 : 0,
+    totalPnL,
+    avgPnL,
+    avgWin,
+    avgLoss,
+    profitFactor: avgLoss !== 0 ? Math.abs((avgWin * wins.length) / (avgLoss * losses.length || 1)) : null,
+    avgDurationMins,
+    longCount: statsScope.filter((t) => t.side === "LONG").length,
+    shortCount: statsScope.filter((t) => t.side === "SHORT").length,
+    best: best ? { pnl: best.pnl, side: best.side, source: best.source, exitTime: best.exitTime } : null,
+    worst: worst ? { pnl: worst.pnl, side: worst.side, source: worst.source, exitTime: worst.exitTime } : null,
+    resetAt: statsResetAt || null,
+  };
+}
+
+// Stats over the persistent journal store with the same headline-PnL rule and statsResetAt
+// window /api/journal uses. Safe to call from the daemons (no CLI shell-out): every close
+// site appends to the store synchronously before alerting, so this is current at send time.
+function journalStoreStatsSnapshot() {
+  try {
+    const statsResetAt = loadJupiterConfig().statsResetAt;
+    const rows = loadJournalStore().map((t: any) => ({
+      pnl: t.feesReconciled === true && typeof t.realizedPnlPct === "number" ? t.realizedPnlPct : (typeof t.pnl === "number" ? t.pnl : 0),
+      side: t.side,
+      source: t.source,
+      exitTime: t.exitTime,
+      durationMins: (t.entryTime && t.exitTime)
+        ? Math.max(0, Math.round((new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime()) / 60000))
+        : null,
+    }));
+    return buildJournalStats(rows, statsResetAt);
+  } catch (e: any) {
+    console.error("[Journal] Stats snapshot failed:", e?.message || e);
+    return null;
+  }
+}
+
+// Compact Markdown block for Telegram alerts — the same numbers the classifier app's
+// Journal tab displays (and, once fee-reconciled, Jupiter's own on-chain history).
+function journalStatsTelegramBlock(): string {
+  const s = journalStoreStatsSnapshot();
+  if (!s || !s.total) return "";
+  return `📒 *Journal Stats (synced with classifier app)*\n` +
+    `• *Trades*: ${s.total} (W ${s.wins} / L ${s.losses}) · *Win Rate*: ${s.winRate.toFixed(1)}%\n` +
+    `• *Total PnL*: ${s.totalPnL >= 0 ? "+" : ""}${s.totalPnL.toFixed(2)}% · *Avg/Trade*: ${s.avgPnL >= 0 ? "+" : ""}${s.avgPnL.toFixed(2)}%\n\n`;
+}
+
 // The CLI's `pnlUsd`/`pnlPct` on a Decrease (close) row already nets out the OPEN fee and any
 // accrued borrow/funding fee, but NOT that same leg's own close fee (`feeUsd`) — Phantom's
 // activity feed subtracts it separately (its "Incl. close/borrow fees" PnL line already excludes
@@ -1240,6 +1334,7 @@ app.get("/api/journal", async (_req, res) => {
         openSignature: t.openSignature,
         closeSignature: t.closeSignature,
         closeReason: t.closeReason,
+        entryReason: t.entryReason,
         token: t.token,
         entryTime: t.entryTime,
         exitTime: t.exitTime,
@@ -1261,38 +1356,8 @@ app.get("/api/journal", async (_req, res) => {
     // Aggregate analytics — the ledger (`trades`) always shows FULL history, but stats only
     // count trades closed after the last reset (e.g. the one-time history backfill above, which
     // would otherwise flood win-rate/PnL with everything the wallet has ever done).
-    const statsResetAt = loadJupiterConfig().statsResetAt;
-    const statsScope = statsResetAt ? trades.filter((t) => new Date(t.exitTime || 0).getTime() >= new Date(statsResetAt).getTime()) : trades;
-
-    const total = statsScope.length;
-    const wins = statsScope.filter((t) => t.pnl > 0);
-    const losses = statsScope.filter((t) => t.pnl < 0);
-    const totalPnL = statsScope.reduce((s, t) => s + (t.pnl || 0), 0);
-    const avgPnL = total ? totalPnL / total : 0;
-    const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
-    const avgLoss = losses.length ? losses.reduce((s, t) => s + t.pnl, 0) / losses.length : 0;
-    const durations = statsScope.map((t) => t.durationMins).filter((d): d is number => typeof d === "number");
-    const avgDurationMins = durations.length ? Math.round(durations.reduce((s, d) => s + d, 0) / durations.length) : 0;
-    const best = statsScope.reduce<any>((m, t) => (m === null || t.pnl > m.pnl ? t : m), null);
-    const worst = statsScope.reduce<any>((m, t) => (m === null || t.pnl < m.pnl ? t : m), null);
-
-    const stats = {
-      total,
-      wins: wins.length,
-      losses: losses.length,
-      winRate: total ? (wins.length / total) * 100 : 0,
-      totalPnL,
-      avgPnL,
-      avgWin,
-      avgLoss,
-      profitFactor: avgLoss !== 0 ? Math.abs((avgWin * wins.length) / (avgLoss * losses.length || 1)) : null,
-      avgDurationMins,
-      longCount: statsScope.filter((t) => t.side === "LONG").length,
-      shortCount: statsScope.filter((t) => t.side === "SHORT").length,
-      best: best ? { pnl: best.pnl, side: best.side, source: best.source, exitTime: best.exitTime } : null,
-      worst: worst ? { pnl: worst.pnl, side: worst.side, source: worst.source, exitTime: worst.exitTime } : null,
-      resetAt: statsResetAt || null,
-    };
+    // buildJournalStats is shared with the Telegram alerts, so both surfaces always agree.
+    const stats = buildJournalStats(trades, loadJupiterConfig().statsResetAt);
 
     return res.json({ trades, stats, updatedAt: new Date().toISOString() });
   } catch (error: any) {
@@ -2529,6 +2594,7 @@ interface TelegramConfig {
     entryTime: string;
     takeProfitPct?: number;
     stopLossPct?: number;
+    entryReason?: string; // human-readable WHY the position was opened (signal ctx at entry)
     sentiment?: number;
     technicalScore?: number;
     news?: string[];
@@ -2545,6 +2611,7 @@ interface TelegramConfig {
     takeProfitPct?: number;
     stopLossPct?: number;
     closeReason?: string;
+    entryReason?: string;
     sentiment?: number;
     technicalScore?: number;
     news?: string[];
@@ -2610,8 +2677,8 @@ export function loadTelegramConfig(): TelegramConfig {
       if (parsed.takeProfitPct === undefined) parsed.takeProfitPct = 3.25;
       if (parsed.stopLossPct === undefined) parsed.stopLossPct = 1.625;
       if (parsed.leverage === undefined) parsed.leverage = 3;
-      if (parsed.interval === undefined) parsed.interval = "5m";
-      if (parsed.frequency === undefined) parsed.frequency = 5;
+      if (parsed.interval === undefined) parsed.interval = "1h";
+      parsed.frequency = clampSyncMinutes(parsed.frequency); // ≥ MIN_SYNC_MINUTES always
       if (parsed.activeTrade === undefined) parsed.activeTrade = null;
       if (parsed.tradesHistory === undefined) parsed.tradesHistory = [];
       if (parsed.cooldownMinutes === undefined) parsed.cooldownMinutes = 30;
@@ -2648,7 +2715,7 @@ export function loadTelegramConfig(): TelegramConfig {
     weights: { sentiment: 0, technical: 0.9, liquidity: 0.85, elliottWave: 0, supertrend: 0.9, fvg: 0, dca: 0 },
     lastAction: "Hold",
     lastSentDirection: "HOLD",
-    frequency: 5,
+    frequency: MIN_SYNC_MINUTES,
     cooldownMinutes: 30,
     lastTradeAddedAt: "",
     lastTradePnL: 0,
@@ -2733,6 +2800,7 @@ export interface JupiterConfig {
     positionPubkey?: string;
     token?: string;          // traded asset (SOL/BTC/ETH) — for fee-reconciliation lookups
     openSignature?: string;  // on-chain tx signature of the OPEN leg
+    entryReason?: string;    // human-readable WHY the position was opened (signal ctx at entry)
     sentiment?: number;
     technicalScore?: number;
     news?: string[];
@@ -2752,6 +2820,7 @@ export interface JupiterConfig {
     takeProfitPct?: number;
     stopLossPct?: number;
     closeReason?: string;
+    entryReason?: string;
     token?: string;
     openSignature?: string;
     closeSignature?: string;
@@ -2815,10 +2884,10 @@ function loadJupiterConfig(): JupiterConfig {
       if (parsed.stopLossPct === undefined) parsed.stopLossPct = 1.625;
       if (parsed.leverage === undefined) parsed.leverage = 3;
       if (parsed.allocationPercent === undefined) parsed.allocationPercent = 5;
-      if (parsed.interval === undefined) parsed.interval = "5m";
+      if (parsed.interval === undefined) parsed.interval = "1h";
       if (parsed.activeTrade === undefined) parsed.activeTrade = null;
       if (parsed.tradesHistory === undefined) parsed.tradesHistory = [];
-      if (parsed.frequencyMinutes === undefined) parsed.frequencyMinutes = 5;
+      parsed.frequencyMinutes = clampSyncMinutes(parsed.frequencyMinutes); // ≥ MIN_SYNC_MINUTES always
       if (parsed.cooldownMinutes === undefined) parsed.cooldownMinutes = 30;
       if (parsed.lastTradeAddedAt === undefined) parsed.lastTradeAddedAt = "";
       if (parsed.token === undefined) parsed.token = "SOL";
@@ -2895,7 +2964,7 @@ function loadJupiterConfig(): JupiterConfig {
     positionSizeUsd: 0,
     takeProfitPct: 3.25,
     stopLossPct: 1.625,
-    frequencyMinutes: 5,
+    frequencyMinutes: MIN_SYNC_MINUTES,
     cooldownMinutes: 30,
     lastTradeAddedAt: "",
     token: "SOL",
@@ -3295,7 +3364,7 @@ export async function checkPredictionAndAlert(forceAlert = false) {
     throw new Error("No Telegram bot credentials configured.");
   }
   
-  console.log(`[Telegram Daemon] [telegram_alert_v1] Running check every ${config.frequency || 5}m for ${config.token}...`);
+  console.log(`[Telegram Daemon] [telegram_alert_v1] Running check every ${config.frequency || MIN_SYNC_MINUTES}m for ${config.token}...`);
   try {
     const pred = await getPredictionData(config.token, config.topic, config.weights, config.interval || "1h");
 
@@ -3394,6 +3463,7 @@ export async function checkPredictionAndAlert(forceAlert = false) {
           takeProfitPct: tpPct,
           stopLossPct: slPct,
           closeReason,
+          entryReason: activeTrade.entryReason,
           sentiment: activeTrade.sentiment !== undefined ? activeTrade.sentiment : pred.sentiment,
           technicalScore: activeTrade.technicalScore !== undefined ? activeTrade.technicalScore : (pred.strategyDetails?.technicalScore),
           news: activeTrade.news || pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || [],
@@ -3409,14 +3479,16 @@ export async function checkPredictionAndAlert(forceAlert = false) {
         const slPriceClosed = activeTrade.side === "LONG" ? entryPrice * (1 - (closedTradeLog.stopLossPct / 100) / levClosed) : entryPrice * (1 + (closedTradeLog.stopLossPct / 100) / levClosed);
 
         tradeClosedMsg = `🏁 *Cortex Alpha - Position Closed realizations* 🏁\n` +
-          `• *Reason*: ${closeReason}\n` +
+          `• *Exit Reason*: ${closeReason}\n` +
+          (activeTrade.entryReason ? `• *Entry Reason*: ${activeTrade.entryReason}\n` : "") +
           `• *Direction*: ${activeTrade.side === "LONG" ? "🟢 LONG" : activeTrade.side === "SHORT" ? "🔴 SHORT" : "⚪ HOLD"}\n` +
           `• *Entry Price*: $${entryPrice.toFixed(2)} ➔ *Exit Price*: $${exitPrice.toFixed(2)}\n` +
           `• *Take Profit Limit*: +${closedTradeLog.takeProfitPct.toFixed(1)}% ($${tpPriceClosed.toFixed(2)})\n` +
           `• *Stop Loss Limit*: -${closedTradeLog.stopLossPct.toFixed(1)}% ($${slPriceClosed.toFixed(2)})\n` +
           `• *Trade Time/Duration*: ${durationText}\n` +
-          `• *Trade PnL*: ${pnlPercent >= 0 ? "🟢 +" : "🔴 "}${pnlPercent.toFixed(2)}%\n` +
-          `• *Cumulative Portfolio*: ${cumulativePnL >= 0 ? "🟢 +" : "🔴 "}${cumulativePnL.toFixed(2)}%\n\n`;
+          `• *Trade PnL*: ${pnlPercent >= 0 ? "🟢 +" : "🔴 "}${pnlPercent.toFixed(2)}%\n\n` +
+          // Journal-backed stats (this close is already in the store) — matches the app.
+          journalStatsTelegramBlock();
 
         addAuditLog(config, `Position settled (${closeReason}): ${activeTrade.side} at exit price $${exitPrice.toFixed(2)} with PnL ${pnlPercent.toFixed(2)}% (TP: +${closedTradeLog.takeProfitPct}%, SL: -${closedTradeLog.stopLossPct}%, duration: ${durationText}) [executed under ${closedTradeLog.version}${closedTradeLog.closeVersion !== closedTradeLog.version ? `, closed under ${closedTradeLog.closeVersion}` : ""}]`, "trade");
         activeTrade = null;
@@ -3490,12 +3562,17 @@ export async function checkPredictionAndAlert(forceAlert = false) {
               slPct = (Math.abs(pred.suggestedSlPrice - pred.price) / pred.price) * 100 * lev;
             }
 
+            const sigmaT = pred.strategyDetails?.compositeScore ?? 0;
+            const entryReason = `${pred.action} · Σ=${(sigmaT >= 0 ? "+" : "") + sigmaT.toFixed(3)} · trend ${pred.trend} (3x confirmed)` +
+              ` · macro ${macroRegimeT} · px $${pred.price.toFixed(2)}`;
+
             activeTrade = {
               side: enterSide,
               entryPrice: pred.price,
               entryTime: new Date().toISOString(),
               takeProfitPct: tpPct,
               stopLossPct: slPct,
+              entryReason,
               sentiment: pred.sentiment,
               technicalScore: pred.strategyDetails?.technicalScore,
               news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || [],
@@ -3508,6 +3585,7 @@ export async function checkPredictionAndAlert(forceAlert = false) {
 
             tradeOpenedMsg = `🚀 *Cortex Alpha - New Position Entered* 🚀\n` +
               `• *Direction*: ${enterSide === "LONG" ? "🟢 LONG" : "🔴 SHORT"}\n` +
+              `• *Entry Reason*: ${entryReason}\n` +
               `• *Entry Price*: $${pred.price.toFixed(2)}\n` +
               `• *Take Profit Limit*: +${tpPct.toFixed(1)}% ($${tpPrice.toFixed(2)})\n` +
               `• *Stop Loss Limit*: -${slPct.toFixed(1)}% ($${slPrice.toFixed(2)})\n` +
@@ -3582,8 +3660,9 @@ export async function checkPredictionAndAlert(forceAlert = false) {
         `• *Technical Score (MACD)*: ${pred.strategyDetails?.technicalScore !== undefined ? (pred.strategyDetails.technicalScore >= 0 ? "+" : "") + pred.strategyDetails.technicalScore.toFixed(2) : "N/A"}\n` +
         `• *Liquidity Score (RSI)*: ${pred.strategyDetails?.liquidityScore !== undefined ? (pred.strategyDetails.liquidityScore >= 0 ? "+" : "") + pred.strategyDetails.liquidityScore.toFixed(2) : "N/A"}\n` +
         `• *Elliott Wave Score*: ${pred.strategyDetails?.elliottWaveScore !== undefined ? (pred.strategyDetails.elliottWaveScore >= 0 ? "+" : "") + pred.strategyDetails.elliottWaveScore.toFixed(2) : "N/A"}\n` +
-        `• *Last Closed Trade PnL*: ${lastTradePnL >= 0 ? "+" : ""}${lastTradePnL.toFixed(2)}%\n` +
-        `• *Cumulative Daemon PnL*: ${cumulativePnL >= 0 ? "+" : ""}${cumulativePnL.toFixed(2)}%\n\n`;
+        `• *Last Closed Trade PnL*: ${lastTradePnL >= 0 ? "+" : ""}${lastTradePnL.toFixed(2)}%\n\n` +
+        // Journal-backed stats — the same numbers the classifier app's Journal tab shows.
+        journalStatsTelegramBlock();
 
       if (tradeClosedMsg) {
         message += tradeClosedMsg;
@@ -4199,7 +4278,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       // Volatility-adaptive exit — the SAME shared helper the backtest/benchmark use: partial
       // scale-out (50% at +1.5×ATR) + move stop to breakeven + ATR trailing stop + hard TP cap
       // (4×ATR). Falls back to the stored fixed TP/SL % only when ATR was unavailable at entry.
-      const atrEntry = activeTrade.atrAtEntry || 0;
+      const atrEntry = flooredAtr(activeTrade.atrAtEntry || 0, entryPrice);
       if (atrEntry > 0) {
         if (activeTrade.stopPrice === undefined) {
           activeTrade.stopPrice = activeTrade.side === "LONG" ? entryPrice - EXIT_SL_MULT * atrEntry : entryPrice + EXIT_SL_MULT * atrEntry;
@@ -4331,6 +4410,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           takeProfitPct: tpPct,
           stopLossPct: slPct,
           closeReason,
+          entryReason: activeTrade.entryReason,
           token: activeTrade.token || String(config.token || "SOL").toUpperCase(),
           openSignature: activeTrade.openSignature,
           sentiment: activeTrade.sentiment !== undefined ? activeTrade.sentiment : pred.sentiment,
@@ -4386,7 +4466,9 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
 
             let tlgMsg = `🤖 *Automated Trade Closed!*\n\n` +
               `*Action*: CLOSE ${sideIcon} ${closedTradeLog.side}\n` +
-              `*Reason*: ${closeReason}\n` +
+              `*Market*: ${pred.trend === "BULLISH" ? "📈 BULLISH" : pred.trend === "BEARISH" ? "📉 BEARISH" : "↔️ " + pred.trend}\n` +
+              `*Exit Reason*: ${closeReason}\n` +
+              (closedTradeLog.entryReason ? `*Entry Reason*: ${closedTradeLog.entryReason}\n` : "") +
               `*Asset*: ${config.token}\n` +
               `*Entry Price*: $${closedTradeLog.entryPrice.toFixed(2)}\n` +
               `*Exit Price*: $${closedTradeLog.exitPrice.toFixed(2)}\n` +
@@ -4397,6 +4479,10 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
               `*Size*: ${closedTradeLog.sizeInSol.toFixed(4)} SOL\n` +
               `*Sentiment Score (Political/News)*: ${closedTradeLog.sentiment !== undefined ? closedTradeLog.sentiment.toFixed(2) : "N/A"}\n` +
               `*Technical Score (MACD)*: ${closedTradeLog.technicalScore !== undefined ? (closedTradeLog.technicalScore >= 0 ? "+" : "") + closedTradeLog.technicalScore.toFixed(2) : "N/A"}\n\n`;
+
+            // Same journal-backed numbers the classifier app's Journal tab shows (trade was
+            // appended to the store above, so this snapshot already includes it).
+            tlgMsg += journalStatsTelegramBlock();
 
             if (closedTradeLog.news && closedTradeLog.news.length > 0) {
               tlgMsg += `📰 *Associated News Catalyst*:\n`;
@@ -4522,6 +4608,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       // Record WHY this tick acted or stood aside, with the numbers a trader would check:
       // composite bias Σ vs the conviction threshold, trend, ADX strength, primary-trend regime,
       // and the macro backdrop. This makes every strategy-output sync explainable after the fact.
+      let entryReason = ""; // persisted on the trade → journal + Telegram, so every entry is explainable
       {
         const sigma = pred.strategyDetails?.compositeScore ?? 0;
         const adx = (pred as any).indicators?.adx14;
@@ -4529,6 +4616,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           ` · trend ${pred.trend}${adx !== undefined ? ` · ADX ${adx.toFixed(0)}` : ""}` +
           ` · macro ${macroRegimeNote} · px $${pred.price?.toFixed(2)}`;
         if (canEnter) {
+          entryReason = `${ctx} · regime ${regimeNote}` + (reversalReentry ? " · reversal re-entry" : "") + (forceTrigger ? " · manual trigger" : "");
           addAuditLog(config, `ENTER ${enterSide} — ${ctx}. Confirmed signal, regime ${regimeNote}, macro permits.`, "trade");
         } else {
           const why = config.error
@@ -4707,12 +4795,21 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           // (Leveraged % = price-move% * leverage.) Falls back to config % if ATR is unavailable.
           let tpPct: number;
           let slPct: number;
-          const atrVal = Number(pred.atr) || 0;
+          // Floor the ATR (EXIT_MIN_ATR_PCT of price) BEFORE deriving TP/SL and storing
+          // atrAtEntry, so the on-chain trigger stop, the daemon's software stop, the partial
+          // scale-out and the trail all use the same noise-safe distance.
+          const atrVal = flooredAtr(Number(pred.atr) || 0, entryPrice);
           if (atrVal > 0 && entryPrice > 0) {
             const slMult = Number(pred.atrSlMult) || 1.5;
             const tpMult = Number(pred.atrTpMult) || 3.0;
             slPct = ((slMult * atrVal) / entryPrice) * 100 * leverage;
             tpPct = ((tpMult * atrVal) / entryPrice) * 100 * leverage;
+          } else if (pred.suggestedTpPrice && pred.suggestedSlPrice && entryPrice > 0) {
+            // No ATR — derive the limits from the ticker's recent 20-bar swing range (the
+            // suggested TP/SL prices fall back to swing high/low), scaled by leverage, instead
+            // of the static config %, so TP/SL always track actual price range + position size.
+            tpPct = (Math.abs(Number(pred.suggestedTpPrice) - entryPrice) / entryPrice) * 100 * leverage;
+            slPct = (Math.abs(entryPrice - Number(pred.suggestedSlPrice)) / entryPrice) * 100 * leverage;
           } else {
             tpPct = config.takeProfitPct || 4.0;
             slPct = config.stopLossPct || 2.0;
@@ -4736,6 +4833,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             remainingFrac: 1,      // open fraction of the position (1 → 0.5 after the scale-out)
             version: APP_VERSION.version, // build the trade was executed under (commit-stamped)
             token: String(config.token || "SOL").toUpperCase(),
+            entryReason,
             sentiment: pred.sentiment,
             technicalScore: pred.strategyDetails?.technicalScore,
             news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
@@ -4788,15 +4886,24 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
               const lev = config.leverage || 5;
               const tpPrice = enterSide === "LONG" ? entryPrice * (1 + (tpPct / 100) / lev) : entryPrice * (1 - (tpPct / 100) / lev);
               const slPrice = enterSide === "LONG" ? entryPrice * (1 - (slPct / 100) / lev) : entryPrice * (1 + (slPct / 100) / lev);
+              // Dollar risk/reward for THIS position: leveraged % is return on collateral,
+              // so $ = collateral × pct. Position notional = sizeInSol × entryPrice.
+              const positionUsd = sizeInSol * entryPrice;
+              const collateralUsdMsg = positionUsd / lev;
+              const riskUsd = collateralUsdMsg * slPct / 100;
+              const rewardUsd = collateralUsdMsg * tpPct / 100;
 
               let tlgMsg = `🤖 *Automated Trade Opened!*\n\n` +
                 `*Action*: OPEN ${sideIcon} ${enterSide}\n` +
+                `*Market*: ${pred.trend === "BULLISH" ? "📈 BULLISH" : pred.trend === "BEARISH" ? "📉 BEARISH" : "↔️ " + pred.trend} · macro ${macroRegimeNote}\n` +
+                (entryReason ? `*Entry Reason*: ${entryReason}\n` : "") +
                 `*Asset*: ${config.token}\n` +
                 `*Size*: ${sizeInSol.toFixed(4)} SOL\n` +
                 `*Leverage*: ${lev}x\n` +
                 `*Entry Price*: $${entryPrice.toFixed(2)}\n` +
                 `*Take Profit Limit*: +${tpPct.toFixed(1)}% ($${tpPrice.toFixed(2)})\n` +
                 `*Stop Loss Limit*: -${slPct.toFixed(1)}% ($${slPrice.toFixed(2)})\n` +
+                `*Est. Risk / Reward*: -$${riskUsd.toFixed(2)} / +$${rewardUsd.toFixed(2)} (position $${positionUsd.toFixed(2)}, collateral $${collateralUsdMsg.toFixed(2)})\n` +
                 `*Score (Σ)*: ${pred.strategyDetails.compositeScore?.toFixed(2) || "N/A"}\n` +
                 `*Sentiment Score (Political/News)*: ${pred.sentiment.toFixed(2)}\n` +
                 `*Technical Score (MACD)*: ${pred.strategyDetails.technicalScore !== undefined ? (pred.strategyDetails.technicalScore >= 0 ? "+" : "") + pred.strategyDetails.technicalScore.toFixed(2) : "N/A"}\n` +
@@ -4877,9 +4984,9 @@ function restartDaemon(minutes: number) {
   if (daemonTimer) {
     clearInterval(daemonTimer);
   }
-  const freq = minutes > 0 ? minutes : 5;
+  const freq = clampSyncMinutes(minutes);
   const intervalMs = freq * 60 * 1000;
-  console.log(`[Telegram Daemon] [telegram_alert_v1] Initialized checking loop. Check interval: Every ${freq} minutes.`);
+  console.log(`[Telegram Daemon] [telegram_alert_v1] Initialized checking loop. Check interval: Every ${freq} minutes (min ${MIN_SYNC_MINUTES}m).`);
   daemonTimer = setInterval(() => {
     checkPredictionAndAlert().catch((err) => {
       console.error("[Telegram Daemon] Unhandled error in background loop:", err);
@@ -4891,9 +4998,9 @@ function restartJupiterDaemon(minutes: number) {
   if (jupiterDaemonTimer) {
     clearInterval(jupiterDaemonTimer);
   }
-  const freq = minutes > 0 ? minutes : 5;
+  const freq = clampSyncMinutes(minutes);
   const intervalMs = freq * 60 * 1000;
-  console.log(`[Jupiter Daemon] Initialized checking loop. Check interval: Every ${freq} minutes.`);
+  console.log(`[Jupiter Daemon] Initialized checking loop. Check interval: Every ${freq} minutes (min ${MIN_SYNC_MINUTES}m).`);
   jupiterDaemonTimer = setInterval(() => {
     checkJupiterTradingAndState().catch((err) => {
       console.error("[Jupiter Daemon] Unhandled error in background loop:", err);
@@ -5288,7 +5395,9 @@ app.post("/api/backtest", async (req, res) => {
           }
 
           // ATR (price) at entry drives the shared partial-scale-out/breakeven/trail exit.
-          const atrAtEntry = calculateATR(quotes.slice(0, i + 1), 14);
+          // Same EXIT_MIN_ATR_PCT floor as the live daemon so the backtest can't run tighter
+          // stops than live would.
+          const atrAtEntry = flooredAtr(calculateATR(quotes.slice(0, i + 1), 14), currentPrice);
 
           if (positionSide === "LONG") {
             activePosition = {
@@ -5668,7 +5777,7 @@ app.post("/api/telegram-config", async (req, res) => {
     
     const newFrequency = Number(frequency);
     if (newFrequency && !isNaN(newFrequency) && newFrequency > 0) {
-      current.frequency = newFrequency;
+      current.frequency = clampSyncMinutes(newFrequency);
     }
 
     if (cooldownMinutes !== undefined) {
@@ -5706,8 +5815,8 @@ app.post("/api/telegram-config", async (req, res) => {
     
     saveTelegramConfig(current);
     
-    // Dynamically adjust daemon checking schedule
-    restartDaemon(current.frequency || 5);
+    // Alerts Hub loop retired — the Jupiter auto-trader is the only Telegram alert source,
+    // so config saves no longer (re)schedule the standalone alert daemon.
     
     if (triggerAlert) {
       await checkPredictionAndAlert(true);
@@ -5746,11 +5855,12 @@ app.post("/api/telegram-config", async (req, res) => {
       const testMsg = `🧪 *Cortex Alpha - Telegram Connection Test* 🧪\n\n` +
         `• *Bot Identifier*: \`telegram_alert_v1\`\n` +
         `• *Connection Status*: Alerts ${current.enabled ? "Active 🟢" : "Inactive ⚪"}\n` +
-        `• *Check Frequency*: Every ${current.frequency || 5} min(s)\n` +
+        `• *Check Frequency*: Every ${current.frequency || MIN_SYNC_MINUTES} min(s)\n` +
         `• *Monitored Asset*: ${current.token.toUpperCase()}\n` +
         `• *Current Trade PnL*: ${current.lastTradePnL ? current.lastTradePnL.toFixed(2) + "%" : "0.00%"}\n` +
-        `• *Cumulative Stats*: ${current.cumulativePnL ? current.cumulativePnL.toFixed(2) + "%" : "0.00%"}\n` +
-        `• *Timestamp*: ${new Date().toLocaleString()}` +
+        `• *Timestamp*: ${new Date().toLocaleString()}\n\n` +
+        // Journal-backed stats — the same numbers the classifier app's Journal tab shows.
+        journalStatsTelegramBlock() +
         predictionSnippet;
         
       await sendTelegramMessage(activeBotToken, activeChatId, testMsg);
@@ -6319,7 +6429,7 @@ app.post("/api/jupiter-config", async (req, res) => {
     }
 
     if (frequencyMinutes !== undefined) {
-      current.frequencyMinutes = Number(frequencyMinutes) || 5;
+      current.frequencyMinutes = clampSyncMinutes(frequencyMinutes);
     }
 
     if (cooldownMinutes !== undefined) {
@@ -6357,7 +6467,7 @@ app.post("/api/jupiter-config", async (req, res) => {
       saveJupiterConfig(current);
     }
 
-    restartJupiterDaemon(current.frequencyMinutes || 5);
+    restartJupiterDaemon(current.frequencyMinutes || MIN_SYNC_MINUTES);
 
     if (forceClose && current.activeTrade) {
       const entryPrice = current.activeTrade.entryPrice;
@@ -6710,17 +6820,15 @@ async function startServer() {
   syncJupCliKeyFromEnv();
   setTimeout(() => {
     try {
-      const initialConfig = loadTelegramConfig();
-      const freq = initialConfig.frequency || 5;
-      restartDaemon(freq);
-      console.log("[Telegram Daemon] Running initial startup daemon check...");
-      checkPredictionAndAlert().catch((err) => {
-        console.error("[Telegram Daemon] Initial checkPredictionAndAlert failed:", err);
-      });
+      // The standalone Alerts Hub daemon (telegram_alert_v1 signal updates + paper trades) is
+      // retired: the ONLY Telegram alerts now come from the Jupiter auto-trader's own
+      // open/close messages. Its config/state stays readable (the auto-trader still uses
+      // telegramConfig.enabled + credentials), we just never schedule its checking loop.
+      console.log("[Telegram Daemon] Alerts Hub loop disabled — Telegram alerts are sent by the Jupiter auto-trader on open/close only.");
 
-      // Load and start Jupiter Daemon
+      // Load and start Jupiter Daemon on its configured cadence (clamped to ≥ MIN_SYNC_MINUTES).
       const jupConfig = loadJupiterConfig();
-      restartJupiterDaemon(5); // Default to check every 5 mins
+      restartJupiterDaemon(jupConfig.frequencyMinutes || MIN_SYNC_MINUTES);
       console.log("[Jupiter Daemon] Running initial startup Jupiter check...");
       checkJupiterTradingAndState().catch((err) => {
         console.error("[Jupiter Daemon] Initial checkJupiterTradingAndState failed:", err);

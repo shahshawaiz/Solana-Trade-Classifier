@@ -594,7 +594,7 @@ export default function App() {
   });
   const [token, setToken] = useState("SOL");
   const [predictionHeadlines, setPredictionHeadlines] = useState<any[]>([]);
-  const [currentView, setCurrentView] = useState<'dashboard' | 'apiDocs' | 'about' | 'alerts' | 'jupiter' | 'forecast' | 'liquidation' | 'journal'>('jupiter');
+  const [currentView, setCurrentView] = useState<'dashboard' | 'apiDocs' | 'about' | 'jupiter' | 'forecast' | 'liquidation' | 'journal'>('jupiter');
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [journalData, setJournalData] = useState<any | null>(null);
   const [journalLoading, setJournalLoading] = useState(false);
@@ -755,7 +755,7 @@ export default function App() {
   const downloadJournalCSV = () => {
     const trades = journalData?.trades || [];
     if (!trades.length) return;
-    const header = ["Source", "Side", "Leverage", "Mode", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Realized PnL %", "Size (SOL)", "TP %", "SL %", "Duration (min)", "Sentiment", "Technical", "News Catalysts", "Execution Version", "Close Version"];
+    const header = ["Source", "Side", "Leverage", "Mode", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Realized PnL %", "Size (SOL)", "TP %", "SL %", "Duration (min)", "Entry Reason", "Exit Reason", "Sentiment", "Technical", "News Catalysts", "Execution Version", "Close Version"];
     const rows = trades.map((t: any) => [
       t.source ?? "",
       t.side ?? "",
@@ -770,6 +770,8 @@ export default function App() {
       t.takeProfitPct ?? "",
       t.stopLossPct ?? "",
       t.durationMins ?? "",
+      t.entryReason ?? "",
+      t.closeReason ?? "",
       t.sentiment !== undefined && t.sentiment !== null ? t.sentiment : "",
       t.technicalScore !== undefined && t.technicalScore !== null ? t.technicalScore : "",
       (t.news || []).map((n: any) => (n && typeof n === "object" ? n.title : n)).filter(Boolean).join(" | "),
@@ -1055,7 +1057,7 @@ export default function App() {
 
   const downloadJupiterTradeLogCSV = () => {
     if (!jupiterConfig || !jupiterConfig.tradesHistory || jupiterConfig.tradesHistory.length === 0) return;
-    const headers = ["Index", "Direction/Side", "Leverage Multiplier", "Entry Price (USD)", "Exit Price (USD)", "Realized Return PnL %", "Solana Size (SOL)", "Take Profit %", "Stop Loss %", "Hold Duration", "Settled Time (Eastern Time)", "Execution Version", "Close Version"];
+    const headers = ["Index", "Direction/Side", "Leverage Multiplier", "Entry Price (USD)", "Exit Price (USD)", "Realized Return PnL %", "Solana Size (SOL)", "Take Profit %", "Stop Loss %", "Hold Duration", "Settled Time (Eastern Time)", "Entry Reason", "Exit Reason", "Execution Version", "Close Version"];
     const rows = jupiterConfig.tradesHistory.map((trade: any, idx: number) => {
       let settledDateStr = "";
       try {
@@ -1091,6 +1093,8 @@ export default function App() {
         trade.stopLossPct !== undefined ? `-${trade.stopLossPct}%` : "-2%",
         durationStr || "N/A",
         settledDateStr,
+        `"${String(trade.entryReason || "").replace(/"/g, '""')}"`,
+        `"${String(trade.closeReason || "").replace(/"/g, '""')}"`,
         trade.version || "",
         trade.closeVersion || ""
       ];
@@ -1251,7 +1255,7 @@ export default function App() {
     lastAction: "Hold",
     lastCheckedAt: "",
     cooldownMinutes: 30, // customizable cooldown period (default 30 mins)
-    frequency: 5, // default alert analytics check frequency to 5
+    frequency: 20, // default alert analytics check frequency (min 20m — server-enforced)
     interval: "5m", // Analytic timeframe default to 5m
     auditLogs: [],
     error: "",
@@ -1283,7 +1287,7 @@ export default function App() {
       allocationPercent: 5,
       takeProfitPct: 3.25,
       stopLossPct: 1.625,
-      frequencyMinutes: 5,
+      frequencyMinutes: 20,
       cooldownMinutes: 30,
       interval: "5m",
       token: "SOL",
@@ -1398,7 +1402,7 @@ export default function App() {
             enabled: telegramConfig?.enabled || false,
             token: token,
             topic: topic,
-            frequency: telegramConfig?.frequency || 5,
+            frequency: telegramConfig?.frequency || 20,
             weights: effectiveWeights
           })
         });
@@ -1413,7 +1417,7 @@ export default function App() {
               allocationPercent: jupiterConfig.allocationPercent || 5,
               takeProfitPct: jupiterConfig.takeProfitPct || 4,
               stopLossPct: jupiterConfig.stopLossPct || 2,
-              frequencyMinutes: jupiterConfig.frequencyMinutes || 5,
+              frequencyMinutes: jupiterConfig.frequencyMinutes || 20,
               cooldownMinutes: jupiterConfig.cooldownMinutes || 30,
               tradingMode: jupiterConfig.tradingMode || "REAL",
               privateKey: jupiterConfig.privateKey || "",
@@ -1583,7 +1587,7 @@ export default function App() {
           enabled: telegramConfig.enabled,
           token: token,         // ALWAYS use active main screen's token
           topic: topic,         // ALWAYS use active main screen's topic
-          frequency: telegramConfig.frequency || 5,
+          frequency: telegramConfig.frequency || 20,
           cooldownMinutes: telegramConfig.cooldownMinutes !== undefined ? telegramConfig.cooldownMinutes : 30,
           takeProfitPct: telegramConfig.takeProfitPct !== undefined ? telegramConfig.takeProfitPct : 3.25,
           stopLossPct: telegramConfig.stopLossPct !== undefined ? telegramConfig.stopLossPct : 1.625,
@@ -1626,7 +1630,7 @@ export default function App() {
           enabled: telegramConfig.enabled,
           token: telegramConfig.token,
           topic: telegramConfig.topic,
-          frequency: telegramConfig.frequency || 5,
+          frequency: telegramConfig.frequency || 20,
           resetStats: true
         })
       });
@@ -2310,7 +2314,7 @@ export default function App() {
               onClick={() => setShowMoreMenu((prev) => !prev)} 
               className={cn(
                 "hover:text-sol-purple transition-colors flex items-center gap-1 cursor-pointer", 
-                ['forecast', 'dashboard', 'liquidation', 'alerts', 'apiDocs'].includes(currentView) && "text-sol-purple"
+                ['forecast', 'dashboard', 'liquidation', 'apiDocs'].includes(currentView) && "text-sol-purple"
               )}
             >
               More Info <ChevronDown className="w-3 h-3" />
@@ -2345,15 +2349,6 @@ export default function App() {
                     )}
                   >
                     Liquidation Map
-                  </button>
-                  <button
-                    onClick={() => { setCurrentView('alerts'); setShowMoreMenu(false); }}
-                    className={cn(
-                      "w-full text-left px-4 py-2 text-xs hover:bg-bg-input transition-colors",
-                      currentView === 'alerts' ? "text-sol-purple font-bold bg-sol-purple/5" : "text-text-body"
-                    )}
-                  >
-                    Alerts Hub
                   </button>
                   <button
                     onClick={() => { setCurrentView('apiDocs'); setShowMoreMenu(false); }}
@@ -3863,11 +3858,12 @@ export default function App() {
                               <div className="relative">
                                 <input
                                   type="number"
-                                  min="1"
+                                  min="20"
                                   max="1440"
-                                  value={jupiterConfig.frequencyMinutes || 5}
+                                  value={jupiterConfig.frequencyMinutes || 20}
                                   onChange={(e) => setJupiterConfig({ ...jupiterConfig, frequencyMinutes: Number(e.target.value) })}
                                   className="w-full bg-bg-input border border-border-dim rounded-lg px-3 py-2 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-sol-purple text-text-heading"
+                                  title="Minimum 20 minutes — faster polling churns positions out on noise (server enforces the floor)"
                                 />
                                 <span className="absolute right-3 top-2 text-xs text-text-dim font-mono">min</span>
                               </div>
@@ -4210,6 +4206,16 @@ export default function App() {
                                      <span>${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)}</span>
                                      <span>{trade.sizeInSol?.toFixed(3)} SOL</span>
                                    </div>
+                                   {trade.entryReason && (
+                                     <div className="text-[8.5px] text-text-dim leading-snug" title={trade.entryReason}>
+                                       <span className="font-bold uppercase tracking-wider text-[7.5px]">Entry:</span> <span className="text-text-heading">{trade.entryReason}</span>
+                                     </div>
+                                   )}
+                                   {trade.closeReason && (
+                                     <div className="text-[8.5px] text-text-dim leading-snug" title={trade.closeReason}>
+                                       <span className="font-bold uppercase tracking-wider text-[7.5px]">Exit:</span> <span className="text-text-heading">{trade.closeReason}</span>
+                                     </div>
+                                   )}
                                    <div className="flex justify-between items-center text-[9px] text-text-dim">
                                      <div className="flex items-center gap-2">
                                        <span>TP: <span className="text-sol-green font-semibold">+{trade.takeProfitPct !== undefined ? trade.takeProfitPct : 4}%</span></span>
@@ -5462,6 +5468,9 @@ export default function App() {
                             {trade.takeProfitPct !== undefined && (
                               <div className="flex justify-between"><span>Limits:</span><span>TP: <span className="text-sol-green font-semibold">+{Number(trade.takeProfitPct).toFixed(1)}%</span> · SL: <span className="text-red-400 font-semibold">-{Number(trade.stopLossPct ?? 0).toFixed(1)}%</span></span></div>
                             )}
+                            {trade.entryReason && (
+                              <div className="flex justify-between gap-2"><span className="shrink-0">Entry:</span><span className="text-text-heading font-medium text-right">{trade.entryReason}</span></div>
+                            )}
                             {trade.closeReason && (
                               <div className="flex justify-between gap-2"><span className="shrink-0">Exit:</span><span className="text-text-heading font-medium text-right">{trade.closeReason}</span></div>
                             )}
@@ -5543,552 +5552,6 @@ export default function App() {
                   </div>
                 )}
               </section>
-            </div>
-          </main>
-        ) : currentView === 'alerts' ? (
-          <main className="flex-1 flex flex-col p-8 bg-bg-main overflow-y-auto custom-scrollbar animate-fade-in text-text-body">
-            <div className="max-w-5xl mx-auto w-full space-y-8">
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Bell className="w-5 h-5 text-sol-purple" />
-                  <h2 className="text-2xl font-serif italic text-text-heading">Alerts Hub & Telegram Integration</h2>
-                </div>
-                <p className="text-sm text-text-dim">Configure real-time quantitative signal monitoring. Get alerted on Telegram the second our Multimodal Engine switches bias.</p>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-                {/* Form configuration - 7 cols */}
-                <div className="lg:col-span-7 space-y-6">
-                  <Card title="Signal Delivery Configuration" icon={Settings}>
-                    <form onSubmit={(e) => handleSaveTelegramConfig(e, false)} className="space-y-6">
-                      <div className="space-y-4">
-                        {/* Enabled Flag */}
-                        <div className="flex items-center justify-between p-4 bg-bg-input rounded-lg border border-border-dim">
-                          <div className="space-y-0.5">
-                            <label className="text-xs uppercase font-bold tracking-widest text-text-heading">Telegram Alerts Toggle</label>
-                            <p className="text-[10px] text-text-dim leading-normal">
-                              Enable or disable automated background multi-interval checks.
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setTelegramConfig({ ...telegramConfig, enabled: !telegramConfig.enabled })}
-                            className={cn(
-                              "w-12 h-6 rounded-full p-1 transition-colors duration-200 focus:outline-none",
-                              telegramConfig.enabled ? "bg-sol-green" : "bg-bg-main border border-border-dim"
-                            )}
-                          >
-                            <div className={cn(
-                              "w-4 h-4 rounded-full bg-white transition-transform duration-200 shadow",
-                              telegramConfig.enabled ? "translate-x-6" : "translate-x-0"
-                            )} />
-                          </button>
-                        </div>
-
-                        {/* Browser Toast Notifications Toggle */}
-                        <div className="flex items-center justify-between p-4 bg-bg-input rounded-lg border border-border-dim">
-                          <div className="space-y-0.5">
-                            <label className="text-xs uppercase font-bold tracking-widest text-text-heading">Browser Toast Notifications</label>
-                            <p className="text-[10px] text-text-dim leading-normal">
-                              Show temporary toast notifications at the top-right of the dashboard when a new audit log is registered.
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setToastsEnabled((prev) => !prev)}
-                            className={cn(
-                              "w-12 h-6 rounded-full p-1 transition-colors duration-200 focus:outline-none",
-                              toastsEnabled ? "bg-sol-green" : "bg-bg-main border border-border-dim"
-                            )}
-                          >
-                            <div className={cn(
-                              "w-4 h-4 rounded-full bg-white transition-transform duration-200 shadow",
-                              toastsEnabled ? "translate-x-6" : "translate-x-0"
-                            )} />
-                          </button>
-                        </div>
-
-                        {/* Credentials secrets banner */}
-                        <div className="p-4 bg-bg-input rounded-lg border border-border-dim space-y-3">
-                          <div className="flex items-center gap-2">
-                            <span className={cn(
-                              "w-2.5 h-2.5 rounded-full",
-                              telegramConfig.secretsConfigured ? "bg-sol-green" : "bg-red-500 animate-pulse"
-                            )}></span>
-                            <span className="text-[10px] uppercase font-bold tracking-widest text-text-heading">
-                              {telegramConfig.secretsConfigured ? "Secret Credentials Detected" : "Telemetry Secrets Missing"}
-                            </span>
-                          </div>
-                          <p className="text-[10px] text-text-dim leading-relaxed">
-                            {telegramConfig.secretsConfigured 
-                              ? "Telegram Bot credentials are loaded securely from system environment variables (TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID)."
-                              : "Missing system configuration. Please populate system secrets matching key values TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID."}
-                          </p>
-                          <div className="grid grid-cols-2 gap-4 pt-1 font-mono text-[9px]">
-                            <div>
-                              <span className="text-text-dim block uppercase">Masked Bot Token:</span>
-                              <span className="text-text-heading select-none">{telegramConfig.botToken || "Not Set"}</span>
-                            </div>
-                            <div>
-                              <span className="text-text-dim block uppercase">Masked Chat ID:</span>
-                              <span className="text-text-heading select-none">{telegramConfig.chatId || "Not Set"}</span>
-                            </div>
-                            <div className="col-span-2 pt-1 border-t border-border-dim/30">
-                              <span className="text-text-dim block uppercase">Active Bot ID:</span>
-                              <span className="text-sol-purple font-bold">telegram_alert_v1</span>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="space-y-4">
-                          <div className="p-3 bg-sol-purple/15 border border-sol-purple/35 rounded-xl flex items-center gap-2.5 text-[11px] text-text-heading">
-                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-sol-purple shrink-0" style={{ animationDuration: '6s' }} />
-                            <span>
-                              <strong className="text-sol-purple">Live Engine Lock:</strong> Subscribed Ticker, Catalyst Sentiment Topics, and Formula Scoring Weights are fully locked and auto-synced with the central <strong>Neural Engine Configuration</strong> configured in your left sidebar.
-                            </span>
-                          </div>
-
-                          <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-                            {/* Subscribed Ticker Display */}
-                            <div className="space-y-1.5 p-3.5 bg-bg-input/70 border border-border-dim rounded-xl flex flex-col justify-between">
-                              <div>
-                                <div className="flex justify-between items-center mb-1">
-                                  <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-dim block">Ticker Asset</label>
-                                  <span className="text-[8px] px-1.5 py-0.2 bg-sol-green/10 text-sol-green border border-sol-green/20 rounded font-bold uppercase tracking-wider font-mono">Synced</span>
-                                </div>
-                                <span className="font-mono text-xs text-text-heading font-black">{token === 'SOL' ? 'SOL / USD (Solana)' : token === 'BTC' ? 'BTC / USD (Bitcoin)' : token === 'ETH' ? 'ETH / USD (Ethereum)' : `${token} / USD`}</span>
-                              </div>
-                            </div>
-
-                            {/* Catalyst Topic Display */}
-                            <div className="space-y-1.5 p-3.5 bg-bg-input/70 border border-border-dim rounded-xl flex flex-col justify-between">
-                              <div>
-                                <div className="flex justify-between items-center mb-1">
-                                  <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-dim block">Catalyst Topic</label>
-                                  <span className="text-[8px] px-1.5 py-0.2 bg-sol-green/10 text-sol-green border border-sol-green/20 rounded font-bold uppercase tracking-wider font-mono">Synced</span>
-                                </div>
-                                <span className="font-mono text-[11px] text-text-heading font-bold break-all">"{topic || 'Global Catalysts'}"</span>
-                              </div>
-                            </div>
-
-                            {/* Scoring Weights Display */}
-                            <div className="space-y-1.5 p-3.5 bg-bg-input/70 border border-border-dim rounded-xl flex flex-col justify-between">
-                              <div>
-                                <div className="flex justify-between items-center mb-1">
-                                  <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-dim block">Formula Weights</label>
-                                  <span className="text-[8px] px-1.5 py-0.2 bg-sol-green/10 text-sol-green border border-sol-green/20 rounded font-bold uppercase tracking-wider font-mono">Synced</span>
-                                </div>
-                                <div className="flex flex-col gap-0.5 text-[9.5px] font-mono leading-none">
-                                  <div className="flex justify-between"><span className="text-text-dim text-[8px] uppercase">Sentiment:</span><strong className="text-text-heading">{(weights.sentiment * 100).toFixed(0)}%</strong></div>
-                                  <div className="flex justify-between"><span className="text-text-dim text-[8px] uppercase">Technical:</span><strong className="text-text-heading">{(weights.technical * 100).toFixed(0)}%</strong></div>
-                                  <div className="flex justify-between"><span className="text-text-dim text-[8px] uppercase">Liquidity:</span><strong className="text-text-heading">{(weights.liquidity * 100).toFixed(0)}%</strong></div>
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Check frequency selection */}
-                            <div className="space-y-1.5 p-3.5 bg-bg-input border border-border-dim rounded-xl flex flex-col justify-between">
-                              <div>
-                                <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-heading block mb-1">Check Interval</label>
-                                <select
-                                  value={telegramConfig.frequency || 5}
-                                  onChange={(e) => setTelegramConfig({ ...telegramConfig, frequency: Number(e.target.value) })}
-                                  className="w-full bg-bg-card border border-border-dim rounded px-2 px-1.5 font-mono text-xs focus:outline-none focus:border-sol-purple text-text-heading cursor-pointer"
-                                >
-                                  <option value="1">Every 1m</option>
-                                  <option value="3">Every 3m</option>
-                                  <option value="5">Every 5m</option>
-                                  <option value="15">Every 15m</option>
-                                  <option value="30">Every 30m</option>
-                                  <option value="60">Every 1h</option>
-                                </select>
-                              </div>
-                            </div>
-
-                            {/* Cooldown period configuration */}
-                            <div className="space-y-1.5 p-3.5 bg-bg-input border border-border-dim rounded-xl flex flex-col justify-between">
-                              <div>
-                                <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-dim block mb-1">Alert Cooldown</label>
-                                <div className="w-full bg-bg-card/40 border border-border-dim rounded px-2 py-1.5 font-mono text-xs text-text-dim select-none">
-                                  0m (Deactivated - Always Alerts)
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Telegram Scraper Alignment Control */}
-                          <div className="border-t border-border-dim/55 mt-3 pt-3">
-                            <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-heading block mb-1">Telegram Live News Scraper Channel</label>
-                            <div className="flex gap-2">
-                              <input
-                                type="text"
-                                value={telegramConfig.newsTelegramChannel || ""}
-                                onChange={(e) => setTelegramConfig({ ...telegramConfig, newsTelegramChannel: e.target.value })}
-                                placeholder="e.g. https://t.me/+1C0c6rUVmjo3Y2Y8"
-                                className="flex-1 bg-bg-card border border-border-dim rounded px-3 py-1.5 font-mono text-xs focus:outline-none focus:border-sol-purple text-text-heading"
-                              />
-                            </div>
-                            <p className="text-[10px] text-text-dim mt-1.5 leading-normal">
-                              Specify any public channel username or private channel invite link to pull updates directly into the Catalyst news model. Scraped data feeds both active sentiment overlays and trend direction bias calculators.
-                            </p>
-                          </div>
-
-                          {/* Secondary Risk Controls & Timeframe configuration row */}
-                          <div className="border-t border-border-dim/55 my-3 pt-3">
-                            <div className="flex justify-between items-center mb-2.5">
-                              <span className="text-[10px] text-text-heading font-extrabold tracking-widest uppercase">Target Risk & Analytics Controls</span>
-                              <span className="text-[8px] px-1.5 py-0.2 bg-sol-purple/10 text-sol-purple border border-sol-purple/20 rounded font-normal uppercase font-mono">Unification Engine Lock</span>
-                            </div>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              {/* Analytics Timeframe Select */}
-                              <div className="space-y-1.5 p-3.5 bg-bg-input border border-border-dim rounded-xl flex flex-col justify-between">
-                                <div>
-                                  <div className="flex justify-between items-center mb-1">
-                                    <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-heading block mb-1">Analytic Timeframe</label>
-                                    <span className="text-[8px] px-1.5 py-0.2 bg-sol-green/10 text-sol-green border border-sol-green/20 rounded font-bold uppercase tracking-wider font-mono">Synced</span>
-                                  </div>
-                                  <span className="font-mono text-xs text-text-heading font-black">{interval} Bars</span>
-                                </div>
-                              </div>
-
-                              {/* Positioning Leverage */}
-                              <div className="space-y-1.5 p-3.5 bg-bg-input border border-border-dim rounded-xl flex flex-col justify-between">
-                                <div>
-                                  <label className="text-[9px] uppercase font-extrabold tracking-widest text-text-heading block mb-1">Position Leverage</label>
-                                  <select
-                                    value={telegramConfig.leverage || 5}
-                                    onChange={(e) => setTelegramConfig({ ...telegramConfig, leverage: Number(e.target.value) })}
-                                    className="w-full bg-bg-card border border-border-dim rounded px-2 py-1.5 font-mono text-xs focus:outline-none focus:border-sol-purple text-text-heading cursor-pointer"
-                                  >
-                                    <option value={1}>1x Spot Margin</option>
-                                    <option value={3}>3x Fast Leveraged</option>
-                                    <option value={5}>5x Standard Leveraged</option>
-                                    <option value={10}>10x High Leveraged</option>
-                                    <option value={20}>20x Ultra Leveraged</option>
-                                  </select>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Status Message display */}
-                      {telegramStatusMsg && (
-                        <div className={cn(
-                          "p-3 rounded-lg border text-xs leading-relaxed flex items-start gap-2",
-                          telegramStatusMsg.type === 'success' 
-                            ? "bg-sol-green/10 border-sol-green/35 text-sol-green" 
-                            : "bg-red-500/10 border-red-500/35 text-red-500"
-                        )}>
-                          {telegramStatusMsg.type === 'success' ? <Check className="w-4 h-4 shrink-0 mt-0.5" /> : <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />}
-                          <span>{telegramStatusMsg.text}</span>
-                        </div>
-                      )}
-
-                      {/* Submit & Test row */}
-                      <div className="flex flex-col sm:flex-row gap-4 pt-2">
-                        <button
-                          type="submit"
-                          disabled={telegramLoading}
-                          className="flex-1 px-4 py-2.5 bg-sol-purple text-white text-xs font-black uppercase tracking-wider rounded-lg hover:bg-sol-purple/90 transition-all disabled:opacity-50"
-                        >
-                          {telegramLoading ? "Syncing..." : "Save Configuration"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => handleSaveTelegramConfig(e, true, false)}
-                          disabled={telegramLoading}
-                          className="px-4 py-2.5 bg-bg-input border border-border-dim text-text-heading text-xs font-black uppercase tracking-wider rounded-lg hover:bg-border-dim/30 hover:border-text-dim/50 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-                        >
-                          <Send className="w-3.5 h-3.5" />
-                          Test Alert
-                        </button>
-                      </div>
-                      <div className="pt-2 border-t border-border-dim/30">
-                        <p className="text-[10px] text-text-dim mb-3 leading-relaxed">
-                          Force manual generation of the active real-time quantitative signal overlay. Overrides cooldowns to dispatch an alert instantly regardless of positional shifts.
-                        </p>
-                        <button
-                          type="button"
-                          onClick={(e) => handleSaveTelegramConfig(e, false, true)}
-                          disabled={telegramLoading}
-                          className="w-full px-4 py-2.5 bg-bg-input border-2 border-sol-green/30 text-sol-green text-xs font-black uppercase tracking-wider rounded-lg hover:bg-sol-green/10 hover:border-sol-green/50 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-                        >
-                          <Activity className="w-3.5 h-3.5" />
-                          Trigger Alert (Send Current Signal)
-                        </button>
-                      </div>
-                    </form>
-                  </Card>
-                </div>
-
-                {/* Instructions and daemon info - 5 cols */}
-                <div className="lg:col-span-12 xl:col-span-5 space-y-6">
-                  {/* Daemon State */}
-                  <Card title="Integration Vitality" icon={Activity}>
-                    <div className="space-y-4 text-xs font-mono">
-                      <div className="flex justify-between items-center pb-3 border-b border-border-dim/50">
-                        <span className="text-text-dim text-[10px] uppercase tracking-wider">Cron Engine Status</span>
-                        <span className={cn(
-                          "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest",
-                          telegramConfig.enabled ? "bg-sol-green/20 text-sol-green animate-pulse" : "bg-text-dim/20 text-text-dim"
-                        )}>
-                          {telegramConfig.enabled ? `Active (${telegramConfig.frequency || 5}m)` : "Disabled"}
-                        </span>
-                      </div>
-                      
-                      <div className="flex justify-between items-center pb-3 border-b border-border-dim/50">
-                        <span className="text-text-dim text-[10px] uppercase tracking-wider">Last Action Recorded</span>
-                        <span className="text-text-heading font-bold">{telegramConfig.lastAction || "None"}</span>
-                      </div>
-
-                      <div className="flex justify-between items-center pb-3 border-b border-border-dim/50">
-                        <span className="text-text-dim text-[10px] uppercase tracking-wider">Last Daemon Sync</span>
-                        <span className="text-text-heading">
-                          {telegramConfig.lastCheckedAt 
-                            ? format(new Date(telegramConfig.lastCheckedAt), "HH:mm:ss") + " (" + tzAbbr + ")"
-                            : "Waiting first fetch"
-                          }
-                        </span>
-                      </div>
-
-                      {/* Dynamic Trading Stats & Simulation PnL metrics */}
-                      <div className="pt-2 border-t border-border-dim/50 space-y-3">
-                        <span className="text-[10px] text-text-dim uppercase tracking-wider block font-bold font-sans">Trading Statistics (telegram_alert_v1)</span>
-                        
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="p-2.5 bg-bg-input rounded border border-border-dim/60">
-                            <span className="text-[9px] text-text-dim block uppercase">Last Trade PnL</span>
-                            <span className={cn(
-                              "text-sm font-black tracking-tight block mt-0.5",
-                              (telegramConfig.lastTradePnL || 0) > 0 ? "text-sol-green" : (telegramConfig.lastTradePnL || 0) < 0 ? "text-red-500" : "text-text-heading"
-                            )}>
-                              {telegramConfig.lastTradePnL !== undefined 
-                                ? `${(telegramConfig.lastTradePnL >= 0 ? "+" : "")}${telegramConfig.lastTradePnL.toFixed(2)}%`
-                                : "0.00%"
-                              }
-                            </span>
-                          </div>
-                          
-                          <div className="p-2.5 bg-bg-input rounded border border-border-dim/60">
-                            <span className="text-[9px] text-text-dim block uppercase">Cumulative PnL%</span>
-                            <span className={cn(
-                              "text-sm font-black tracking-tight block mt-0.5",
-                              (telegramConfig.cumulativePnL || 0) > 0 ? "text-sol-green" : (telegramConfig.cumulativePnL || 0) < 0 ? "text-red-500" : "text-text-heading"
-                            )}>
-                              {telegramConfig.cumulativePnL !== undefined
-                                ? `${(telegramConfig.cumulativePnL >= 0 ? "+" : "")}${telegramConfig.cumulativePnL.toFixed(2)}%`
-                                : "0.00%"
-                              }
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Active Trade / Positions */}
-                        <div className="pb-2 border-b border-border-dim/30">
-                          <span className="text-[9px] text-text-dim block uppercase">Active Simulation Position</span>
-                          {telegramConfig.activeTrade ? (
-                            <div className="mt-1 flex justify-between items-center p-2 bg-sol-purple/10 border border-sol-purple/20 rounded text-[11px]">
-                              <span className="flex items-center gap-1.5 font-bold text-text-heading">
-                                <span className={cn(
-                                  "w-2 h-2 rounded-full",
-                                  telegramConfig.activeTrade.side === "LONG" ? "bg-sol-green" : telegramConfig.activeTrade.side === "SHORT" ? "bg-red-500" : "bg-text-dim"
-                                )}></span>
-                                {telegramConfig.activeTrade.side} @ ${telegramConfig.activeTrade.entryPrice?.toFixed(2)}
-                              </span>
-                              <span className="text-text-dim text-[10px]">
-                                Entered {format(new Date(telegramConfig.activeTrade.entryTime), "HH:mm")}
-                              </span>
-                            </div>
-                          ) : (
-                            <span className="text-[10px] text-text-dim italic mt-1 block">FLAT (No Active Position)</span>
-                          )}
-                        </div>
-
-                        {/* Recent Trade History Logs */}
-                        {telegramConfig.tradesHistory && telegramConfig.tradesHistory.length > 0 && (
-                          <div className="space-y-1.5 max-h-[140px] overflow-y-auto pr-1">
-                            <div className="flex justify-between items-center mb-1 col-span-full">
-                              <span className="text-[9px] text-text-dim block uppercase font-bold">Recent Trade Logs</span>
-                              <button
-                                type="button"
-                                onClick={downloadTelegramTradeLogCSV}
-                                className="text-[8.5px] text-sol-purple font-bold uppercase tracking-wider hover:underline flex items-center gap-1 cursor-pointer"
-                                title="Download recent trade logs as CSV file"
-                              >
-                                <Download className="w-2.5 h-2.5" />
-                                Export CSV
-                              </button>
-                            </div>
-                             {telegramConfig.tradesHistory.map((trade: any) => {
-                               let durationStr = "";
-                               if (trade.entryTime && trade.exitTime) {
-                                 try {
-                                   const diffMs = new Date(trade.exitTime).getTime() - new Date(trade.entryTime).getTime();
-                                   const diffMins = Math.floor(diffMs / 60000);
-                                   if (diffMins < 60) {
-                                     durationStr = `${diffMins}m`;
-                                   } else {
-                                     const hrs = Math.floor(diffMins / 60);
-                                     const mins = diffMins % 60;
-                                     durationStr = `${hrs}h ${mins}m`;
-                                   }
-                                 } catch (e) {
-                                   durationStr = "";
-                                 }
-                               }
-                               return (
-                                 <div key={trade.id} className="flex flex-col p-1.5 border-b border-border-dim/20 last:border-none text-[10px] space-y-1">
-                                   <div className="flex justify-between items-center">
-                                     <div className="flex items-center gap-1.5">
-                                       <span className={cn(
-                                         "px-1 rounded text-[8px] font-black uppercase text-white",
-                                         trade.side === "LONG" ? "bg-sol-green" : trade.side === "SHORT" ? "bg-red-500" : "bg-text-dim"
-                                       )}>
-                                         {trade.side}
-                                       </span>
-                                       <span className="text-text-heading font-medium">
-                                         ${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)}
-                                       </span>
-                                     </div>
-                                     <span className={cn(
-                                       "font-bold font-mono",
-                                       trade.pnl >= 0 ? "text-sol-green" : "text-red-500"
-                                     )}>
-                                       {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}%
-                                     </span>
-                                   </div>
-                                   <div className="flex justify-between items-center text-[9px] text-text-dim">
-                                     <div className="flex items-center gap-2">
-                                       <span>TP: <span className="text-sol-green font-semibold">+{trade.takeProfitPct !== undefined ? trade.takeProfitPct : 4}%</span></span>
-                                       <span>SL: <span className="text-red-400 font-semibold">-{trade.stopLossPct !== undefined ? trade.stopLossPct : 2}%</span></span>
-                                     </div>
-                                     {durationStr && <span>Time: <span className="font-semibold text-text-heading">{durationStr}</span></span>}
-                                     {trade.sentiment !== undefined && (
-                                       <div className="flex flex-col text-[8.5px] text-text-dim border-t border-border-dim/15 pt-1 mt-1 space-y-0.5 w-full">
-                                         <div className="flex justify-between items-center text-[9px]">
-                                           <span>Sentiment Score: <span className="font-semibold text-sol-purple">{trade.sentiment?.toFixed(2)}</span></span>
-                                           {trade.technicalScore !== undefined && (
-                                             <span>Technical Score: <span className="font-semibold text-sol-purple">{(trade.technicalScore >= 0 ? "+" : "") + trade.technicalScore.toFixed(2)}</span></span>
-                                           )}
-                                         </div>
-                                         {trade.news && trade.news.length > 0 && (
-                                           <div className="text-left font-mono text-[8px] text-text-dim/85 w-full space-y-0.5 mt-1 border-t border-border-dim/5 pt-1">
-                                             <span className="font-sans font-bold block text-[7px] uppercase tracking-wider text-text-dim">Neural News Catalysts:</span>
-                                             {trade.news.slice(0, 5).map((item: any, nIdx: number) => {
-                                               const isObj = item && typeof item === "object";
-                                                const title = isObj ? item.title : item;
-                                                const score = isObj && item.sentiment !== undefined ? item.sentiment : null;
-                                                const publishedAt = isObj ? item.publishedAt : null;
-                                                let ageText = "";
-                                                if (publishedAt) {
-                                                  try {
-                                                    const diff = Date.now() - new Date(publishedAt).getTime();
-                                                    const mins = Math.round(diff / 60000);
-                                                    if (mins < 60) {
-                                                      ageText = `${mins}m ago`;
-                                                    } else {
-                                                      ageText = `${Math.round(mins / 60)}h ago`;
-                                                    }
-                                                  } catch (e) {}
-                                                }
-                                                return (
-                                                  <div key={nIdx} className="flex flex-col border-b border-border-dim/5 last:border-0 pb-1 pt-0.5">
-                                                    <div className="truncate font-serif text-[8.5px] text-text-heading" title={title} style={{ maxWidth: "240px" }}>
-                                                      📰 {nIdx + 1}. {title}
-                                                    </div>
-                                                    <div className="flex gap-2 items-center text-[7px] text-text-dim font-mono tracking-wider pl-4 uppercase">
-                                                      {score !== null && (
-                                                        <span className={cn(
-                                                          "font-semibold",
-                                                          score > 0.1 ? "text-sol-green" : score < -0.1 ? "text-red-400" : "text-text-dim"
-                                                        )}>
-                                                          Score: {score > 0 ? "+" : ""}{score.toFixed(2)}
-                                                        </span>
-                                                      )}
-                                                      {ageText && <span>• {ageText}</span>}
-                                                      {isObj && item.source && <span>• {item.source}</span>}
-                                                    </div>
-                                                  </div>
-                                                );
-                                             })}
-                                           </div>
-                                         )}
-                                       </div>
-                                     )}
-                                   </div>
-                                 </div>
-                               );
-                             })}
-                          </div>
-                        )}
-
-                        {/* Daemon Audit Log table display */}
-                        <div className="pt-3 border-t border-border-dim/30 space-y-2">
-                          <span className="text-[9px] text-text-dim uppercase tracking-wider block font-bold font-sans">Daemon Audit Log</span>
-                          {telegramConfig.auditLogs && telegramConfig.auditLogs.length > 0 ? (
-                            <div className="space-y-2 max-h-[160px] overflow-y-auto pr-1">
-                              {telegramConfig.auditLogs.slice().reverse().map((log: any) => {
-                                const isCooldownType = log.type === 'cooldown';
-                                const isHoldType = log.type === 'hold';
-                                let timestampFormatted = "";
-                                try {
-                                  timestampFormatted = format(new Date(log.timestamp), "HH:mm:ss");
-                                } catch (err) {
-                                  timestampFormatted = String(log.timestamp);
-                                }
-                                return (
-                                  <div key={log.id} className="text-[10px] py-1.5 border-b border-border-dim/15 last:border-none leading-relaxed flex flex-col gap-0.5">
-                                    <div className="flex justify-between items-center">
-                                      <span className={cn(
-                                        "px-1.5 py-0.2 rounded-[3px] text-[7.5px] font-black uppercase font-mono tracking-wider text-white",
-                                        isCooldownType ? "bg-sol-purple" : isHoldType ? "bg-text-dim/85" : "bg-blue-500/80"
-                                      )}>
-                                        {log.type}
-                                      </span>
-                                      <div className="flex items-center gap-1.5">
-                                        {log.version && (
-                                          <span className="text-[8px] font-mono text-text-dim/75 bg-bg-input border border-border-dim px-1 py-0.2 rounded" title={`Executed under version ${log.version}`}>
-                                            {log.version.startsWith("v") ? log.version : `v${log.version}`}
-                                          </span>
-                                        )}
-                                        <span className="text-[8px] text-text-dim font-mono">{timestampFormatted}</span>
-                                      </div>
-                                    </div>
-                                    <p className="text-text-heading/90 font-mono text-[9px] leading-normal">{log.message}</p>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          ) : (
-                            <span className="text-[10px] text-text-dim italic mt-1 block">No operations audited yet.</span>
-                          )}
-                        </div>
-
-                        {/* Reset telemetry statistics button */}
-                        <div className="pt-1">
-                          <button
-                            type="button"
-                            onClick={handleResetTelegramStats}
-                            disabled={telegramLoading}
-                            className="w-full text-center text-[10px] font-bold uppercase tracking-wider py-1.5 px-3 rounded bg-red-500/10 hover:bg-red-500/15 text-red-400 border border-red-500/20 active:scale-95 transition-all cursor-pointer"
-                          >
-                            Reset Simulation Stats & Logs
-                          </button>
-                        </div>
-                      </div>
-
-                      {telegramConfig.error && (
-                        <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-500 rounded text-[10px] leading-relaxed">
-                          <p className="font-bold mb-1">Last Error Logged:</p>
-                          <p className="break-words font-mono font-normal">{telegramConfig.error}</p>
-                        </div>
-                      )}
-                    </div>
-                  </Card>
-                </div>
-              </div>
             </div>
           </main>
         ) : (

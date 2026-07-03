@@ -15,7 +15,7 @@
   },
   "lastAction": "Hold (Σ below threshold)",
   "lastSentDirection": "HOLD",
-  "frequency": 5,
+  "frequency": 20,
   "cooldownMinutes": 30,
   "lastTradeAddedAt": "",
   "lastTradePnL": 0,
