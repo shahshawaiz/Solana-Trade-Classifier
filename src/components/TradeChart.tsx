@@ -23,9 +23,14 @@ interface TradeChartTrade {
   reconciled?: boolean;
   pnl: number;
   closeReason?: string;
+  entryReason?: string;
+  entryMarket?: string;
+  exitMarket?: string;
   sentiment?: number;
   technicalScore?: number;
   news?: any[];
+  version?: string;
+  closeVersion?: string;
 }
 
 interface TradeChartProps {
@@ -106,6 +111,10 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
     return () => { cancelled = true; };
   }, [entryMs, exitMs, interval, token]);
 
+  // Only used to place the markers on the time axis (nearest candle to the real fill time) —
+  // NOT for their price (y) position. Using the candle's `close` for y previously meant the dots
+  // could sit in the wrong relative order (e.g. a losing LONG's exit dot drawn above its entry
+  // dot) whenever the nearest candle's close differed from the trade's actual recorded fill price.
   const entrySnap = useMemo(() => nearestQuote(quotes, entryMs), [quotes, entryMs]);
   const exitSnap = useMemo(() => nearestQuote(quotes, exitMs), [quotes, exitMs]);
 
@@ -114,6 +123,21 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
   const isWin = trade.pnl >= 0;
   const entryColor = "#3b82f6"; // neutral blue — marks "open", regardless of side/outcome
   const exitColor = isWin ? "#22c55e" : "#ef4444";
+
+  // Recharts only auto-fits the Y axis to the line's own data (candle closes) — the actual fill
+  // prices can sit just outside that range (slippage vs. the nearest candle), which would clip
+  // the reference dots. Expand the domain to guarantee both markers are always visible.
+  const yDomain = useMemo((): [number, number] | ["auto", "auto"] => {
+    const values: number[] = [];
+    quotes.forEach((q) => { values.push(q.high, q.low); });
+    if (typeof entryPriceDisplay === "number") values.push(entryPriceDisplay);
+    if (typeof exitPriceDisplay === "number") values.push(exitPriceDisplay);
+    if (!values.length) return ["auto", "auto"];
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const pad = (max - min) * 0.08 || max * 0.01 || 1;
+    return [min - pad, max + pad];
+  }, [quotes, entryPriceDisplay, exitPriceDisplay]);
 
   let entryTimeStr = "";
   let exitTimeStr = "";
@@ -154,7 +178,7 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
             <YAxis
               stroke="#94a3b8"
               fontSize={8}
-              domain={["auto", "auto"]}
+              domain={yDomain}
               tickFormatter={(v) => `$${Number(v).toFixed(2)}`}
               width={55}
             />
@@ -164,10 +188,10 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
               formatter={(v: any) => [`$${Number(v).toFixed(2)}`, "Price"]}
             />
             <Line type="monotone" dataKey="close" stroke="#8b5cf6" strokeWidth={1.5} dot={false} name={`${token} Price`} isAnimationActive={false} />
-            {entrySnap && (
+            {entrySnap && typeof entryPriceDisplay === "number" && (
               <ReferenceDot
                 x={entrySnap.time}
-                y={entrySnap.close}
+                y={entryPriceDisplay}
                 r={6}
                 shape={(props: any) => (
                   <circle
@@ -185,10 +209,10 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
                 )}
               />
             )}
-            {exitSnap && (
+            {exitSnap && typeof exitPriceDisplay === "number" && (
               <ReferenceDot
                 x={exitSnap.time}
-                y={exitSnap.close}
+                y={exitPriceDisplay}
                 r={6}
                 shape={(props: any) => (
                   <circle
@@ -210,9 +234,15 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
         </ResponsiveContainer>
       </div>
 
-      <div className="flex items-center gap-4 text-[8px] uppercase font-bold tracking-wider text-text-dim px-1 mt-1">
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full" style={{ backgroundColor: entryColor }} /> Entry</span>
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full" style={{ backgroundColor: exitColor }} /> Exit ({isWin ? "Win" : "Loss"})</span>
+      <div className="flex items-center gap-4 text-[8px] uppercase font-bold tracking-wider text-text-dim px-1 mt-1 flex-wrap">
+        <span className="flex items-center gap-1">
+          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: entryColor }} /> Entry
+          <span className="normal-case font-normal text-text-dim/70 font-mono">{entryTimeStr}</span>
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: exitColor }} /> Exit ({isWin ? "Win" : "Loss"})
+          <span className="normal-case font-normal text-text-dim/70 font-mono">{exitTimeStr}</span>
+        </span>
         <span className="normal-case font-normal text-text-dim/70">hover or tap a marker for details</span>
       </div>
 
@@ -223,6 +253,12 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
             <span className="font-mono text-blue-400">${entryPriceDisplay?.toFixed(2)}</span>
           </div>
           <div className="text-text-dim font-mono">{entryTimeStr}</div>
+          {trade.entryMarket && (
+            <div className="text-text-dim">Market: <strong className="text-text-heading">{trade.entryMarket}</strong></div>
+          )}
+          {trade.version && (
+            <div className="text-text-dim">Build: <strong className="text-text-heading font-mono">{trade.version.startsWith("v") ? trade.version : `v${trade.version}`}</strong></div>
+          )}
           {(trade.sentiment !== undefined && trade.sentiment !== null) || (trade.technicalScore !== undefined && trade.technicalScore !== null) ? (
             <div className="grid grid-cols-2 gap-1.5 font-mono pt-1 border-t border-border-dim/30">
               {trade.sentiment !== undefined && trade.sentiment !== null && (
@@ -251,6 +287,12 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
             <span className={`font-mono ${isWin ? "text-sol-green" : "text-red-400"}`}>${exitPriceDisplay?.toFixed(2)}</span>
           </div>
           <div className="text-text-dim font-mono">{exitTimeStr}</div>
+          {trade.exitMarket && (
+            <div className="text-text-dim">Market: <strong className="text-text-heading">{trade.exitMarket}</strong></div>
+          )}
+          {trade.closeVersion && (
+            <div className="text-text-dim">Build: <strong className="text-text-heading font-mono">{trade.closeVersion.startsWith("v") ? trade.closeVersion : `v${trade.closeVersion}`}</strong></div>
+          )}
           <div className={`font-mono font-bold ${isWin ? "text-sol-green" : "text-red-400"}`}>
             {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}%
           </div>

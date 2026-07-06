@@ -3714,7 +3714,8 @@ export async function checkPredictionAndAlert(forceAlert = false) {
             }
 
             const sigmaT = pred.strategyDetails?.compositeScore ?? 0;
-            const entryReason = `${pred.action} · Σ=${(sigmaT >= 0 ? "+" : "") + sigmaT.toFixed(3)} · trend ${pred.trend} (3x confirmed)` +
+            const strategyLabelT = pred.trend === "RANGE-FADE" ? "Mean-Reversion" : "Momentum";
+            const entryReason = `[${strategyLabelT}] ${pred.action} · Σ=${(sigmaT >= 0 ? "+" : "") + sigmaT.toFixed(3)} · trend ${pred.trend} (3x confirmed)` +
               ` · macro ${macroRegimeT} · px $${pred.price.toFixed(2)}`;
             const entryMarket = marketStateStr(pred.trend, macroRegimeT);
 
@@ -4388,8 +4389,6 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
     let cumulativePnL = config.cumulativePnL || 0;
     let tradesHistory = config.tradesHistory || [];
 
-    const action = pred.action; // "Long Buy" | "Short Sell" | "Long Sell (Overbought)" | "Short Buy (Oversold)" | "Hold"
-
     let exitPrice = pred.price;
     // Attempt to source real-time pricing from Jupiter's DEX price quote
     const jupPrice = await getJupiterQuotePrice();
@@ -4397,14 +4396,13 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       exitPrice = jupPrice;
     }
 
-    let enterSide: "LONG" | "SHORT" | "HOLD" | null = null;
-    if (action === "Long Buy" || action === "Short Buy (Oversold)") {
-      enterSide = "LONG";
-    } else if (action === "Short Sell" || action === "Long Sell (Overbought)") {
-      enterSide = "SHORT";
-    } else if (action === "Hold") {
-      enterSide = "HOLD";
-    }
+    // Use positionSide directly (LONG/SHORT/HOLD) rather than pattern-matching the `action` text.
+    // The old string-equality check only recognized the momentum-path reason strings, so any
+    // mean-reversion range-fade signal (action = "Range Fade — rejected off ...") silently fell
+    // through to enterSide = null and could never open live — even though meanReversionEnabled
+    // defaults to true and the (canonical) /api/backtest engine already consumes positionSide
+    // directly and trades it correctly. This is the same pattern the telegram_alert_v1 daemon uses.
+    let enterSide: "LONG" | "SHORT" | "HOLD" | null = (pred.positionSide as "LONG" | "SHORT" | "HOLD" | undefined) ?? null;
 
     if (forceTrigger) {
       if (!enterSide || enterSide === "HOLD") {
@@ -4773,7 +4771,13 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       {
         const sigma = pred.strategyDetails?.compositeScore ?? 0;
         const adx = (pred as any).indicators?.adx14;
-        const ctx = `Σ=${(sigma >= 0 ? "+" : "") + sigma.toFixed(3)} vs ±${SIGNAL_THRESHOLD} · ${pred.action}` +
+        // Lead with which strategy path actually fired — RANGE-FADE means resolveEntry switched
+        // to mean-reversion (ADX <= ADX_GATE_MIN, fading a range-edge rejection); anything else is
+        // the momentum path (composite score Σ vs threshold, gated by trend/Supertrend/MACD-RSI).
+        // Traders reading the journal shouldn't have to infer this from the raw Σ number.
+        const strategyLabel = pred.trend === "RANGE-FADE" ? "Mean-Reversion" : "Momentum";
+        const ctx = `[${strategyLabel}] ${pred.action}` +
+          ` · Σ=${(sigma >= 0 ? "+" : "") + sigma.toFixed(3)} vs ±${SIGNAL_THRESHOLD}` +
           ` · trend ${pred.trend}${adx !== undefined ? ` · ADX ${adx.toFixed(0)}` : ""}` +
           ` · macro ${macroRegimeNote} · px $${pred.price?.toFixed(2)}`;
         if (canEnter) {
@@ -5009,6 +5013,25 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           try {
             // Execute REAL on-chain open via the Jupiter Perps CLI
             if (config.privateKey && mode !== "PAPER") {
+              // Guard against pyramiding: `activeTrade` is our local tracker and can desync from
+              // the real wallet (missed save before a restart, a manual close/open outside the
+              // daemon, etc). Re-check the actual on-chain position right before firing a new
+              // OPEN — without this, a desync silently doubles exposure (two OPENs stacked on the
+              // same asset, only caught on the eventual combined CLOSE).
+              try {
+                const preOpenPositions = await runJupCli(["perps", "positions", "--key", jupCliKeyName(config)]);
+                const existing = ((preOpenPositions && preOpenPositions.positions) || []).find(
+                  (p: any) => String(p.asset).toUpperCase() === String(config.token || "SOL").toUpperCase()
+                );
+                if (existing) {
+                  throw new Error(`Refusing to OPEN — an on-chain position for ${config.token} already exists (${existing.positionPubkey || "unknown"}). Local activeTrade state was desynced.`);
+                }
+              } catch (guardErr: any) {
+                if (guardErr instanceof Error && guardErr.message.startsWith("Refusing to OPEN")) throw guardErr;
+                // CLI/network hiccup on the check itself — don't block trading on a transient error.
+                console.error("[Jupiter Daemon] Pre-open position check failed (continuing):", guardErr.message);
+              }
+
               console.log(`[Jupiter Perps] Executing REAL onchain OPEN: ${enterSide} ${config.token} (notional ${sizeInSol.toFixed(4)} units)`);
               const signature = await executeOnChainTradeServerSide(enterSide as "LONG" | "SHORT", sizeInSol, { tpPct, slPct, collateralAsset });
               if (signature) {
