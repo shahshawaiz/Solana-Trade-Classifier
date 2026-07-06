@@ -31,6 +31,7 @@ interface TradeChartTrade {
   news?: any[];
   version?: string;
   closeVersion?: string;
+  backfilled?: boolean;
 }
 
 interface TradeChartProps {
@@ -256,9 +257,11 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
           {trade.entryMarket && (
             <div className="text-text-dim">Market: <strong className="text-text-heading">{trade.entryMarket}</strong></div>
           )}
-          {trade.version && (
+          {trade.version ? (
             <div className="text-text-dim">Build: <strong className="text-text-heading font-mono">{trade.version.startsWith("v") ? trade.version : `v${trade.version}`}</strong></div>
-          )}
+          ) : trade.backfilled ? (
+            <div className="text-text-dim" title="Reconstructed from on-chain history — the chain doesn't carry a build tag.">Build: <strong className="text-text-heading font-mono">n/a (on-chain)</strong></div>
+          ) : null}
           {(trade.sentiment !== undefined && trade.sentiment !== null) || (trade.technicalScore !== undefined && trade.technicalScore !== null) ? (
             <div className="grid grid-cols-2 gap-1.5 font-mono pt-1 border-t border-border-dim/30">
               {trade.sentiment !== undefined && trade.sentiment !== null && (
@@ -290,9 +293,11 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
           {trade.exitMarket && (
             <div className="text-text-dim">Market: <strong className="text-text-heading">{trade.exitMarket}</strong></div>
           )}
-          {trade.closeVersion && (
+          {trade.closeVersion ? (
             <div className="text-text-dim">Build: <strong className="text-text-heading font-mono">{trade.closeVersion.startsWith("v") ? trade.closeVersion : `v${trade.closeVersion}`}</strong></div>
-          )}
+          ) : trade.backfilled ? (
+            <div className="text-text-dim" title="Reconstructed from on-chain history — the chain doesn't carry a build tag.">Build: <strong className="text-text-heading font-mono">n/a (on-chain)</strong></div>
+          ) : null}
           <div className={`font-mono font-bold ${isWin ? "text-sol-green" : "text-red-400"}`}>
             {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}%
           </div>

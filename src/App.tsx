@@ -5474,12 +5474,16 @@ export default function App() {
                                 {trade.side}{trade.leverage ? ` (${trade.leverage}x)` : ""}
                               </span>
                               <span className="text-[8.5px] uppercase tracking-wider text-text-dim font-bold px-1.5 py-0.5 rounded bg-bg-input border border-border-dim">{trade.source}</span>
-                              {trade.version && (
+                              {trade.version ? (
                                 <span className="text-[8.5px] font-mono text-text-dim px-1.5 py-0.5 rounded bg-bg-input border border-border-dim" title={`Executed under version ${trade.version}${trade.closeVersion && trade.closeVersion !== trade.version ? `, settled under ${trade.closeVersion}` : ""}`}>
                                   {trade.version.startsWith("v") ? trade.version : `v${trade.version}`}
                                   {trade.closeVersion && trade.closeVersion !== trade.version && ` ➔ ${trade.closeVersion.startsWith("v") ? trade.closeVersion : `v${trade.closeVersion}`}`}
                                 </span>
-                              )}
+                              ) : trade.backfilled ? (
+                                <span className="text-[8.5px] font-mono text-text-dim px-1.5 py-0.5 rounded bg-bg-input border border-border-dim" title="Reconstructed from Jupiter's on-chain trade history, not recorded live by the daemon — the chain doesn't carry a build/version tag, so it can't be shown for this trade.">
+                                  ⛓ build n/a (on-chain)
+                                </span>
+                              ) : null}
                             </div>
                             <div className="flex flex-col items-end">
                               <span className={cn(

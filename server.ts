@@ -1382,6 +1382,11 @@ function mapJournalTrades(reconciled: any[]) {
       news: t.news || [],
       version: t.version,
       closeVersion: t.closeVersion,
+      // Rows reconstructed purely from `jup perps history` (see buildTradesFromJupHistory) never
+      // had a daemon-tracked build stamped on them — the chain doesn't record which commit
+      // executed a trade. Surface that distinction so the UI can explain a missing version
+      // instead of silently omitting it (looks like a bug otherwise).
+      backfilled: !!t.backfilled,
     };
   }).sort((a, b) => new Date(b.exitTime || 0).getTime() - new Date(a.exitTime || 0).getTime());
 }
