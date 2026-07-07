@@ -4394,6 +4394,8 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
     let cumulativePnL = config.cumulativePnL || 0;
     let tradesHistory = config.tradesHistory || [];
 
+    const action = pred.action; // "Long Buy" | "Short Sell" | "Long Sell (Overbought)" | "Short Buy (Oversold)" | "Hold"
+
     let exitPrice = pred.price;
     // Attempt to source real-time pricing from Jupiter's DEX price quote
     const jupPrice = await getJupiterQuotePrice();
@@ -4401,13 +4403,14 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       exitPrice = jupPrice;
     }
 
-    // Use positionSide directly (LONG/SHORT/HOLD) rather than pattern-matching the `action` text.
-    // The old string-equality check only recognized the momentum-path reason strings, so any
-    // mean-reversion range-fade signal (action = "Range Fade — rejected off ...") silently fell
-    // through to enterSide = null and could never open live — even though meanReversionEnabled
-    // defaults to true and the (canonical) /api/backtest engine already consumes positionSide
-    // directly and trades it correctly. This is the same pattern the telegram_alert_v1 daemon uses.
-    let enterSide: "LONG" | "SHORT" | "HOLD" | null = (pred.positionSide as "LONG" | "SHORT" | "HOLD" | undefined) ?? null;
+    let enterSide: "LONG" | "SHORT" | "HOLD" | null = null;
+    if (action === "Long Buy" || action === "Short Buy (Oversold)") {
+      enterSide = "LONG";
+    } else if (action === "Short Sell" || action === "Long Sell (Overbought)") {
+      enterSide = "SHORT";
+    } else if (action === "Hold") {
+      enterSide = "HOLD";
+    }
 
     if (forceTrigger) {
       if (!enterSide || enterSide === "HOLD") {
