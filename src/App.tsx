@@ -26,7 +26,9 @@ import {
   Terminal,
   ChevronDown,
   ChevronUp,
-  X
+  X,
+  LayoutGrid,
+  List
 } from "lucide-react";
 import { 
   LineChart, 
@@ -314,6 +316,116 @@ const TradeBubbles = ({ trade, livePrice }: { trade: any; livePrice?: number }) 
     </div>
   );
 };
+
+// Shared between the grid and table Trade Journal views so the two layouts don't drift.
+const TradeDetailFields = ({ trade }: { trade: any }) => {
+  const durationStr = trade.durationMins !== null && trade.durationMins !== undefined
+    ? (trade.durationMins >= 60 ? `${Math.floor(trade.durationMins / 60)}h ${trade.durationMins % 60}m` : `${trade.durationMins}m`)
+    : "—";
+  return (
+    <div className="space-y-1 text-text-dim border-t border-border-dim/20 pt-2 font-mono">
+      <div className="flex justify-between">
+        <span>Price Swap:</span>
+        <span className="text-text-heading font-medium">
+          ${(trade.entryPriceActual ?? trade.entryPrice)?.toFixed(2)} ➔ ${(trade.exitPriceActual ?? trade.exitPrice)?.toFixed(2)}
+          {trade.reconciled && trade.entryPriceActual !== undefined && (
+            <span className="text-text-dim font-normal"> (est. ${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)})</span>
+          )}
+        </span>
+      </div>
+      {trade.sizeInSol !== undefined && trade.sizeInSol !== null && (
+        <div className="flex justify-between"><span>Sizing:</span><span className="text-text-heading font-medium">{Number(trade.sizeInSol).toFixed(3)} SOL</span></div>
+      )}
+      {trade.reconciled && trade.feesUsd !== undefined && (
+        <div className="flex justify-between">
+          <span>Fees:</span>
+          <span className="text-text-heading font-medium">
+            ${Number(trade.feesUsd).toFixed(2)}
+            {(trade.openFeeUsd !== undefined && trade.closeFeeUsd !== undefined) && (
+              <span className="text-text-dim font-normal"> (open ${Number(trade.openFeeUsd).toFixed(2)} + close ${Number(trade.closeFeeUsd).toFixed(2)})</span>
+            )}
+          </span>
+        </div>
+      )}
+      <div className="flex justify-between"><span>Duration:</span><span className="text-text-heading font-medium">{durationStr}</span></div>
+      {trade.takeProfitPct !== undefined && (
+        <div className="flex justify-between"><span>Limits:</span><span>TP: <span className="text-sol-green font-semibold">+{Number(trade.takeProfitPct).toFixed(1)}%</span> · SL: <span className="text-red-400 font-semibold">-{Number(trade.stopLossPct ?? 0).toFixed(1)}%</span></span></div>
+      )}
+      {trade.entryMarket && (
+        <div className="flex justify-between gap-2"><span className="shrink-0">Market (Entry):</span><span className="text-text-heading font-medium text-right">{trade.entryMarket}</span></div>
+      )}
+      {trade.entryReason && (
+        <div className="flex justify-between gap-2"><span className="shrink-0">Entry:</span><span className="text-text-heading font-medium text-right">{trade.entryReason}</span></div>
+      )}
+      {trade.exitMarket && trade.exitMarket !== trade.entryMarket && (
+        <div className="flex justify-between gap-2"><span className="shrink-0">Market (Exit):</span><span className="text-text-heading font-medium text-right">{trade.exitMarket}</span></div>
+      )}
+      {trade.closeReason && (
+        <div className="flex justify-between gap-2"><span className="shrink-0">Exit:</span><span className="text-text-heading font-medium text-right">{trade.closeReason}</span></div>
+      )}
+      {(trade.openSignature || trade.closeSignature) && (
+        <div className="flex justify-between gap-2 text-[8.5px]">
+          <span>Tx:</span>
+          <span className="flex gap-2">
+            {trade.openSignature && <a href={`https://solscan.io/tx/${trade.openSignature}`} target="_blank" rel="noopener noreferrer" className="text-sol-purple hover:underline">open ↗</a>}
+            {trade.closeSignature && <a href={`https://solscan.io/tx/${trade.closeSignature}`} target="_blank" rel="noopener noreferrer" className="text-sol-purple hover:underline">close ↗</a>}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const TradeSignalAndNews = ({ trade }: { trade: any }) => (
+  <>
+    {((trade.sentiment !== undefined && trade.sentiment !== null) || (trade.technicalScore !== undefined && trade.technicalScore !== null)) && (
+      <div className="flex flex-col text-[9.5px] text-text-dim border-t border-border-dim/20 pt-2 space-y-1">
+        <span className="font-sans font-bold text-[7.5px] uppercase tracking-wider text-text-dim">Signal breakdown</span>
+        <div className="grid grid-cols-2 gap-2 font-mono text-[9px]">
+          {trade.sentiment !== undefined && trade.sentiment !== null && (
+            <div className="flex justify-between bg-bg-input/40 px-1.5 py-0.5 rounded">
+              <span className="text-text-dim">Sent:</span>
+              <span className={cn("font-bold", trade.sentiment > 0 ? "text-sol-green" : trade.sentiment < 0 ? "text-red-400" : "text-text-heading")}>
+                {(trade.sentiment >= 0 ? "+" : "") + Number(trade.sentiment).toFixed(2)}
+              </span>
+            </div>
+          )}
+          {trade.technicalScore !== undefined && trade.technicalScore !== null && (
+            <div className="flex justify-between bg-bg-input/40 px-1.5 py-0.5 rounded">
+              <span className="text-text-dim">Tech:</span>
+              <span className={cn("font-bold", trade.technicalScore > 0 ? "text-sol-green" : trade.technicalScore < 0 ? "text-red-400" : "text-text-heading")}>
+                {(trade.technicalScore >= 0 ? "+" : "") + Number(trade.technicalScore).toFixed(2)}
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    )}
+
+    {trade.news && trade.news.length > 0 && (
+      <div className="text-left font-mono text-[8.5px] text-text-dim/85 border-t border-border-dim/20 pt-2 space-y-1">
+        <span className="font-sans font-bold block text-[7.5px] uppercase tracking-wider text-text-dim">News Catalysts</span>
+        <div className="space-y-1 max-h-[80px] overflow-y-auto custom-scrollbar pr-0.5">
+          {trade.news.slice(0, 3).map((item: any, nIdx: number) => {
+            const isObj = item && typeof item === "object";
+            const title = isObj ? item.title : item;
+            const score = isObj && item.sentiment !== undefined ? item.sentiment : null;
+            return (
+              <div key={nIdx} className="border-b border-border-dim/5 last:border-0 pb-1 flex flex-col">
+                <div className="truncate font-serif text-[8.5px] text-text-heading/90" title={title}>📰 {title}</div>
+                {score !== null && (
+                  <span className={cn("text-[7.5px] font-mono tracking-wider uppercase font-semibold", score > 0.1 ? "text-sol-green" : score < -0.1 ? "text-red-400" : "text-text-dim")}>
+                    Score: {score > 0 ? "+" : ""}{Number(score).toFixed(2)}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    )}
+  </>
+);
 
 export default function App() {
   const [data, setData] = useState<any[]>([]);
@@ -607,6 +719,7 @@ export default function App() {
   const [journalLoading, setJournalLoading] = useState(false);
   const [journalResyncing, setJournalResyncing] = useState(false);
   const [journalResyncMsg, setJournalResyncMsg] = useState<string | null>(null);
+  const [journalViewMode, setJournalViewMode] = useState<'grid' | 'table'>('grid');
   const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
   const [macroData, setMacroData] = useState<any | null>(null);
   const [macroLoading, setMacroLoading] = useState(false);
@@ -5439,9 +5552,33 @@ export default function App() {
 
               {/* Trade ledger */}
               <section className="space-y-3">
-                <span className="text-[10px] font-mono font-bold text-text-heading uppercase tracking-[0.2em] flex items-center gap-2 border-b border-border-dim/60 pb-2">
-                  <Table className="w-3 h-3 text-sol-purple" /> Trade Ledger
-                </span>
+                <div className="flex items-center justify-between gap-2 border-b border-border-dim/60 pb-2">
+                  <span className="text-[10px] font-mono font-bold text-text-heading uppercase tracking-[0.2em] flex items-center gap-2">
+                    <Table className="w-3 h-3 text-sol-purple" /> Trade Ledger
+                  </span>
+                  <div className="flex items-center gap-1 p-0.5 rounded-lg bg-bg-input border border-border-dim">
+                    <button
+                      type="button"
+                      onClick={() => setJournalViewMode('grid')}
+                      className={cn(
+                        "flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider py-1 px-2 rounded cursor-pointer transition-colors",
+                        journalViewMode === 'grid' ? "bg-sol-purple/20 text-sol-purple" : "text-text-dim hover:text-text-heading"
+                      )}
+                    >
+                      <LayoutGrid className="w-3 h-3" /> Grid
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setJournalViewMode('table')}
+                      className={cn(
+                        "flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider py-1 px-2 rounded cursor-pointer transition-colors",
+                        journalViewMode === 'table' ? "bg-sol-purple/20 text-sol-purple" : "text-text-dim hover:text-text-heading"
+                      )}
+                    >
+                      <List className="w-3 h-3" /> Table
+                    </button>
+                  </div>
+                </div>
                 {journalLoading ? (
                   <div className="text-center text-[11px] text-text-dim py-10 flex items-center justify-center gap-2">
                     <RefreshCw className="w-3 h-3 animate-spin" /> Loading journal…
@@ -5450,7 +5587,7 @@ export default function App() {
                   <div className="text-center text-[11px] text-text-dim py-10">
                     No closed trades recorded yet. Positions appear here once the autonomous engines settle them.
                   </div>
-                ) : (
+                ) : journalViewMode === 'grid' ? (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     {journalData.trades.map((trade: any) => {
                       const durationStr = trade.durationMins !== null && trade.durationMins !== undefined
@@ -5534,104 +5671,8 @@ export default function App() {
                             )}
                           </div>
 
-                          <div className="space-y-1 text-text-dim border-t border-border-dim/20 pt-2 font-mono">
-                            <div className="flex justify-between">
-                              <span>Price Swap:</span>
-                              <span className="text-text-heading font-medium">
-                                ${(trade.entryPriceActual ?? trade.entryPrice)?.toFixed(2)} ➔ ${(trade.exitPriceActual ?? trade.exitPrice)?.toFixed(2)}
-                                {trade.reconciled && trade.entryPriceActual !== undefined && (
-                                  <span className="text-text-dim font-normal"> (est. ${trade.entryPrice?.toFixed(2)} ➔ ${trade.exitPrice?.toFixed(2)})</span>
-                                )}
-                              </span>
-                            </div>
-                            {trade.sizeInSol !== undefined && trade.sizeInSol !== null && (
-                              <div className="flex justify-between"><span>Sizing:</span><span className="text-text-heading font-medium">{Number(trade.sizeInSol).toFixed(3)} SOL</span></div>
-                            )}
-                            {trade.reconciled && trade.feesUsd !== undefined && (
-                              <div className="flex justify-between">
-                                <span>Fees:</span>
-                                <span className="text-text-heading font-medium">
-                                  ${Number(trade.feesUsd).toFixed(2)}
-                                  {(trade.openFeeUsd !== undefined && trade.closeFeeUsd !== undefined) && (
-                                    <span className="text-text-dim font-normal"> (open ${Number(trade.openFeeUsd).toFixed(2)} + close ${Number(trade.closeFeeUsd).toFixed(2)})</span>
-                                  )}
-                                </span>
-                              </div>
-                            )}
-                            <div className="flex justify-between"><span>Duration:</span><span className="text-text-heading font-medium">{durationStr}</span></div>
-                            {trade.takeProfitPct !== undefined && (
-                              <div className="flex justify-between"><span>Limits:</span><span>TP: <span className="text-sol-green font-semibold">+{Number(trade.takeProfitPct).toFixed(1)}%</span> · SL: <span className="text-red-400 font-semibold">-{Number(trade.stopLossPct ?? 0).toFixed(1)}%</span></span></div>
-                            )}
-                            {trade.entryMarket && (
-                              <div className="flex justify-between gap-2"><span className="shrink-0">Market (Entry):</span><span className="text-text-heading font-medium text-right">{trade.entryMarket}</span></div>
-                            )}
-                            {trade.entryReason && (
-                              <div className="flex justify-between gap-2"><span className="shrink-0">Entry:</span><span className="text-text-heading font-medium text-right">{trade.entryReason}</span></div>
-                            )}
-                            {trade.exitMarket && trade.exitMarket !== trade.entryMarket && (
-                              <div className="flex justify-between gap-2"><span className="shrink-0">Market (Exit):</span><span className="text-text-heading font-medium text-right">{trade.exitMarket}</span></div>
-                            )}
-                            {trade.closeReason && (
-                              <div className="flex justify-between gap-2"><span className="shrink-0">Exit:</span><span className="text-text-heading font-medium text-right">{trade.closeReason}</span></div>
-                            )}
-                            {(trade.openSignature || trade.closeSignature) && (
-                              <div className="flex justify-between gap-2 text-[8.5px]">
-                                <span>Tx:</span>
-                                <span className="flex gap-2">
-                                  {trade.openSignature && <a href={`https://solscan.io/tx/${trade.openSignature}`} target="_blank" rel="noopener noreferrer" className="text-sol-purple hover:underline">open ↗</a>}
-                                  {trade.closeSignature && <a href={`https://solscan.io/tx/${trade.closeSignature}`} target="_blank" rel="noopener noreferrer" className="text-sol-purple hover:underline">close ↗</a>}
-                                </span>
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Signal breakdown */}
-                          {((trade.sentiment !== undefined && trade.sentiment !== null) || (trade.technicalScore !== undefined && trade.technicalScore !== null)) && (
-                            <div className="flex flex-col text-[9.5px] text-text-dim border-t border-border-dim/20 pt-2 space-y-1">
-                              <span className="font-sans font-bold text-[7.5px] uppercase tracking-wider text-text-dim">Signal breakdown</span>
-                              <div className="grid grid-cols-2 gap-2 font-mono text-[9px]">
-                                {trade.sentiment !== undefined && trade.sentiment !== null && (
-                                  <div className="flex justify-between bg-bg-input/40 px-1.5 py-0.5 rounded">
-                                    <span className="text-text-dim">Sent:</span>
-                                    <span className={cn("font-bold", trade.sentiment > 0 ? "text-sol-green" : trade.sentiment < 0 ? "text-red-400" : "text-text-heading")}>
-                                      {(trade.sentiment >= 0 ? "+" : "") + Number(trade.sentiment).toFixed(2)}
-                                    </span>
-                                  </div>
-                                )}
-                                {trade.technicalScore !== undefined && trade.technicalScore !== null && (
-                                  <div className="flex justify-between bg-bg-input/40 px-1.5 py-0.5 rounded">
-                                    <span className="text-text-dim">Tech:</span>
-                                    <span className={cn("font-bold", trade.technicalScore > 0 ? "text-sol-green" : trade.technicalScore < 0 ? "text-red-400" : "text-text-heading")}>
-                                      {(trade.technicalScore >= 0 ? "+" : "") + Number(trade.technicalScore).toFixed(2)}
-                                    </span>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          )}
-
-                          {trade.news && trade.news.length > 0 && (
-                            <div className="text-left font-mono text-[8.5px] text-text-dim/85 border-t border-border-dim/20 pt-2 space-y-1">
-                              <span className="font-sans font-bold block text-[7.5px] uppercase tracking-wider text-text-dim">News Catalysts</span>
-                              <div className="space-y-1 max-h-[80px] overflow-y-auto custom-scrollbar pr-0.5">
-                                {trade.news.slice(0, 3).map((item: any, nIdx: number) => {
-                                  const isObj = item && typeof item === "object";
-                                  const title = isObj ? item.title : item;
-                                  const score = isObj && item.sentiment !== undefined ? item.sentiment : null;
-                                  return (
-                                    <div key={nIdx} className="border-b border-border-dim/5 last:border-0 pb-1 flex flex-col">
-                                      <div className="truncate font-serif text-[8.5px] text-text-heading/90" title={title}>📰 {title}</div>
-                                      {score !== null && (
-                                        <span className={cn("text-[7.5px] font-mono tracking-wider uppercase font-semibold", score > 0.1 ? "text-sol-green" : score < -0.1 ? "text-red-400" : "text-text-dim")}>
-                                          Score: {score > 0 ? "+" : ""}{Number(score).toFixed(2)}
-                                        </span>
-                                      )}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          )}
+                          <TradeDetailFields trade={trade} />
+                          <TradeSignalAndNews trade={trade} />
 
                           <div className="border-t border-border-dim/20 pt-2">
                             <button
@@ -5649,6 +5690,106 @@ export default function App() {
                         </div>
                       );
                     })}
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto rounded-lg border border-border-dim custom-scrollbar">
+                    <table className="w-full text-[10.5px] border-collapse">
+                      <thead>
+                        <tr className="bg-bg-input/60 text-text-dim uppercase tracking-wider text-[8.5px] font-bold">
+                          <th className="text-left px-3 py-2 whitespace-nowrap">Settled</th>
+                          <th className="text-left px-3 py-2 whitespace-nowrap">Side</th>
+                          <th className="text-left px-3 py-2 whitespace-nowrap">Source</th>
+                          <th className="text-right px-3 py-2 whitespace-nowrap">Entry ➔ Exit</th>
+                          <th className="text-right px-3 py-2 whitespace-nowrap">PnL %</th>
+                          <th className="text-right px-3 py-2 whitespace-nowrap">PnL $</th>
+                          <th className="text-right px-3 py-2 whitespace-nowrap">Duration</th>
+                          <th className="text-left px-3 py-2 whitespace-nowrap">Status</th>
+                          <th className="text-center px-3 py-2 whitespace-nowrap w-8"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {journalData.trades.map((trade: any) => {
+                          const durationStr = trade.durationMins !== null && trade.durationMins !== undefined
+                            ? (trade.durationMins >= 60 ? `${Math.floor(trade.durationMins / 60)}h ${trade.durationMins % 60}m` : `${trade.durationMins}m`)
+                            : "—";
+                          let exitStr = "";
+                          try { exitStr = trade.exitTime ? etFormat(new Date(trade.exitTime), "MMM d, HH:mm") : ""; } catch (e) {}
+                          const isExpanded = expandedTradeId === trade.id;
+                          return (
+                            <React.Fragment key={trade.id}>
+                              <tr
+                                onClick={() => setExpandedTradeId(isExpanded ? null : trade.id)}
+                                className={cn(
+                                  "border-t border-border-dim/40 cursor-pointer hover:bg-bg-input/30 transition-colors",
+                                  isExpanded && "bg-bg-input/30"
+                                )}
+                              >
+                                <td className="px-3 py-2 whitespace-nowrap font-mono text-text-dim">{exitStr ? `${exitStr} ${tzAbbr}` : "—"}</td>
+                                <td className="px-3 py-2 whitespace-nowrap">
+                                  <span className={cn(
+                                    "px-1.5 py-0.5 rounded text-[8px] font-black uppercase text-white",
+                                    trade.side === "LONG" ? "bg-sol-green" : trade.side === "SHORT" ? "bg-red-500" : "bg-text-dim"
+                                  )}>
+                                    {trade.side}{trade.leverage ? ` (${trade.leverage}x)` : ""}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2 whitespace-nowrap text-text-dim">
+                                  {trade.source}
+                                  {trade.mode && <span className="ml-1.5 text-[8px] uppercase tracking-wider px-1 py-0.2 rounded bg-bg-input border border-border-dim">{trade.mode}</span>}
+                                </td>
+                                <td className="px-3 py-2 whitespace-nowrap text-right font-mono text-text-heading">
+                                  ${(trade.entryPriceActual ?? trade.entryPrice)?.toFixed(2)} ➔ ${(trade.exitPriceActual ?? trade.exitPrice)?.toFixed(2)}
+                                </td>
+                                <td className={cn("px-3 py-2 whitespace-nowrap text-right font-mono font-black", trade.pnl >= 0 ? "text-sol-green" : "text-red-500")}>
+                                  {trade.pnl >= 0 ? "+" : ""}{trade.pnl.toFixed(2)}%
+                                </td>
+                                <td className={cn("px-3 py-2 whitespace-nowrap text-right font-mono font-bold", trade.pnlUsd >= 0 ? "text-sol-green/80" : "text-red-400/80")}>
+                                  {trade.pnlUsd !== undefined && trade.pnlUsd !== null ? `${trade.pnlUsd >= 0 ? "+" : "-"}$${Math.abs(trade.pnlUsd).toFixed(2)}` : "—"}
+                                </td>
+                                <td className="px-3 py-2 whitespace-nowrap text-right font-mono text-text-dim">{durationStr}</td>
+                                <td className="px-3 py-2 whitespace-nowrap">
+                                  {trade.source === "Auto-Trade (Jupiter)" && trade.mode === "REAL" ? (
+                                    trade.reconciled ? (
+                                      <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-sol-green/10 text-sol-green border border-sol-green/30" title="Reconciled against actual on-chain fills via Jupiter's own trade history — matches your Phantom wallet.">
+                                        ✓ On-chain
+                                      </span>
+                                    ) : (
+                                      <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-500 border border-amber-500/30" title="Not yet matched against Jupiter's on-chain trade history — showing the bot's own pre-fee estimate. Will update automatically.">
+                                        Est. — pending
+                                      </span>
+                                    )
+                                  ) : trade.source === "Auto-Trade (Jupiter)" && trade.mode === "PAPER" ? (
+                                    <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-bg-input text-text-dim border border-border-dim" title="Simulated trade — no real funds or fees involved.">
+                                      Paper
+                                    </span>
+                                  ) : (
+                                    <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-bg-input text-text-dim border border-border-dim" title="Signal-only alert — never executed on-chain, no real fill or fees.">
+                                      Signal only
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-2 whitespace-nowrap text-center text-text-dim">
+                                  {isExpanded ? <ChevronUp className="w-3.5 h-3.5 inline" /> : <ChevronDown className="w-3.5 h-3.5 inline" />}
+                                </td>
+                              </tr>
+                              {isExpanded && (
+                                <tr className="bg-bg-input/10 border-t border-border-dim/20">
+                                  <td colSpan={9} className="px-4 py-3">
+                                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                      <div className="space-y-3">
+                                        <TradeDetailFields trade={trade} />
+                                        <TradeSignalAndNews trade={trade} />
+                                      </div>
+                                      <TradeChart trade={trade} token={trade.token || token} />
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
                 )}
               </section>
