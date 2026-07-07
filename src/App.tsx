@@ -5697,7 +5697,7 @@ export default function App() {
                       <thead>
                         <tr className="bg-bg-input/60 text-text-dim uppercase tracking-wider text-[8.5px] font-bold">
                           <th className="text-left px-3 py-2 whitespace-nowrap">Settled</th>
-                          <th className="text-left px-3 py-2 whitespace-nowrap">Side</th>
+                          <th className="text-left px-3 py-2 whitespace-nowrap">Result / Side</th>
                           <th className="text-left px-3 py-2 whitespace-nowrap">Source</th>
                           <th className="text-right px-3 py-2 whitespace-nowrap">Entry ➔ Exit</th>
                           <th className="text-right px-3 py-2 whitespace-nowrap">PnL %</th>
@@ -5728,8 +5728,11 @@ export default function App() {
                                 <td className="px-3 py-2 whitespace-nowrap">
                                   <span className={cn(
                                     "px-1.5 py-0.5 rounded text-[8px] font-black uppercase text-white",
-                                    trade.side === "LONG" ? "bg-sol-green" : trade.side === "SHORT" ? "bg-red-500" : "bg-text-dim"
+                                    trade.pnl >= 0 ? "bg-sol-green" : "bg-red-500"
                                   )}>
+                                    {trade.pnl >= 0 ? "WIN" : "LOSS"}
+                                  </span>
+                                  <span className="ml-1.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded bg-bg-input text-text-heading border border-border-dim">
                                     {trade.side}{trade.leverage ? ` (${trade.leverage}x)` : ""}
                                   </span>
                                 </td>
