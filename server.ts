@@ -1042,7 +1042,9 @@ function buildJournalStats(trades: any[], statsResetAt?: string | null) {
 function journalStoreStatsSnapshot() {
   try {
     const statsResetAt = loadJupiterConfig().statsResetAt;
-    const rows = loadJournalStore().map((t: any) => ({
+    // Same visibility rule as mapJournalTrades: unverified REAL trades are excluded so these
+    // numbers can never drift from the app's Journal tab.
+    const rows = loadJournalStore().filter((t: any) => !isUnverifiedRealTrade(t)).map((t: any) => ({
       pnl: t.feesReconciled === true && typeof t.realizedPnlPct === "number" ? t.realizedPnlPct : (typeof t.pnl === "number" ? t.pnl : 0),
       side: t.side,
       source: t.source,
@@ -1285,8 +1287,15 @@ async function backfillJupiterHistoryIfNeeded(stored: any[]): Promise<{ store: a
 // consolidated with aggregate performance analytics.
 // Shapes raw journal-store rows into the API-facing trade records (fee-reconciled headline PnL,
 // duration, etc). Shared by /api/journal and /api/journal/resync so both return identical shapes.
+// REAL trades are only surfaced once matched against Jupiter's on-chain trade history — an
+// unmatched row is the bot's own pre-fee estimate and can misstate (or not correspond to) the
+// actual fill, so it stays out of the ledger and stats until it's on-chain verified. PAPER and
+// signal-only rows have no fill to verify and pass through as-is.
+function isUnverifiedRealTrade(t: any): boolean {
+  return t.source === "Auto-Trade (Jupiter)" && t.mode === "REAL" && t.feesReconciled !== true;
+}
 function mapJournalTrades(reconciled: any[]) {
-  return reconciled.map((t: any) => {
+  return reconciled.filter((t: any) => !isUnverifiedRealTrade(t)).map((t: any) => {
     const durationMins = (t.entryTime && t.exitTime)
       ? Math.max(0, Math.round((new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime()) / 60000))
       : null;

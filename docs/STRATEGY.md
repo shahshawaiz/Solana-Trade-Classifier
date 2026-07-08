@@ -21,10 +21,15 @@ quotes (OHLC) + news ──▶ performCoreAnalysis ──▶ Σ (composite bias)
    direction = Σ vs ±THRESHOLD  +  200-EMA regime  +  Chop-Zone guard
                        │
                        ▼
-   entryGateBlock:  ADX(14) > min  ·  15m Supertrend dir  ·  (MACD-sign OR RSI-timing)
+   resolveEntry — ADX(14) regime switch:
+     ├─ ADX > ADX_GATE_MIN (TRENDING) ─▶ momentum path:
+     │      entryGateBlock: 15m Supertrend dir · (MACD-sign OR RSI-timing)
+     └─ ADX ≤ ADX_GATE_MIN (RANGING) ──▶ mean-reversion range fade:
+            rejection off the ~60-min range high/low (no knife catching)
                        │
                        ▼
    2-bar confirmation  +  macro filter  +  cooldown / daily-cap / circuit-breaker
+                       +  pre-open ON-CHAIN position check (no pyramiding, REAL mode)
                        │
                        ▼  open
    evaluateExit (per tick):  partial scale-out + breakeven + ATR trail + TP cap
@@ -76,7 +81,17 @@ Only longs **above** the 200-EMA, only shorts **below** it. Cuts counter-trend w
 If RSI is in the neutral 40–60 band **and** the fast/slow MAs squeeze (spread < 0.30%), force HOLD —
 avoids sideways fakeouts. Skipped on a catalyst overrule.
 
-### 3.4 Entry gates — `entryGateBlock` ([server.ts](../server.ts))
+### 3.4 Regime switch — `resolveEntry` ([server.ts](../server.ts))
+Single source of truth for all engines. ADX(14) decides **which strategy** evaluates the entry:
+
+- **ADX > `ADX_GATE_MIN` (default 15) → TRENDING:** the momentum path below (composite candidate
+  side gated by `entryGateBlock`).
+- **ADX ≤ `ADX_GATE_MIN` → RANGING:** momentum's composite score is unreliable by definition here —
+  the candidate side is **ignored** and the mean-reversion range fade (3.6) looks for an entry
+  instead. Toggleable per-config via `meanReversionEnabled` (default ON); when off, the bot simply
+  stands aside in ranging markets.
+
+### 3.5 Entry gates (trending regime) — `entryGateBlock` ([server.ts](../server.ts))
 The **single shared gate stack** used by both the live trader and the server backtest. "Moderate"
 profile (chosen to stop the bot standing aside every cycle):
 
@@ -86,6 +101,18 @@ profile (chosen to stop the bot standing aside every cycle):
    plus a MACD histogram "rising 2 bars" condition, which almost never coincided → the bot never traded).
    - MACD-sign: histogram > 0 for LONG, < 0 for SHORT.
    - RSI-timing: RSI(21) crossed up through 35 (LONG) / down through 65 (SHORT) within the last 2 bars.
+
+### 3.6 Mean-reversion range fade (ranging regime) — `evaluateMeanReversionSignal`
+Fires only when ADX says the market is ranging. Fades price back toward the middle of its recent
+range, with a strict **"no knife catching"** rule — never enter on the mere *touch* of a range
+edge, only on a **rejection**:
+
+- Range = high/low of the last `MEAN_REVERSION_LOOKBACK_MINUTES` (default 60 min, ≥6 bars),
+  excluding the current bar.
+- **SHORT:** the bar wicks **above** the range high but closes back below it, retracing ≥
+  `MEAN_REVERSION_REJECTION_FRAC` (default 0.35) of its own range from the extreme.
+- **LONG:** mirror off the range low.
+- A touch with no rejection, or a close *through* the level (a real breakout), never fires.
 
 ### 3.5 2-bar confirmation
 Enter only when the current bar **and** the previous bar agree on direction. A catalyst overrule
@@ -105,6 +132,7 @@ Volatility-adaptive, **shared** by the live daemon and the benchmark. All levels
 
 | Stage | Rule | Env (default) |
 |---|---|---|
+| ATR floor | ATR is floored at `EXIT_MIN_ATR_PCT`% of price before any level is computed — a quiet tape can't place the stop inside minute-to-minute noise (the 2026-07-03 stop-out churn) | `EXIT_MIN_ATR_PCT` (0.4) |
 | Initial stop | entry ∓ `EXIT_SL_MULT`×ATR | `EXIT_SL_MULT` (1.5) |
 | **Partial scale-out** | at entry ± `EXIT_PARTIAL_MULT`×ATR, close `EXIT_PARTIAL_FRAC` of size **and move stop to breakeven** | `EXIT_PARTIAL_MULT` (1.5), `EXIT_PARTIAL_FRAC` (0.5) |
 | Trailing stop | after the scale-out, ratchet the stop to peak ∓ `EXIT_TRAIL_MULT`×ATR (favorable-only) | `EXIT_TRAIL_MULT` (2.0) |
@@ -132,6 +160,8 @@ Net: half banked at +3, half at ~+2 — versus the old hard 3×ATR TP that cappe
 | Control | Behaviour | Default |
 |---|---|---|
 | Single-position limit | At most one open position at a time | — |
+| **Pyramiding guard (REAL)** | Right before every REAL open, the daemon queries the wallet's actual on-chain positions (`jup perps positions`) and aborts if one already exists for the token — a local-state desync can never double exposure | — |
+| Sync-cadence floor | Both daemons' check loops are clamped to ≥ `MIN_SYNC_MINUTES` — sub-20m polling re-marked positions against every wiggle and churned out stops | 20 min |
 | Cooldown | No new entry within N minutes of the last entry | 30 min |
 | Consecutive-loss cooldown | Pause entries after 2 straight losses | 45 min |
 | Daily trade cap | Max opens per rolling 24h | 4 |
@@ -148,7 +178,14 @@ Exits are **never** blocked by these gates — only new entries.
 - **PAPER** (default): fully simulated; positions, partials, and PnL are bookkept, no on-chain orders.
 - **REAL**: opens/closes (including the partial scale-out's half-size reduce) execute on Jupiter Perps
   via the CLI (`executeOnChainTradeServerSide`). A position is only tracked if it actually opened
-  on-chain (no phantom positions). See [[perps-execution-via-jup-cli]] in memory.
+  on-chain (no phantom positions).
+
+**Trade journal is on-chain-verified only.** The Journal tab / `/api/journal` reconciles every REAL
+trade against `jup perps history` (the same feed Phantom reads) and **only surfaces a REAL trade
+once it has matched actual on-chain fills** — fill prices, open/close fees, and realized PnL all
+come from the chain, never from the bot's own signal-time estimate. Unmatched rows are held back
+entirely (nothing is ever shown as "estimated — pending"). PAPER and signal-only rows pass through,
+clearly labeled as simulated.
 
 ---
 
@@ -175,7 +212,11 @@ Exits are **never** blocked by these gates — only new entries.
 
 | Var | Default | Effect |
 |---|---:|---|
-| `ADX_GATE_MIN` | 15 | Min ADX(14) for an entry to count as trending |
+| `ADX_GATE_MIN` | 15 | Min ADX(14) for an entry to count as trending (also the momentum ↔ mean-reversion regime switch) |
+| `MEAN_REVERSION_LOOKBACK_MINUTES` | 60 | Range window for the range-fade entry |
+| `MEAN_REVERSION_REJECTION_FRAC` | 0.35 | Fraction of the bar's own range the close must retrace from the touched extreme |
+| `EXIT_MIN_ATR_PCT` | 0.4 | ATR floor as % of price for all exit levels (0 disables) |
+| `MIN_SYNC_MINUTES` | 20 | Floor on both daemons' check-loop cadence |
 | `EXIT_SL_MULT` | 1.5 | Initial stop distance, in ATR |
 | `EXIT_PARTIAL_MULT` | 1.5 | Scale-out trigger distance, in ATR |
 | `EXIT_PARTIAL_FRAC` | 0.5 | Fraction of position taken at scale-out |

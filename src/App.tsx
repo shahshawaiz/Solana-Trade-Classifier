@@ -5651,15 +5651,9 @@ export default function App() {
                               )}
                             </div>
                             {trade.source === "Auto-Trade (Jupiter)" && trade.mode === "REAL" ? (
-                              trade.reconciled ? (
-                                <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-sol-green/10 text-sol-green border border-sol-green/30" title="Reconciled against actual on-chain fills via Jupiter's own trade history — matches your Phantom wallet.">
-                                  ✓ On-chain verified
-                                </span>
-                              ) : (
-                                <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-500 border border-amber-500/30" title="Not yet matched against Jupiter's on-chain trade history — showing the bot's own pre-fee estimate. Will update automatically.">
-                                  Est. — pending match
-                                </span>
-                              )
+                              <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-sol-green/10 text-sol-green border border-sol-green/30" title="Reconciled against actual on-chain fills via Jupiter's own trade history — matches your Phantom wallet.">
+                                ✓ On-chain verified
+                              </span>
                             ) : trade.source === "Auto-Trade (Jupiter)" && trade.mode === "PAPER" ? (
                               <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-bg-input text-text-dim border border-border-dim" title="Simulated trade — no real funds or fees involved.">
                                 Paper — simulated
@@ -5752,15 +5746,9 @@ export default function App() {
                                 <td className="px-3 py-2 whitespace-nowrap text-right font-mono text-text-dim">{durationStr}</td>
                                 <td className="px-3 py-2 whitespace-nowrap">
                                   {trade.source === "Auto-Trade (Jupiter)" && trade.mode === "REAL" ? (
-                                    trade.reconciled ? (
-                                      <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-sol-green/10 text-sol-green border border-sol-green/30" title="Reconciled against actual on-chain fills via Jupiter's own trade history — matches your Phantom wallet.">
-                                        ✓ On-chain
-                                      </span>
-                                    ) : (
-                                      <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-500 border border-amber-500/30" title="Not yet matched against Jupiter's on-chain trade history — showing the bot's own pre-fee estimate. Will update automatically.">
-                                        Est. — pending
-                                      </span>
-                                    )
+                                    <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-sol-green/10 text-sol-green border border-sol-green/30" title="Reconciled against actual on-chain fills via Jupiter's own trade history — matches your Phantom wallet.">
+                                      ✓ On-chain
+                                    </span>
                                   ) : trade.source === "Auto-Trade (Jupiter)" && trade.mode === "PAPER" ? (
                                     <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-bg-input text-text-dim border border-border-dim" title="Simulated trade — no real funds or fees involved.">
                                       Paper
@@ -5945,6 +5933,122 @@ export default function App() {
                     <div className="text-center space-y-1">
                       <p className="text-[10px] font-bold text-text-heading">3. EXECUTE</p>
                       <p className="text-[9px] text-text-dim">Synthesize the Composite Bias (Σ) into explicit orders.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Automated entry/exit strategy — the exact decision flow the live auto-trader runs */}
+              <div className="p-8 bg-bg-card border border-border-dim rounded-2xl relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-64 h-64 bg-sol-green/5 blur-[100px] rounded-full -ml-32 -mt-32"></div>
+                <div className="relative z-10 space-y-8">
+                  <div className="flex flex-col items-center gap-2 text-center">
+                    <span className="text-[10px] font-mono text-sol-green uppercase tracking-[0.3em] font-bold">Automated Strategy</span>
+                    <h3 className="text-xl font-serif italic text-text-heading">Entry / Exit Decision Flow</h3>
+                    <p className="text-[11px] text-text-dim max-w-2xl leading-relaxed">
+                      The exact pipeline the autonomous trader runs every sync cycle. Entries and exits are one shared
+                      code path with the server backtest (<code className="text-[10px]">resolveEntry</code> / <code className="text-[10px]">entryGateBlock</code> / <code className="text-[10px]">evaluateExit</code>),
+                      so live behaviour can never drift from what was validated. Full write-up in <span className="font-mono">docs/STRATEGY.md</span>.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                    {/* ENTRY flow */}
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-mono font-bold text-sol-purple uppercase tracking-[0.2em] text-center pb-1">① Entry — regime-switched</p>
+
+                      <div className="p-3 bg-bg-main border border-border-dim rounded-lg text-center">
+                        <p className="text-[8px] font-mono uppercase text-text-dim mb-0.5">Composite bias</p>
+                        <p className="text-[10px] font-bold text-text-heading">Σ = MACD ×0.90 + RSI ×0.85 + Supertrend ×0.90</p>
+                        <p className="text-[9px] text-text-dim mt-0.5">|Σ| &gt; 0.25 → LONG / SHORT candidate, else HOLD</p>
+                      </div>
+                      <p className="text-center text-text-dim text-[10px] leading-none">▼</p>
+
+                      <div className="p-3 bg-bg-main border border-sol-purple/30 rounded-lg text-center">
+                        <p className="text-[8px] font-mono uppercase text-sol-purple mb-0.5">Regime switch</p>
+                        <p className="text-[10px] font-bold text-text-heading">ADX(14) — is the market trending?</p>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-2">
+                          <p className="text-center text-text-dim text-[10px] leading-none">▼</p>
+                          <div className="p-3 bg-bg-main border border-sol-green/25 rounded-lg space-y-1.5">
+                            <p className="text-[8px] font-mono uppercase text-sol-green text-center">Trending (ADX &gt; 15) → Momentum</p>
+                            <ul className="text-[9px] text-text-dim space-y-1 list-disc pl-3.5">
+                              <li>200-EMA regime filter — longs only above, shorts only below</li>
+                              <li>15m Supertrend must agree with the side</li>
+                              <li>Momentum trigger: MACD-sign <b>or</b> RSI(21) timing cross (35↑ / 65↓)</li>
+                              <li>Chop-zone guard + 2-bar confirmation + macro (DXY/10Y/VIX) filter</li>
+                            </ul>
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <p className="text-center text-text-dim text-[10px] leading-none">▼</p>
+                          <div className="p-3 bg-bg-main border border-amber-500/25 rounded-lg space-y-1.5">
+                            <p className="text-[8px] font-mono uppercase text-amber-500 text-center">Ranging (ADX ≤ 15) → Mean-reversion</p>
+                            <ul className="text-[9px] text-text-dim space-y-1 list-disc pl-3.5">
+                              <li>Momentum score ignored (unreliable in chop)</li>
+                              <li>Fade a <b>rejection</b> off the ~60-min range high/low</li>
+                              <li>Bar must wick past the extreme but close back ≥35% of its own range inside — a touch or a clean breakout never fires ("no knife catching")</li>
+                            </ul>
+                          </div>
+                        </div>
+                      </div>
+                      <p className="text-center text-text-dim text-[10px] leading-none">▼</p>
+
+                      <div className="p-3 bg-bg-main border border-red-500/25 rounded-lg text-center">
+                        <p className="text-[8px] font-mono uppercase text-red-400 mb-1">Risk gates (entries only — exits never blocked)</p>
+                        <p className="text-[9px] text-text-dim leading-relaxed">
+                          One position at a time (verified against the <b>on-chain</b> wallet before every REAL open — no pyramiding) ·
+                          30-min cooldown · 45-min pause after 2 straight losses · max 4 opens / 24h ·
+                          circuit breaker after 8 consecutive losses · same-side/same-level re-entry block
+                        </p>
+                      </div>
+                      <p className="text-center text-text-dim text-[10px] leading-none">▼</p>
+                      <div className="p-2.5 bg-sol-purple/15 border border-sol-purple/40 rounded-lg text-center">
+                        <p className="text-[10px] font-black tracking-widest text-sol-purple">OPEN POSITION</p>
+                      </div>
+                    </div>
+
+                    {/* EXIT ladder */}
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-mono font-bold text-sol-green uppercase tracking-[0.2em] text-center pb-1">② Exit — ATR ladder (long shown; short mirrors)</p>
+
+                      <div className="rounded-lg border border-border-dim overflow-hidden">
+                        <div className="p-3 bg-sol-green/10 border-b border-border-dim flex items-baseline justify-between gap-2">
+                          <span className="text-[10px] font-bold text-sol-green font-mono">entry + 4.0×ATR</span>
+                          <span className="text-[9px] text-text-dim text-right">Hard take-profit cap — close the runner</span>
+                        </div>
+                        <div className="p-3 bg-sol-green/5 border-b border-border-dim flex items-baseline justify-between gap-2">
+                          <span className="text-[10px] font-bold text-sol-green font-mono">peak − 2.0×ATR</span>
+                          <span className="text-[9px] text-text-dim text-right">Trailing stop — ratchets up behind the best price, never widens</span>
+                        </div>
+                        <div className="p-3 bg-bg-main border-b border-border-dim flex items-baseline justify-between gap-2">
+                          <span className="text-[10px] font-bold text-text-heading font-mono">entry + 1.5×ATR</span>
+                          <span className="text-[9px] text-text-dim text-right"><b>Scale out 50%</b> (banked) and move the stop to breakeven — the rest rides risk-free</span>
+                        </div>
+                        <div className="p-3 bg-bg-main border-b border-border-dim flex items-baseline justify-between gap-2">
+                          <span className="text-[10px] font-bold text-text-heading font-mono">entry</span>
+                          <span className="text-[9px] text-text-dim text-right">Breakeven stop after the scale-out</span>
+                        </div>
+                        <div className="p-3 bg-red-500/5 flex items-baseline justify-between gap-2">
+                          <span className="text-[10px] font-bold text-red-400 font-mono">entry − 1.5×ATR</span>
+                          <span className="text-[9px] text-text-dim text-right">Initial hard stop (ATR floored at 0.4% of price so noise can't wick it out)</span>
+                        </div>
+                      </div>
+
+                      <div className="p-3 bg-bg-main border border-border-dim rounded-lg space-y-1.5">
+                        <p className="text-[8px] font-mono uppercase text-text-dim">Two more exits outside the ladder</p>
+                        <ul className="text-[9px] text-text-dim space-y-1 list-disc pl-3.5">
+                          <li><b>Time limit:</b> no scale-out and still under +0.5% after 90 minutes → cut it.</li>
+                          <li><b>In-profit reversal:</b> signal flips <i>and</i> the trade has cleared the ≥1.5% fee/noise buffer → bank it (and re-enter the other side). A flip while under water is ignored — the stop governs the downside.</li>
+                        </ul>
+                      </div>
+
+                      <p className="text-[9px] text-text-dim leading-relaxed text-center pt-1">
+                        All levels are in price space and scaled by the ATR captured at entry, so the same ladder holds at any leverage.
+                        Multipliers are env-tunable (<span className="font-mono">EXIT_SL/PARTIAL/TRAIL/TP_MULT</span>).
+                      </p>
                     </div>
                   </div>
                 </div>
