@@ -213,6 +213,20 @@ export function checkMacdGate(closes: number[], side: "LONG" | "SHORT"): boolean
 // profile) and env-tunable. Below this the market is treated as ranging and entries are held.
 const ADX_GATE_MIN = Number(process.env.ADX_GATE_MIN) || 15;
 
+// Momentum entries additionally demand a STRONG trend. A Mar–Jul 2026 SOLUSDT 1h sweep (fees +
+// hourly borrow modeled) found ADX 15–25 momentum entries were fee-negative in every entry/exit
+// variant tested, while ADX>25 entries in the trending Jun–Jul window ran ~62% win rate / PF 1.5
+// with the standard exit geometry. ADX_GATE_MIN (15) stays as the momentum ↔ mean-reversion regime
+// switch in resolveEntry; this stricter bar only gates the momentum path: 15–25 now stands aside
+// rather than trend-following a weak trend. Tune back down via ADX_ENTRY_MIN if too selective.
+const ADX_ENTRY_MIN = Number(process.env.ADX_ENTRY_MIN) || 25;
+
+// Extension ("no chasing") guard: block momentum entries when price sits further than
+// EXT_MAX_ATR × ATR(14) from the EMA26 mean. The journal's characteristic losers entered late
+// into extended swings (a capitulation-low short, a bounce-top long); the same sweep showed the
+// guard improved profit factor in every period it was tested in. 0 disables.
+const EXT_MAX_ATR = process.env.EXT_MAX_ATR !== undefined ? Number(process.env.EXT_MAX_ATR) : 1.5;
+
 // Shared entry-gate stack — the SINGLE source of truth used by both the live auto-trader
 // (evaluateSignal) and the server /api/backtest engine (getTickSignal) so the two can never drift.
 // Moderate profile (per user selection):
@@ -226,10 +240,15 @@ export function entryGateBlock(
   quotes: any[],
   interval: string
 ): { aRec: string } | null {
-  // 1. ADX trend-strength gate
+  // 1. ADX trend-strength gate. Two bars: below ADX_GATE_MIN the market is ranging (resolveEntry
+  // may hand it to mean-reversion); between the two, a trend exists but is too weak to pay a
+  // momentum entry after fees — stand aside rather than trend-follow a weak trend.
   const adxVal = calculateADX(quotes, 14);
   if (adxVal <= ADX_GATE_MIN) {
     return { aRec: `Hold (ADX is ranging: ${adxVal.toFixed(1)} <= ${ADX_GATE_MIN})` };
+  }
+  if (adxVal <= ADX_ENTRY_MIN) {
+    return { aRec: `Hold (trend too weak for momentum entry: ADX ${adxVal.toFixed(1)} <= ${ADX_ENTRY_MIN})` };
   }
 
   // 2. 15m Supertrend direction gate
@@ -247,6 +266,20 @@ export function entryGateBlock(
   const rsiOk = checkRsiTimingGate(calculateRSI(closes, 21), side);
   if (!macdOk && !rsiOk) {
     return { aRec: "Hold (no momentum trigger: MACD sign & RSI timing both fail)" };
+  }
+
+  // 4. Extension guard — don't chase. Entries further than EXT_MAX_ATR×ATR from the EMA26 mean
+  // are late in their swing (the journal's losing bounce-top long / capitulation-low short shape);
+  // wait for price to come back toward the mean before joining the trend.
+  if (EXT_MAX_ATR > 0 && closes.length >= 26) {
+    const atrNow = calculateATR(quotes, 14);
+    const ema26List = calculateEMA(closes, 26);
+    const ema26Now = ema26List[ema26List.length - 1];
+    const px = closes[closes.length - 1];
+    if (atrNow > 0 && ema26Now > 0 && Math.abs(px - ema26Now) > EXT_MAX_ATR * atrNow) {
+      const dist = Math.abs(px - ema26Now) / atrNow;
+      return { aRec: `Hold (extended: px ${dist.toFixed(1)}×ATR from EMA26 > ${EXT_MAX_ATR}×ATR — no chasing)` };
+    }
   }
 
   return null;
@@ -374,6 +407,53 @@ export function flooredAtr(atr: number, price: number): number {
   if (a <= 0) return a; // no ATR at all → callers keep their legacy fixed-% fallback
   const floor = (EXIT_MIN_ATR_PCT / 100) * (Number(price) || 0);
   return Math.max(a, floor);
+}
+
+// Stagnation time-stop — shared by the live daemon AND /api/backtest (the backtest always had a
+// 90-min version of this rule; live had NONE, which is how the 2026-07-08 short sat 19h at ±0.1%
+// price move and still realized -1.89% purely from Jupiter perps borrow fees + spread). A position
+// that is STAGNANT_EXIT_MINUTES old, has not reached its partial scale-out, and shows less than
+// STAGNANT_MIN_PNL_PCT leveraged profit is structurally negative-EV on perps (hourly borrow accrues
+// on notional regardless) — close it and stop the bleed. Post-scale-out runners are exempt (risk-free).
+// Default 360 (not tighter): replaying the full 49-trade on-chain journal (Jun 20 – Jul 9) against
+// Binance 15m data, 360 min beat both 180 min (which cut slow-starting winners that needed 4–7h to
+// reach their partial) and no-time-stop (which let stagnant positions bleed borrow fees for 19h+).
+export const STAGNANT_EXIT_MINUTES = Number(process.env.STAGNANT_EXIT_MINUTES) || 360;
+export const STAGNANT_MIN_PNL_PCT = process.env.STAGNANT_MIN_PNL_PCT !== undefined ? Number(process.env.STAGNANT_MIN_PNL_PCT) : 0.5;
+
+// Hard leverage cap. The journal's catastrophic losses all trace to uncapped leverage: the May
+// 2026 trades ran at 11–20x implied leverage (one -42.49% / -$18.31 hit = 89% of all-time losses),
+// while the 3x era's worst single loss was ~-$1. The config default is 3, but the /api config save
+// endpoints previously accepted ANY number. Every leverage read now flows through clampLeverage.
+export const MAX_LEVERAGE = Number(process.env.MAX_LEVERAGE) || 5;
+export function clampLeverage(lev: any): number {
+  const v = Number(lev) || 3;
+  return Math.min(Math.max(1, v), MAX_LEVERAGE);
+}
+
+// 200-EMA slope requirement for the primary-trend regime filter. Price crossing a FALLING 200-EMA
+// on a short bounce is not an uptrend — the 2026-07-09 losing LONG entered exactly there ("aligned"
+// by the side-of-EMA test while the EMA itself fell ~0.09%/2h). LONGs now also require the 200-EMA
+// to not be clearly falling over the last REGIME_SLOPE_BARS bars (SHORTs: not clearly rising).
+// "Clearly" = the EMA moved more than REGIME_SLOPE_MIN_PCT (% of price) across the window, so a
+// flat/ambiguous slope blocks nothing — only a genuine counter-slope does.
+export const REGIME_SLOPE_BARS = Number(process.env.REGIME_SLOPE_BARS) || 8;
+export const REGIME_SLOPE_MIN_PCT = process.env.REGIME_SLOPE_MIN_PCT !== undefined ? Number(process.env.REGIME_SLOPE_MIN_PCT) : 0.05;
+// Shared side+slope regime test — single source of truth for live (checkJupiterTradingAndState)
+// and /api/backtest (getTickSignal). slopePct is the 200-EMA change over REGIME_SLOPE_BARS bars
+// as a % of price (undefined → slope test passes, side test alone decides).
+export function regimeAllowsEntry(side: "LONG" | "SHORT", price: number, ema200: number, slopePct?: number): { ok: boolean; why: string } {
+  const sideOk = side === "LONG" ? price > ema200 : price < ema200;
+  if (!sideOk) {
+    return { ok: false, why: `counter-trend (px $${price.toFixed(2)} ${side === "LONG" ? "<" : ">"} 200-EMA $${ema200.toFixed(2)})` };
+  }
+  if (slopePct !== undefined && Number.isFinite(slopePct)) {
+    const slopeOk = side === "LONG" ? slopePct > -REGIME_SLOPE_MIN_PCT : slopePct < REGIME_SLOPE_MIN_PCT;
+    if (!slopeOk) {
+      return { ok: false, why: `counter-slope (200-EMA ${side === "LONG" ? "falling" : "rising"} ${slopePct.toFixed(3)}%/${REGIME_SLOPE_BARS} bars vs ±${REGIME_SLOPE_MIN_PCT}% — px crossed a ${side === "LONG" ? "falling" : "rising"} EMA, not a trend)` };
+    }
+  }
+  return { ok: true, why: "aligned" };
 }
 
 // Minimum daemon sync (check-loop) cadence in minutes. Sub-20m polling re-marked open
@@ -2677,6 +2757,15 @@ Return JSON ONLY: { "rationale": "expert justification here", "suggestedOrder": 
       // Primary-trend reference: price vs the 200-period EMA decides the regime (only go with
       // the higher-timeframe trend). ADX(14) gauges whether that trend has any strength.
       ema200: (() => { const e = calculateEMA(closes, Math.min(200, closes.length)); return e[e.length - 1] || latest.close; })(),
+      // 200-EMA slope over the last REGIME_SLOPE_BARS bars, as a % of price — the regime filter
+      // uses it to reject entries whose "aligned" side-of-EMA test only holds because price
+      // crossed a counter-sloping EMA on a short-lived bounce/dip.
+      ema200SlopePct: (() => {
+        const e = calculateEMA(closes, Math.min(200, closes.length));
+        const i = e.length - 1, j = i - REGIME_SLOPE_BARS;
+        if (j < 0 || !e[i] || !e[j] || !latest.close) return undefined;
+        return ((e[i] - e[j]) / latest.close) * 100;
+      })(),
       adx14: calculateADX(quotes, 14),
     },
     strategyDetails: {
@@ -2831,7 +2920,7 @@ export function loadTelegramConfig(): TelegramConfig {
        if (parsed.cumulativePnL === undefined) parsed.cumulativePnL = 0;
       if (parsed.takeProfitPct === undefined) parsed.takeProfitPct = 3.25;
       if (parsed.stopLossPct === undefined) parsed.stopLossPct = 1.625;
-      if (parsed.leverage === undefined) parsed.leverage = 3;
+      parsed.leverage = clampLeverage(parsed.leverage ?? 3); // ≤ MAX_LEVERAGE always
       if (parsed.interval === undefined) parsed.interval = "1h";
       parsed.frequency = clampSyncMinutes(parsed.frequency); // ≥ MIN_SYNC_MINUTES always
       if (parsed.activeTrade === undefined) parsed.activeTrade = null;
@@ -3040,7 +3129,7 @@ function loadJupiterConfig(): JupiterConfig {
       if (parsed.cumulativePnL === undefined) parsed.cumulativePnL = 0;
       if (parsed.takeProfitPct === undefined) parsed.takeProfitPct = 3.25;
       if (parsed.stopLossPct === undefined) parsed.stopLossPct = 1.625;
-      if (parsed.leverage === undefined) parsed.leverage = 3;
+      parsed.leverage = clampLeverage(parsed.leverage ?? 3); // ≤ MAX_LEVERAGE always
       if (parsed.allocationPercent === undefined) parsed.allocationPercent = 5;
       if (parsed.interval === undefined) parsed.interval = "1h";
       if (parsed.activeTrade === undefined) parsed.activeTrade = null;
@@ -4534,6 +4623,18 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         }
       }
 
+      // Stagnation time-stop (shared constants with /api/backtest — live previously had NO time
+      // exit while the validated backtest closed stagnant trades, and that drift is exactly how
+      // the 2026-07-08 SHORT sat 19h at ±0.1% price move yet realized -1.89% from borrow fees).
+      // Once the partial has banked, the runner is risk-free and rides the trail instead.
+      if (!shouldClose && STAGNANT_EXIT_MINUTES > 0 && !activeTrade.partialTaken && activeTrade.entryTime) {
+        const ageMinutes = (Date.now() - new Date(activeTrade.entryTime).getTime()) / 60000;
+        if (ageMinutes >= STAGNANT_EXIT_MINUTES && currentPnlPercent < STAGNANT_MIN_PNL_PCT) {
+          shouldClose = true;
+          closeReason = `Time Stop — stagnant ${Math.round(ageMinutes)} min (PnL ${currentPnlPercent >= 0 ? "+" : ""}${currentPnlPercent.toFixed(2)}% < +${STAGNANT_MIN_PNL_PCT}%; borrow fees accrue hourly on a going-nowhere position)`;
+        }
+      }
+
       if (shouldClose) {
         // Fold any banked partial scale-out into the whole-trade result. The remainder leg is
         // remainingFrac of the position; realizedPnlPct holds the already-banked (and already
@@ -4749,11 +4850,14 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       if (canEnter && (config as any).useRegimeFilter !== false && !forceTrigger) {
         const ema200 = (pred as any).indicators?.ema200;
         const px = pred.price;
-        if (ema200 && px) {
-          const aligned = enterSide === "LONG" ? px > ema200 : px < ema200;
-          if (!aligned) {
+        if (ema200 && px && (enterSide === "LONG" || enterSide === "SHORT")) {
+          // Side AND slope of the 200-EMA must agree (shared regimeAllowsEntry — same test the
+          // backtest runs). Slope catches the "aligned" false-positive where price pops above a
+          // FALLING 200-EMA on a 2–3h bounce (the 2026-07-09 losing LONG).
+          const verdict = regimeAllowsEntry(enterSide, px, ema200, (pred as any).indicators?.ema200SlopePct);
+          if (!verdict.ok) {
             canEnter = false;
-            regimeNote = `counter-trend (px $${px.toFixed(2)} ${enterSide === "LONG" ? "<" : ">"} 200-EMA $${ema200.toFixed(2)})`;
+            regimeNote = verdict.why;
             config.error = `Regime filter: ${enterSide} entry suppressed — ${regimeNote}.`;
             console.log(`[Jupiter Daemon] ${config.error}`);
           }
@@ -4920,7 +5024,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           // 4. Trade sizing. Collateral (margin) is set either explicitly via positionSizeUsd
           //    (collateral = size / leverage) or as allocationPercent of the wallet. We then
           //    enforce Jupiter's hard $10 minimum collateral for new positions.
-          const leverage = config.leverage || 5;
+          const leverage = clampLeverage(config.leverage); // hard MAX_LEVERAGE cap at the sizing site — stale/manual configs can't restore May's 11–20x
           const allocationFraction = Math.min(config.allocationPercent, 100) / 100;
           const MIN_COLLATERAL_USD = 10; // Jupiter Perps minimum collateral for a new position
 
@@ -5432,10 +5536,15 @@ app.post("/api/backtest", async (req, res) => {
         let pSide = "HOLD";
         let trnd = "SIDEWAYS";
 
-        // Trend regime filter: only take longs above the trend EMA, shorts below it.
-        // Reduces counter-trend whipsaw (a key driver of the low baseline win-rate).
-        const regimeUp = !useRegimeFilter || tickClose > tickEma200;
-        const regimeDn = !useRegimeFilter || tickClose < tickEma200;
+        // Trend regime filter: only take longs above the trend EMA, shorts below it — AND the
+        // EMA's slope must not clearly oppose the side (shared regimeAllowsEntry, same as live):
+        // price crossing a falling 200-EMA on a bounce is not an uptrend.
+        const slopeIdx = ema200List.length - 1 - REGIME_SLOPE_BARS;
+        const tickEma200SlopePct = slopeIdx >= 0 && ema200List[slopeIdx] && tickClose
+          ? ((tickEma200 - ema200List[slopeIdx]) / tickClose) * 100
+          : undefined;
+        const regimeUp = !useRegimeFilter || regimeAllowsEntry("LONG", tickClose, tickEma200, tickEma200SlopePct).ok;
+        const regimeDn = !useRegimeFilter || regimeAllowsEntry("SHORT", tickClose, tickEma200, tickEma200SlopePct).ok;
         if (fScore > sigThreshold && regimeUp) {
             pSide = "LONG"; aRec = cRsi < 30 ? "Long Buy (Oversold)" : "Long Buy"; trnd = "UP";
         } else if (fScore < -sigThreshold && regimeDn) {
@@ -5748,9 +5857,11 @@ app.post("/api/backtest", async (req, res) => {
           : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100 * leverage;
 
         // Time-limit only matters before the runner is locked in (post-scale-out we're risk-free).
-        if (!shouldClose && !pos.partialTaken && elapsedMinutes >= 90 && unrealizedPnL < 0.5) {
+        // Same STAGNANT_* constants as the live daemon's time-stop (was hardcoded 90 min / +0.5%
+        // here while live had no time exit at all — the two engines now share one rule).
+        if (!shouldClose && STAGNANT_EXIT_MINUTES > 0 && !pos.partialTaken && elapsedMinutes >= STAGNANT_EXIT_MINUTES && unrealizedPnL < STAGNANT_MIN_PNL_PCT) {
           shouldClose = true;
-          closeReason = `PnL Threshold Time Limit Exceeded (Duration: ${Math.round(elapsedMinutes)} mins, PnL: ${unrealizedPnL.toFixed(2)}% < +0.5%)`;
+          closeReason = `Time Stop — stagnant ${Math.round(elapsedMinutes)} min (PnL ${unrealizedPnL.toFixed(2)}% < +${STAGNANT_MIN_PNL_PCT}%)`;
         }
 
         // Reversal only banks a winner (matches the live in-profit reversal rule).
@@ -5996,7 +6107,7 @@ app.post("/api/telegram-config", async (req, res) => {
       current.stopLossPct = Number(stopLossPct) || 2;
     }
     if (leverage !== undefined) {
-      current.leverage = Number(leverage) || 5;
+      current.leverage = clampLeverage(leverage);
     }
     if (interval) {
       current.interval = interval;
@@ -6610,9 +6721,9 @@ app.post("/api/jupiter-config", async (req, res) => {
       }
     }
     if (tradingMode !== undefined) current.tradingMode = tradingMode;
-    
+
     if (leverage !== undefined) {
-      current.leverage = Number(leverage) || 5;
+      current.leverage = clampLeverage(leverage);
     }
 
     if (allocationPercent !== undefined) {

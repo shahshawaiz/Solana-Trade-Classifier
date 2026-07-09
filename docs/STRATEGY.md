@@ -73,9 +73,13 @@ A long/short candidate must clear **all** of the following.
 `Σ > +SIGNAL_THRESHOLD` ⇒ LONG candidate; `Σ < −SIGNAL_THRESHOLD` ⇒ SHORT candidate.
 `SIGNAL_THRESHOLD = 0.25` (the robust value from the config sweep). Within ±0.25 ⇒ HOLD.
 
-### 3.2 Trend-regime filter (200-EMA)
-Only longs **above** the 200-EMA, only shorts **below** it. Cuts counter-trend whipsaw. Toggle with
-`useRegimeFilter` (default ON).
+### 3.2 Trend-regime filter (200-EMA side + slope)
+Only longs **above** the 200-EMA, only shorts **below** it — AND the EMA's **slope** must not
+clearly oppose the side (`regimeAllowsEntry`, shared live/backtest). A long into a 200-EMA that
+fell more than `REGIME_SLOPE_MIN_PCT` (0.05% of price) over the last `REGIME_SLOPE_BARS` (8) bars
+is blocked even if price is momentarily above it: price crossing a falling EMA on a 2–3h bounce is
+not an uptrend (that exact false-positive produced the 2026-07-09 −1.98% long). A flat/ambiguous
+slope blocks nothing. Toggle with `useRegimeFilter` (default ON).
 
 ### 3.3 Chop Zone guard
 If RSI is in the neutral 40–60 band **and** the fast/slow MAs squeeze (spread < 0.30%), force HOLD —
@@ -96,11 +100,17 @@ The **single shared gate stack** used by both the live trader and the server bac
 profile (chosen to stop the bot standing aside every cycle):
 
 1. **ADX(14) > `ADX_GATE_MIN`** (default **15**, was 20) — trend-strength filter; ranging markets stand aside.
+   Additionally **ADX(14) > `ADX_ENTRY_MIN`** (default **25**) for the momentum entry itself: a Mar–Jul 2026
+   1h sweep (fees + borrow modeled) found ADX 15–25 momentum entries fee-negative in *every* variant tested,
+   while ADX>25 entries ran ~62% win rate / PF 1.5 in the trending window. 15–25 = trend exists, stand aside.
 2. **15m Supertrend direction** — block counter-trend entries on the higher timeframe (applied on 5m/15m).
 3. **Momentum trigger = MACD-sign OR RSI(21)-timing** — *either* confirms (previously required **both**,
    plus a MACD histogram "rising 2 bars" condition, which almost never coincided → the bot never traded).
    - MACD-sign: histogram > 0 for LONG, < 0 for SHORT.
    - RSI-timing: RSI(21) crossed up through 35 (LONG) / down through 65 (SHORT) within the last 2 bars.
+4. **Extension guard (`EXT_MAX_ATR`, default 1.5)** — no chasing: block entries further than 1.5×ATR from
+   the EMA26 mean. The journal's characteristic losers entered late into extended swings (bounce-top long,
+   capitulation-low short); wait for price to return toward the mean before joining the trend.
 
 ### 3.6 Mean-reversion range fade (ranging regime) — `evaluateMeanReversionSignal`
 Fires only when ADX says the market is ranging. Fades price back toward the middle of its recent
@@ -141,9 +151,15 @@ Volatility-adaptive, **shared** by the live daemon and the benchmark. All levels
 **Intuition:** take half off the table at +1.5×ATR (locks profit, removes downside risk by moving the
 stop to breakeven), then let the remaining half run behind a 2×ATR trailing stop up to a 4×ATR cap.
 
-Two additional exits live in the callers (they differ live vs backtest):
+Two additional exits live in the callers:
 
-- **Time-limit:** if a trade hasn't scaled out and is still below +0.5% after 90 minutes, cut it.
+- **Stagnation time-stop:** if a trade hasn't scaled out and is still below `STAGNANT_MIN_PNL_PCT`
+  (+0.5% leveraged) after `STAGNANT_EXIT_MINUTES` (360 min), cut it. Shared constants across the
+  live daemon and the backtest (previously the backtest hardcoded 90 min while live had **no** time
+  exit — on perps, borrow fees accrue hourly on notional, so a going-nowhere position bleeds even
+  when price doesn't move: the 2026-07-08 short lost −1.89% on a +0.08% adverse move over 19h).
+  360 (not 90/180) because a full-journal replay vs Binance 15m showed tighter values cut winners
+  that legitimately need 4–7 hours to reach their partial scale-out.
 - **In-profit reversal:** if the signal flips to the opposite side **and** the trade has cleared a
   fee/noise buffer (`minReversalProfitPct`, default 1.5% leveraged), bank it and (live) re-enter the
   opposite side on the same tick. A flip while not yet in profit is **ignored** — the stop/trail
@@ -213,6 +229,8 @@ clearly labeled as simulated.
 | Var | Default | Effect |
 |---|---:|---|
 | `ADX_GATE_MIN` | 15 | Min ADX(14) for an entry to count as trending (also the momentum ↔ mean-reversion regime switch) |
+| `ADX_ENTRY_MIN` | 25 | Min ADX(14) for a momentum ENTRY — 15–25 stands aside (weak trends were fee-negative in every Mar–Jul sweep variant) |
+| `EXT_MAX_ATR` | 1.5 | Max distance (×ATR) from EMA26 for a momentum entry — blocks chasing extended swings (0 disables) |
 | `MEAN_REVERSION_LOOKBACK_MINUTES` | 60 | Range window for the range-fade entry |
 | `MEAN_REVERSION_REJECTION_FRAC` | 0.35 | Fraction of the bar's own range the close must retrace from the touched extreme |
 | `EXIT_MIN_ATR_PCT` | 0.4 | ATR floor as % of price for all exit levels (0 disables) |
@@ -222,6 +240,11 @@ clearly labeled as simulated.
 | `EXIT_PARTIAL_FRAC` | 0.5 | Fraction of position taken at scale-out |
 | `EXIT_TRAIL_MULT` | 2.0 | Trailing-stop distance behind peak, in ATR |
 | `EXIT_TP_MULT` | 4.0 | Hard take-profit cap, in ATR |
+| `STAGNANT_EXIT_MINUTES` | 360 | Stagnation time-stop age threshold, pre-scale-out only (0 disables) |
+| `MAX_LEVERAGE` | 5 | Hard cap on leverage at config-load, config-save, and trade-sizing (the −$18.31 May trade ran ~11x) |
+| `STAGNANT_MIN_PNL_PCT` | 0.5 | Leveraged % a trade must show by the age threshold to keep holding |
+| `REGIME_SLOPE_BARS` | 8 | Bars over which the 200-EMA slope is measured for the regime filter |
+| `REGIME_SLOPE_MIN_PCT` | 0.05 | Counter-slope (% of price over the window) beyond which the entry is blocked |
 | `ATR_SL_MULT` / `ATR_TP_MULT` | 1.5 / 3.0 | Legacy ATR TP/SL used when forming `pred` (entry-time levels) |
 
 Per-config (non-env) knobs: `useRegimeFilter`, `useMacroFilter`, `signalThreshold`, `leverage`,
