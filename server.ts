@@ -1223,6 +1223,9 @@ function netCloseLegPnl(closeRow: any): { pnlUsd: number; pnlPct: number } {
 async function reconcileJournalTrades(stored: any[]): Promise<{ store: any[]; changed: boolean }> {
   const candidates = stored.filter((t: any) =>
     t.source === "Auto-Trade (Jupiter)" && t.mode === "REAL" && !t.feesReconciled && t.entryTime && t.exitTime
+    // Seed/demo rows are fabricated — never let them claim real on-chain fills (a falsely
+    // "verified" seed both pollutes the ledger and steals the fill from the real trade's row).
+    && !t.seeded && !String(t.id).startsWith("seed-")
   );
   if (candidates.length === 0) return { store: stored, changed: false };
 
@@ -4330,12 +4333,23 @@ function runJupCli(args: string[]): Promise<any> {
 // bot's own signal-price PnL estimate against what actually happened on-chain.
 async function runJupPerpsHistory(keyName: string, asset: string, limit = 500): Promise<any[]> {
   // The CLI may list wrapped assets under either name (BTC/WBTC, ETH/WETH) depending on
-  // version — try every alias until one returns rows, so reconciliation never goes blind.
+  // version — try every alias until one returns rows. An alias the CLI doesn't know rejects
+  // with "Unknown asset" and MUST NOT fail the caller: a genuinely empty asset answers
+  // {count:0} on its canonical name, and one bad alias would otherwise kill the entire
+  // journal backfill for every market (the 2026-07-11 seeds-only-journal regression).
+  let anySucceeded = false;
+  let firstErr: any = null;
   for (const alias of perpAssetAliases(asset)) {
-    const res = await runJupCli(["perps", "history", "--key", keyName, "--asset", alias, "--limit", String(limit)]);
-    const rows = (res && Array.isArray(res.trades)) ? res.trades : [];
-    if (rows.length > 0) return rows;
+    try {
+      const res = await runJupCli(["perps", "history", "--key", keyName, "--asset", alias, "--limit", String(limit)]);
+      anySucceeded = true;
+      const rows = (res && Array.isArray(res.trades)) ? res.trades : [];
+      if (rows.length > 0) return rows;
+    } catch (e: any) {
+      if (!firstErr) firstErr = e;
+    }
   }
+  if (!anySucceeded) throw firstErr || new Error(`jup perps history failed for ${asset}`);
   return [];
 }
 
