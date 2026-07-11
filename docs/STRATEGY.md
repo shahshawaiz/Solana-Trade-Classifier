@@ -43,8 +43,8 @@ canonical backtest in STRATEGY_RESULTS.md also runs **1h**; backtest endpoints s
 sub-hourly intervals for research. See the README's "Timeframes" table for what every other
 window (20-min loop, 60-min range, 5-day macro, …) is used for.
 
-**Multi-asset breadth (`tradeTokens`, default SOL/ETH; BTC whitelisted but opt-in):** trade
-frequency comes from scanning
+**Multi-asset breadth (`tradeTokens`, default SOL/ETH/BTC — Jupiter Perps' complete universe):**
+trade frequency comes from scanning
 more markets with the *same* validated strategy, never from loosening the per-trade gates. Each
 cycle the daemon evaluates the open position's market (if any); when flat and the primary market
 has no actionable signal, it scans the other configured Jupiter Perps markets in order and lets the
@@ -53,8 +53,10 @@ position across all markets** — before any REAL open the wallet's actual on-ch
 checked and *any* existing position (any asset) aborts the open. Wrapped-asset naming (BTC/WBTC,
 ETH/WETH) is resolved against the CLI's own markets list everywhere (open, close, history,
 reconciliation). Per-market validation (90d 1h canonical backtest, 2026-07-11, pre-fees): SOL
-PF 1.50 / Sharpe 2.17, ETH PF 1.86 / Sharpe 2.23, **BTC PF 1.16 / Sharpe 0.47 — too thin to
-survive fees, so BTC is excluded from the default scan** (opt in via `config.tokens`).
+PF 1.50 / Sharpe 2.17, ETH PF 1.86 / Sharpe 2.23, BTC PF 1.16 / Sharpe 0.47 — **BTC is marginal
+after fees but enabled for breadth** (the venue has no further markets; wider candidates tested
+and rejected: AVAX PF 1.40 / LINK PF 1.43 pass the bar but have no Jupiter market, XRP 1.12
+too thin, DOGE/BNB/ADA negative).
 
 ---
 

@@ -487,11 +487,12 @@ export function normalizeTradeInterval(interval: any): string {
 // across all markets: the wallet can't collateralize concurrent $10-min positions, and a single
 // position keeps risk identical to the single-asset bot.
 const SUPPORTED_PERP_TOKENS = ["SOL", "ETH", "BTC"];
-// Default scan list is SOL+ETH only: the 90d 1h canonical backtest (2026-07-11) ran PF 1.50/1.86
-// on SOL/ETH but only 1.16 on BTC pre-fees — BTC's lower volatility puts its ATR targets too close
-// to the ~0.3% round-trip fee floor, the same math that rules out sub-hourly trading. BTC stays
-// whitelisted; opt in explicitly via config.tokens if its regime changes.
-const DEFAULT_SCAN_TOKENS = ["SOL", "ETH"];
+// Jupiter Perps' complete market universe — the venue has no other pairs (verified against the
+// CLI v0.10.1 markets list and jup.ag, 2026-07-11), so this is also the breadth ceiling.
+// Per-market 90d 1h canonical backtest (pre-fees): SOL PF 1.50, ETH PF 1.86, BTC PF 1.16 —
+// BTC is marginal (low vol puts its ATR targets near the ~0.3% RT fee floor) but user-enabled
+// for maximum breadth; the entry gates, cooldown, daily cap and single position slot bound it.
+const DEFAULT_SCAN_TOKENS = [...SUPPORTED_PERP_TOKENS];
 export function tradeTokens(config: any): string[] {
   const primary = String(config?.token || "SOL").toUpperCase();
   const raw = Array.isArray(config?.tokens) && config.tokens.length > 0
