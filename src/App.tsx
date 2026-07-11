@@ -53,6 +53,7 @@ import { twMerge } from "tailwind-merge";
 import { LiquidityHeatmap } from "./components/LiquidityHeatmap";
 import { LiquidationHistogram } from "./components/LiquidationHistogram";
 import { TradeChart } from "./components/TradeChart";
+import { StrategyGuide } from "./components/StrategyGuide";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -713,7 +714,7 @@ export default function App() {
   });
   const [token, setToken] = useState("SOL");
   const [predictionHeadlines, setPredictionHeadlines] = useState<any[]>([]);
-  const [currentView, setCurrentView] = useState<'dashboard' | 'apiDocs' | 'about' | 'jupiter' | 'forecast' | 'liquidation' | 'journal'>('jupiter');
+  const [currentView, setCurrentView] = useState<'dashboard' | 'apiDocs' | 'about' | 'jupiter' | 'forecast' | 'liquidation' | 'journal' | 'strategy'>('jupiter');
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [journalData, setJournalData] = useState<any | null>(null);
   const [journalLoading, setJournalLoading] = useState(false);
@@ -2464,6 +2465,12 @@ export default function App() {
             className={cn("hover:text-sol-purple transition-colors", currentView === 'journal' && "text-sol-purple")}
           >
             Trade Journal
+          </button>
+          <button
+            onClick={() => setCurrentView('strategy')}
+            className={cn("hover:text-sol-purple transition-colors", currentView === 'strategy' && "text-sol-purple")}
+          >
+            Strategy
           </button>
           <button 
             onClick={() => setCurrentView('about')} 
@@ -5787,6 +5794,8 @@ export default function App() {
               </section>
             </div>
           </main>
+        ) : currentView === 'strategy' ? (
+          <StrategyGuide />
         ) : (
           <main className="flex-1 flex flex-col p-8 bg-bg-main overflow-y-auto custom-scrollbar">
             <div className="max-w-4xl mx-auto w-full space-y-12 pb-20">
