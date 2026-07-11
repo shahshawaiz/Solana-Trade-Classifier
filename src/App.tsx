@@ -693,7 +693,7 @@ export default function App() {
   const [lookbackMode, setLookbackMode] = useState<'preset' | 'custom'>('preset');
   const [startDate, setStartDate] = useState(etFormat(subDays(new Date(), 7), "yyyy-MM-dd"));
   const [endDate, setEndDate] = useState(etFormat(new Date(), "yyyy-MM-dd"));
-  const [interval, setChartInterval] = useState("5m");
+  const [interval, setChartInterval] = useState("1h");
   useEffect(() => {
     if (lookbackMode === 'preset') {
       setStartDate(etFormat(subDays(new Date(), lookbackDays), "yyyy-MM-dd"));
@@ -1416,7 +1416,7 @@ export default function App() {
     lastCheckedAt: "",
     cooldownMinutes: 30, // customizable cooldown period (default 30 mins)
     frequency: 20, // default alert analytics check frequency (min 20m — server-enforced)
-    interval: "5m", // Analytic timeframe default to 5m
+    interval: "1h", // Analytic timeframe default to 1h (sub-hourly is fee-negative live)
     auditLogs: [],
     error: "",
     newsTelegramChannel: "https://t.me/+1C0c6rUVmjo3Y2Y8"
@@ -1434,7 +1434,7 @@ export default function App() {
           parsed.topic = "crypto,war";
         }
         if (!parsed.interval) {
-          parsed.interval = "5m";
+          parsed.interval = "1h";
         }
         return parsed;
       } catch(e) {}
@@ -1449,7 +1449,8 @@ export default function App() {
       stopLossPct: 1.625,
       frequencyMinutes: 20,
       cooldownMinutes: 30,
-      interval: "5m",
+      interval: "1h",
+      positionSizeUsd: 20,
       token: "SOL",
       topic: "crypto,war",
       weights: { sentiment: 0, technical: 0.9, liquidity: 0.85, elliottWave: 0, supertrend: 0.9, fvg: 0, dca: 0 },
@@ -4094,7 +4095,7 @@ export default function App() {
                             <span className="absolute right-3 top-2 text-xs text-text-dim font-mono">USD</span>
                           </div>
                           <p className="text-[9px] text-text-dim font-mono leading-relaxed">
-                            Notional position size. Collateral = size ÷ leverage (e.g. ${Number(jupiterConfig.positionSizeUsd) || 50} ÷ {jupiterConfig.leverage || 5}x = ${(((Number(jupiterConfig.positionSizeUsd) || 50)) / (jupiterConfig.leverage || 5)).toFixed(2)} margin). Jupiter requires ≥ $10 collateral.
+                            Notional position size. Collateral = size ÷ leverage (e.g. ${Number(jupiterConfig.positionSizeUsd) || 20} ÷ {jupiterConfig.leverage || 3}x = ${(((Number(jupiterConfig.positionSizeUsd) || 20)) / (jupiterConfig.leverage || 3)).toFixed(2)} margin). Jupiter requires ≥ $10 collateral.
                           </p>
                         </div>
 

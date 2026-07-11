@@ -466,6 +466,20 @@ export function clampSyncMinutes(minutes: any): number {
   return Math.max(m > 0 ? m : MIN_SYNC_MINUTES, MIN_SYNC_MINUTES);
 }
 
+// Trading timeframe for the live daemon. The Mar–Jul majority-win sweep showed sub-hourly
+// intervals are structurally fee-negative on Jupiter perps (~0.35%/trade round-trip + borrow
+// vs ~0.5–0.9% ATR-sized targets — every 15m entry variant lost), so the daemon's interval is
+// normalized to at least 1h. Like clampLeverage/clampSyncMinutes this is applied at config
+// LOAD and SAVE, so a persisted or UI-submitted "5m"/"15m" can no longer reach the engine.
+// Backtest endpoints are unaffected (sub-hourly there is still useful for research).
+// NOTE: keep this list within getPredictionData's allowedIntervals — anything it doesn't
+// recognize silently falls back to 15m, which is exactly what this guard exists to prevent.
+const DAEMON_ALLOWED_INTERVALS = ["1h", "1d"];
+export function normalizeTradeInterval(interval: any): string {
+  const iv = String(interval ?? "").trim();
+  return DAEMON_ALLOWED_INTERVALS.includes(iv) ? iv : "1h";
+}
+
 export interface ExitState {
   side: "LONG" | "SHORT";
   entryPrice: number;
@@ -3131,7 +3145,8 @@ function loadJupiterConfig(): JupiterConfig {
       if (parsed.stopLossPct === undefined) parsed.stopLossPct = 1.625;
       parsed.leverage = clampLeverage(parsed.leverage ?? 3); // ≤ MAX_LEVERAGE always
       if (parsed.allocationPercent === undefined) parsed.allocationPercent = 5;
-      if (parsed.interval === undefined) parsed.interval = "1h";
+      if (parsed.positionSizeUsd === undefined) parsed.positionSizeUsd = 20;
+      parsed.interval = normalizeTradeInterval(parsed.interval); // ≥ 1h always (fee-negative below)
       if (parsed.activeTrade === undefined) parsed.activeTrade = null;
       if (parsed.tradesHistory === undefined) parsed.tradesHistory = [];
       parsed.frequencyMinutes = clampSyncMinutes(parsed.frequencyMinutes); // ≥ MIN_SYNC_MINUTES always
@@ -3208,7 +3223,7 @@ function loadJupiterConfig(): JupiterConfig {
     tradingMode: "REAL",
     leverage: 3,
     allocationPercent: 5,
-    positionSizeUsd: 0,
+    positionSizeUsd: 20,
     takeProfitPct: 3.25,
     stopLossPct: 1.625,
     frequencyMinutes: MIN_SYNC_MINUTES,
@@ -6753,7 +6768,7 @@ app.post("/api/jupiter-config", async (req, res) => {
     if (token) current.token = token;
     if (topic) current.topic = topic;
     if (weights) current.weights = weights;
-    if (interval) current.interval = interval;
+    if (interval) current.interval = normalizeTradeInterval(interval);
     // Regime-switching toggle: momentum when ADX says TRENDING, range-fade mean reversion when
     // RANGING (see resolveEntry). Engine default is ON; this lets the UI set it explicitly.
     if (meanReversionEnabled !== undefined) current.meanReversionEnabled = meanReversionEnabled !== false;
