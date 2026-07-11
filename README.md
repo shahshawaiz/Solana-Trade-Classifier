@@ -1,9 +1,12 @@
 # Cortex Alpha — Solana Trade Classifier
 
-A quantitative trading dashboard + autonomous trading daemon for SOL perpetuals. A composite
-technical bias (MACD + RSI + Supertrend) drives a **regime-switched** strategy — momentum when the
-market trends, mean-reversion range-fades when it chops — executed on **Jupiter Perps** via the
-`jup` CLI, with a fully **on-chain-verified trade journal**.
+A quantitative trading dashboard + autonomous trading daemon for **SOL / ETH / BTC perpetuals**.
+A composite technical bias (MACD + RSI + Supertrend) drives a **regime-switched** strategy —
+momentum when the market trends, mean-reversion range-fades when it chops — executed on
+**Jupiter Perps** via the `jup` CLI, with a fully **on-chain-verified trade journal**. Trade
+frequency comes from **breadth** (scanning three markets with the same validated 1h strategy),
+never from lower per-trade quality; the bot holds at most **one position at a time** across all
+markets.
 
 - **Full strategy write-up:** [docs/STRATEGY.md](docs/STRATEGY.md)
 - **Backtest methodology & results:** [STRATEGY_RESULTS.md](STRATEGY_RESULTS.md)
@@ -22,7 +25,9 @@ Every **20 minutes** the daemon pulls fresh **1-hour candles** and asks four que
    ±0.25 conviction.
 2. **What kind of market is this?** ADX(14) routes the decision: strong trend (>25) → momentum
    entry; ranging (≤15) → fade a rejection off the range edge; in between (15–25) → **stand aside**
-   (weak-trend entries lost to fees in every backtest variant).
+   (weak-trend entries lost to fees in every backtest variant). If the primary market has no
+   actionable signal, the daemon **scans the other configured markets (SOL → ETH → BTC)** with the
+   identical gates and lets the first qualifying candidate take the single position slot.
 3. **Is the entry safe?** Trend-alignment, no-chasing, macro, cooldown and pyramiding gates all
    have to agree.
 4. **If a position is open — manage it.** An ATR-scaled ladder banks half at +1.5×ATR, moves the
@@ -42,7 +47,8 @@ Every **20 minutes** the daemon pulls fresh **1-hour candles** and asks four que
 | **5 days** | Macro regime: DXY / 10-Y yield / VIX trend → RISK-ON / OFF / NEUTRAL | `useMacroFilter` |
 | **30 min / 45 min / 6 h** | Entry cooldown / two-loss pause / circuit-breaker auto-reset | risk rails |
 | **360 min** | Stagnation time-stop: still under +0.5% and no scale-out → cut it (perps borrow fees bleed ~0.087%/h even when price goes nowhere) | `STAGNANT_EXIT_MINUTES` |
-| **rolling 24 h** | Max 4 position opens | daily cap |
+| **rolling 24 h** | Max 6 position opens across all markets | `MAX_OPENS_PER_24H` |
+| **per cycle** | Multi-market scan order when flat: primary token first, then the other configured markets | `tokens` (default SOL, ETH, BTC) |
 
 **Why 1h and not 5m/15m?** Round-trip fees + hourly borrow cost ~0.35% per trade, while sub-hourly
 ATR targets are only ~0.5–0.9% — the Mar–Jul 2026 sweep found **every** sub-hourly entry variant
@@ -71,7 +77,7 @@ flowchart TD
     E -->|"any rail trips"| H3["HOLD — audit-logged reason"]
     E -->|"all clear"| F["OPEN on Jupiter Perps (jup CLI)<br/>with hard on-chain TP + SL triggers attached"]
 
-    E -.-> R["• macro filter: no longs in RISK-OFF, no shorts in RISK-ON<br/>• single position — wallet re-checked ON-CHAIN before every open<br/>• 30-min cooldown · 45-min pause after 2 losses<br/>• max 4 opens/24h · circuit breaker at 8 straight losses"]
+    E -.-> R["• macro filter: no longs in RISK-OFF, no shorts in RISK-ON<br/>• ONE position across ALL markets — wallet re-checked ON-CHAIN before every open<br/>• 30-min cooldown between entries · 45-min pause after 2 losses<br/>• max 6 opens/24h (MAX_OPENS_PER_24H) · circuit breaker at 8 straight losses"]
 ```
 
 ## Exit ladder — volatility-adaptive, in price space

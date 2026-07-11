@@ -480,6 +480,34 @@ export function normalizeTradeInterval(interval: any): string {
   return DAEMON_ALLOWED_INTERVALS.includes(iv) ? iv : "1h";
 }
 
+// Markets the daemon may scan for entries. Frequency comes from BREADTH (more markets, same
+// validated per-trade 1h strategy), never from lower per-trade quality — sub-hourly/weak-trend
+// entries are fee-negative (see normalizeTradeInterval / ADX_ENTRY_MIN). Only assets with a
+// Jupiter Perps market AND a TOKEN-USD Yahoo feed qualify. Still ONE open position at a time
+// across all markets: the wallet can't collateralize concurrent $10-min positions, and a single
+// position keeps risk identical to the single-asset bot.
+const SUPPORTED_PERP_TOKENS = ["SOL", "ETH", "BTC"];
+export function tradeTokens(config: any): string[] {
+  const primary = String(config?.token || "SOL").toUpperCase();
+  const raw = Array.isArray(config?.tokens) && config.tokens.length > 0
+    ? config.tokens.map((t: any) => String(t).toUpperCase())
+    : [primary, ...SUPPORTED_PERP_TOKENS];
+  const out: string[] = [];
+  for (const t of [primary, ...raw]) {
+    if (SUPPORTED_PERP_TOKENS.includes(t) && !out.includes(t)) out.push(t);
+  }
+  return out.length > 0 ? out : ["SOL"];
+}
+
+// Jupiter's markets list may name an asset by its wrapped form (BTC ↔ WBTC, ETH ↔ WETH),
+// depending on CLI version. Match/resolve against every alias, never a bare equality check.
+export function perpAssetAliases(token: string): string[] {
+  const t = String(token || "").toUpperCase();
+  if (t === "BTC" || t === "WBTC") return ["BTC", "WBTC"];
+  if (t === "ETH" || t === "WETH") return ["ETH", "WETH"];
+  return [t];
+}
+
 export interface ExitState {
   side: "LONG" | "SHORT";
   entryPrice: number;
@@ -1323,10 +1351,14 @@ function buildTradesFromJupHistory(rows: any[], asset: string): any[] {
 // path can double-count a trade the other already recorded.
 async function syncFullJupiterHistory(stored: any[], config: JupiterConfig): Promise<{ store: any[]; changed: boolean; added: number }> {
   const keyName = jupCliKeyName(config);
-  const asset = String(config.token || "SOL").toUpperCase();
 
-  const rows = await runJupPerpsHistory(keyName, asset, 5000);
-  const backfilledTrades = buildTradesFromJupHistory(rows, asset);
+  // Import every market the daemon may trade (multi-asset), not just the primary token —
+  // otherwise ETH/BTC round trips would never reach the ledger.
+  const backfilledTrades: any[] = [];
+  for (const asset of tradeTokens(config)) {
+    const rows = await runJupPerpsHistory(keyName, asset, 5000);
+    backfilledTrades.push(...buildTradesFromJupHistory(rows, asset));
+  }
 
   const existingRealTrades = stored.filter((t: any) => t.source === "Auto-Trade (Jupiter)" && t.mode === "REAL" && !String(t.id).startsWith("seed-"));
   const existingCloseSignatures = new Set(existingRealTrades.filter((t: any) => t.closeSignature).map((t: any) => t.closeSignature));
@@ -1335,6 +1367,8 @@ async function syncFullJupiterHistory(stored: any[], config: JupiterConfig): Pro
     existingCloseSignatures.has(t.closeSignature) ||
     existingRealTrades.some((e: any) =>
       String(e.side).toUpperCase() === t.side &&
+      // Same-side closes within the window on DIFFERENT markets are distinct trades, not dupes.
+      (!e.token || !t.token || String(e.token).toUpperCase() === String(t.token).toUpperCase()) &&
       e.exitTime &&
       Math.abs(new Date(e.exitTime).getTime() - new Date(t.exitTime).getTime()) <= CLOSE_DEDUPE_TOLERANCE_MS
     );
@@ -3022,6 +3056,7 @@ export interface JupiterConfig {
   cooldownMinutes?: number;
   lastTradeAddedAt?: string;
   token: string;
+  tokens?: string[]; // markets the entry scan may take the single position slot on (normalized via tradeTokens)
   topic: string;
   weights: { sentiment: number; technical: number; liquidity: number; elliottWave?: number; supertrend?: number; fvg?: number; dca?: number; };
   lastTradePnL: number;
@@ -3033,7 +3068,7 @@ export interface JupiterConfig {
   reentryBlockMinutes?: number; // duration of the same-zone re-entry lockout (default 60).
   useConvictionSizing?: boolean; // scale size by |Σ| signal strength (default ON).
   convictionSizeFloor?: number; // smallest fraction of base size for a threshold-strength signal (default 0.6).
-  lastFailedEntry?: { price: number; side: "LONG" | "SHORT"; at: number }; // last losing entry (for re-entry block).
+  lastFailedEntry?: { price: number; side: "LONG" | "SHORT"; at: number; token?: string }; // last losing entry (for re-entry block).
   auditLogs?: Array<AuditLogEntry>; // per-sync reasoning trail (why each tick entered/held/skipped).
   jupHistoryBackfilledAt?: string; // set once the full on-chain trade history has been imported into the journal (one-time).
   statsResetAt?: string; // journal ledger keeps full history, but aggregate stats only count trades closed after this.
@@ -3153,6 +3188,7 @@ function loadJupiterConfig(): JupiterConfig {
       if (parsed.cooldownMinutes === undefined) parsed.cooldownMinutes = 30;
       if (parsed.lastTradeAddedAt === undefined) parsed.lastTradeAddedAt = "";
       if (parsed.token === undefined) parsed.token = "SOL";
+      parsed.tokens = tradeTokens(parsed); // normalized multi-asset scan list (primary first)
       if (parsed.meanReversionEnabled === undefined) parsed.meanReversionEnabled = true;
       if (parsed.topic === undefined || parsed.topic === "market" || parsed.topic === "Crypto") parsed.topic = "crypto,war";
       const legacyLosingWeights = parsed.weights && parsed.weights.sentiment === 0.9 && parsed.weights.elliottWave === 0.85;
@@ -3230,6 +3266,7 @@ function loadJupiterConfig(): JupiterConfig {
     cooldownMinutes: 30,
     lastTradeAddedAt: "",
     token: "SOL",
+    tokens: [...SUPPORTED_PERP_TOKENS],
     topic: "crypto,war",
     weights: { sentiment: 0, technical: 0.9, liquidity: 0.85, elliottWave: 0, supertrend: 0.9, fvg: 0, dca: 0 },
     lastTradePnL: 0,
@@ -3556,7 +3593,22 @@ async function getJupiterTokenPrice(mintId: string, defaultVal: number): Promise
 }
 
 // Query live SOL/USDC price from Jupiter DEX Aggregator API v6 Quote
-async function getJupiterQuotePrice(): Promise<number> {
+async function getJupiterQuotePrice(token: string = "SOL"): Promise<number> {
+  const asset = String(token || "SOL").toUpperCase();
+  if (asset !== "SOL") {
+    // Non-SOL markets: price from Jupiter's own perps market feed, then Yahoo. Return 0 on
+    // failure (never a stale hardcoded number) — callers fall back to the prediction price.
+    try {
+      const px = await getPerpMarketPrice(asset);
+      if (px > 0) return px;
+    } catch {}
+    try {
+      const chart = await chartResilient(`${asset}-USD`, { period1: subDays(new Date(), 1), interval: "1h" }, { validateResult: false });
+      const validQuotes = (chart?.quotes || []).filter((q: any) => q && q.close !== null);
+      if (validQuotes.length > 0) return validQuotes[validQuotes.length - 1].close;
+    } catch {}
+    return 0;
+  }
   try {
     // 1 SOL to USDC (USDC mint is EPj... SOL mint is So11...)
     const res = await fetch("https://public.jupiterapi.com/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000000&slippageBps=50");
@@ -4271,15 +4323,28 @@ function runJupCli(args: string[]): Promise<any> {
 // authoritative source that Phantom's activity feed itself reads from; used to reconcile the
 // bot's own signal-price PnL estimate against what actually happened on-chain.
 async function runJupPerpsHistory(keyName: string, asset: string, limit = 500): Promise<any[]> {
-  const res = await runJupCli(["perps", "history", "--key", keyName, "--asset", asset, "--limit", String(limit)]);
-  return (res && Array.isArray(res.trades)) ? res.trades : [];
+  // The CLI may list wrapped assets under either name (BTC/WBTC, ETH/WETH) depending on
+  // version — try every alias until one returns rows, so reconciliation never goes blind.
+  for (const alias of perpAssetAliases(asset)) {
+    const res = await runJupCli(["perps", "history", "--key", keyName, "--asset", alias, "--limit", String(limit)]);
+    const rows = (res && Array.isArray(res.trades)) ? res.trades : [];
+    if (rows.length > 0) return rows;
+  }
+  return [];
 }
 
 // Fetch the current USD price for a perps market asset (SOL/BTC/ETH) from the CLI.
 async function getPerpMarketPrice(asset: string): Promise<number> {
-  const markets = await runJupCli(["perps", "markets"]);
-  const m = Array.isArray(markets) ? markets.find((x: any) => String(x.asset).toUpperCase() === asset.toUpperCase()) : null;
+  const m = await findPerpMarket(asset);
   return m && Number(m.priceUsd) > 0 ? Number(m.priceUsd) : 0;
+}
+
+// Find the Jupiter Perps market for a token, tolerating wrapped-asset naming (BTC/WBTC, ETH/WETH).
+async function findPerpMarket(asset: string): Promise<any | null> {
+  const markets = await runJupCli(["perps", "markets"]);
+  if (!Array.isArray(markets)) return null;
+  const aliases = perpAssetAliases(asset);
+  return markets.find((x: any) => aliases.includes(String(x.asset).toUpperCase())) || null;
 }
 
 // Select margin collateral token based on available balances (USDC -> USDT -> SOL)
@@ -4314,13 +4379,16 @@ async function determineCollateralAsset(walletAddress: string, mode: "REAL" | "P
 // `executeSizeSol` is the strategy's notional position size in base-asset units
 // (e.g. SOL units); we convert it to a collateral amount for the CLI.
 async function executeOnChainTradeServerSide(
-  direction: "LONG" | "SHORT" | "CLOSE", 
-  executeSizeSol = 0.05, 
-  opts: { tpPct?: number; slPct?: number; collateralAsset?: string } = {}
+  direction: "LONG" | "SHORT" | "CLOSE",
+  executeSizeSol = 0.05,
+  opts: { tpPct?: number; slPct?: number; collateralAsset?: string; asset?: string } = {}
 ): Promise<string | null> {
   const config = loadJupiterConfig();
   const keyName = jupCliKeyName(config);
-  const asset = String(config.token || "SOL").toUpperCase();
+  // The asset being traded comes from the trade itself (multi-asset daemon); config.token is
+  // only the legacy fallback for callers that don't pass one.
+  const asset = String(opts.asset || config.token || "SOL").toUpperCase();
+  const assetAliases = perpAssetAliases(asset);
   const leverage = Number(config.leverage) || 5;
 
   try {
@@ -4328,7 +4396,7 @@ async function executeOnChainTradeServerSide(
       // Find the open position for this asset (or any) and close it fully.
       const posResult = await runJupCli(["perps", "positions", "--key", keyName]);
       const list = (posResult && posResult.positions) || [];
-      const match = list.find((p: any) => String(p.asset).toUpperCase() === asset) || list[0];
+      const match = list.find((p: any) => assetAliases.includes(String(p.asset).toUpperCase())) || list[0];
       if (!match || !match.positionPubkey) {
         console.log(`[Jupiter Perps CLI] No open position found to CLOSE for ${asset}.`);
         return null;
@@ -4343,7 +4411,11 @@ async function executeOnChainTradeServerSide(
     const side = direction === "LONG" ? "long" : "short";
     // Convert notional base-asset size -> required collateral (USD), then to the
     // input token's units. CLI input supports SOL/BTC/ETH/USDC (USDT -> USDC).
-    const assetPrice = await getPerpMarketPrice(asset);
+    // Resolve the market once: gives both the live price and the CLI's own name for the
+    // asset (wrapped forms like WBTC/WETH must be passed back exactly as the CLI lists them).
+    const market = await findPerpMarket(asset);
+    const cliAssetName = market ? String(market.asset).toUpperCase() : asset;
+    const assetPrice = market && Number(market.priceUsd) > 0 ? Number(market.priceUsd) : 0;
     if (!assetPrice) throw new Error(`Could not resolve ${asset} market price`);
     const notionalUsd = executeSizeSol * assetPrice;
     let collateralUsd = notionalUsd / leverage;
@@ -4421,10 +4493,10 @@ async function executeOnChainTradeServerSide(
     const tpStr = tpPrice.toFixed(6);
     const slStr = slPrice.toFixed(6);
 
-    console.log(`[Jupiter Perps CLI] OPEN ${side} ${asset}: collateral ~${amount} ${input}, ${leverage}x (notional ~$${notionalUsd.toFixed(2)})`);
+    console.log(`[Jupiter Perps CLI] OPEN ${side} ${cliAssetName}: collateral ~${amount} ${input}, ${leverage}x (notional ~$${notionalUsd.toFixed(2)})`);
     const res = await runJupCli([
       "perps", "open",
-      "--asset", asset,
+      "--asset", cliAssetName,
       "--side", side,
       "--amount", String(amount),
       "--input", input,
@@ -4498,7 +4570,11 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
     // Run the signal on the configured timeframe (default 1h). Previously the interval arg was
     // omitted → silently defaulted to 15m, contradicting the 1h move in STRATEGY_RESULTS.md §9/§10
     // (5m/fast scalping is a structurally losing config: tiny edge × high trade count × fees).
-    const pred = await getPredictionData(config.token, config.topic, config.weights, config.interval || "1h", "", false, config.meanReversionEnabled !== false);
+    // An OPEN position is always managed against ITS OWN market (multi-asset: the open trade may
+    // be on a different token than the configured primary); when flat, this is the primary token
+    // and the candidate scan below may switch pred to another market before entry evaluation.
+    const managedToken = String((config.activeTrade && config.activeTrade.token) || config.token || "SOL").toUpperCase();
+    let pred = await getPredictionData(managedToken, config.topic, config.weights, config.interval || "1h", "", false, config.meanReversionEnabled !== false);
     config.lastCheckedAt = new Date().toISOString();
     delete config.error;
 
@@ -4511,7 +4587,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
 
     let exitPrice = pred.price;
     // Attempt to source real-time pricing from Jupiter's DEX price quote
-    const jupPrice = await getJupiterQuotePrice();
+    let jupPrice = await getJupiterQuotePrice(managedToken);
     if (jupPrice > 0) {
       exitPrice = jupPrice;
     }
@@ -4584,7 +4660,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           try {
             if (config.privateKey && activeTrade.mode !== "PAPER") {
               console.log(`[Jupiter Perps] Executing REAL partial CLOSE (${(frac * 100).toFixed(0)}%). Size: ${closeSize.toFixed(4)}`);
-              await executeOnChainTradeServerSide("CLOSE", closeSize);
+              await executeOnChainTradeServerSide("CLOSE", closeSize, { asset: activeTrade.token || managedToken });
             } else {
               console.log(`[Jupiter Perps] PAPER partial scale-out ${(frac * 100).toFixed(0)}% (simulated).`);
             }
@@ -4669,7 +4745,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           // Remember the price/side/time of this failed entry so the daemon can refuse to re-arm
           // the SAME side at the SAME level (the bot previously fired 4 longs in a ~0.3-wide chop
           // band and lost them all). Cleared on any win below.
-          (config as any).lastFailedEntry = { price: entryPrice, side: activeTrade.side, at: Date.now() };
+          (config as any).lastFailedEntry = { price: entryPrice, side: activeTrade.side, at: Date.now(), token: activeTrade.token || managedToken };
         } else {
           delete (config as any).consecutiveLossesUpdatedAt;
           delete (config as any).lastFailedEntry;
@@ -4723,8 +4799,8 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         try {
           // Execute REAL on-chain close
           if (config.privateKey && closedTradeLog.mode !== "PAPER") {
-            console.log(`[Jupiter Perps] Executing onchain CLOSE on Jupiter Perps. Size: ${closedTradeLog.sizeInSol} SOL`);
-            const signature = await executeOnChainTradeServerSide("CLOSE", closedTradeLog.sizeInSol);
+            console.log(`[Jupiter Perps] Executing onchain CLOSE on Jupiter Perps. Size: ${closedTradeLog.sizeInSol} ${closedTradeLog.token}`);
+            const signature = await executeOnChainTradeServerSide("CLOSE", closedTradeLog.sizeInSol, { asset: closedTradeLog.token });
             if (signature) {
               closeReason += ` (Tx: ${signature.slice(0, 8)}...)`;
             }
@@ -4760,14 +4836,14 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
               `*Exit Reason*: ${closeReason}\n` +
               (closedTradeLog.entryReason ? `*Entry Reason*: ${closedTradeLog.entryReason}\n` : "") +
               (closedTradeLog.entryMarket && closedTradeLog.entryMarket !== closedTradeLog.exitMarket ? `*Market at Entry*: ${closedTradeLog.entryMarket}\n` : "") +
-              `*Asset*: ${config.token}\n` +
+              `*Asset*: ${closedTradeLog.token}\n` +
               `*Entry Price*: $${closedTradeLog.entryPrice.toFixed(2)}\n` +
               `*Exit Price*: $${closedTradeLog.exitPrice.toFixed(2)}\n` +
               `*Take Profit Limit*: +${closedTradeLog.takeProfitPct.toFixed(1)}% ($${tpPriceClosedJup.toFixed(2)})\n` +
               `*Stop Loss Limit*: -${closedTradeLog.stopLossPct.toFixed(1)}% ($${slPriceClosedJup.toFixed(2)})\n` +
               `*Trade Time/Duration*: ${durationText}\n` +
               `*PnL*: ${pnlIcon} ${currentPnlPercent.toFixed(2)}%\n` +
-              `*Size*: ${closedTradeLog.sizeInSol.toFixed(4)} SOL\n` +
+              `*Size*: ${closedTradeLog.sizeInSol.toFixed(4)} ${closedTradeLog.token}\n` +
               `*Sentiment Score (Political/News)*: ${closedTradeLog.sentiment !== undefined ? closedTradeLog.sentiment.toFixed(2) : "N/A"}\n` +
               `*Technical Score (MACD)*: ${closedTradeLog.technicalScore !== undefined ? (closedTradeLog.technicalScore >= 0 ? "+" : "") + closedTradeLog.technicalScore.toFixed(2) : "N/A"}\n\n`;
 
@@ -4812,6 +4888,35 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
 
     // Only allow entering a position if not already in one (strict 1-trade limit check)
     if (!activeTrade && (!closedThisTick || reversalReentry)) {
+      // ── Multi-asset candidate scan ────────────────────────────────────────────────────────
+      // Frequency through breadth: when the primary market has no actionable signal, scan the
+      // other configured Jupiter Perps markets with the SAME 1h strategy and gates, and let the
+      // first actionable candidate take the (single) position slot. A reversal re-entry stays on
+      // the token that just closed; forceTrigger stays on the primary (it's a manual override).
+      let entryToken = managedToken;
+      const managedActionable = !!(enterSide && enterSide !== "HOLD" && pred.isTrendConfirmed3x && pred.trend !== "SIDEWAYS");
+      if (!forceTrigger && !reversalReentry && !managedActionable) {
+        for (const tok of tradeTokens(config)) {
+          if (tok === managedToken) continue;
+          try {
+            const altPred = await getPredictionData(tok, config.topic, config.weights, config.interval || "1h", "", false, config.meanReversionEnabled !== false);
+            let altSide: "LONG" | "SHORT" | null = null;
+            if (altPred.action === "Long Buy" || altPred.action === "Short Buy (Oversold)") altSide = "LONG";
+            else if (altPred.action === "Short Sell" || altPred.action === "Long Sell (Overbought)") altSide = "SHORT";
+            if (altSide && altPred.isTrendConfirmed3x && altPred.trend !== "SIDEWAYS") {
+              addAuditLog(config, `SCAN ${tok}: actionable ${altSide} candidate while ${managedToken} holds — evaluating ${tok} entry through the shared gates.`, "info");
+              pred = altPred;
+              enterSide = altSide;
+              entryToken = tok;
+              jupPrice = await getJupiterQuotePrice(tok); // 0 on failure → pred.price is used
+              break;
+            }
+          } catch (scanErr: any) {
+            console.warn(`[Jupiter Daemon] Multi-asset scan failed for ${tok} (skipping):`, scanErr.message);
+          }
+        }
+      }
+
       let canEnter = false;
       if (enterSide && enterSide !== "HOLD" && (pred.isTrendConfirmed3x || forceTrigger)) {
         canEnter = true;
@@ -4840,6 +4945,30 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         canEnter = false;
         config.error = `Circuit breaker active: ${(config as any).consecutiveLosses} consecutive losses (limit ${maxConsecLosses}). New entries paused; auto-resets 6h after the last loss, or reset consecutiveLosses to resume now.`;
         console.log(`[Jupiter Daemon] ${config.error}`);
+      }
+
+      // Entry cooldown + rolling-24h open cap. These rails were documented but vestigial in this
+      // daemon (cooldown was hardcoded elapsed); with the multi-asset scan multiplying entry
+      // opportunities they are now enforced for real. Both are global across all markets — the
+      // point is limiting the WALLET's churn/fee exposure, not any single market's.
+      const cooldownMin = Math.max(Number(config.cooldownMinutes) || 30, 0);
+      if (canEnter && !forceTrigger && cooldownMin > 0 && config.lastTradeAddedAt) {
+        const sinceMin = (Date.now() - new Date(config.lastTradeAddedAt).getTime()) / 60000;
+        if (Number.isFinite(sinceMin) && sinceMin >= 0 && sinceMin < cooldownMin) {
+          canEnter = false;
+          config.error = `Cooldown: last entry was ${sinceMin.toFixed(0)}m ago (< ${cooldownMin}m between entries).`;
+          console.log(`[Jupiter Daemon] ${config.error}`);
+        }
+      }
+      const maxOpens24h = Number(process.env.MAX_OPENS_PER_24H) || 6;
+      if (canEnter && !forceTrigger && maxOpens24h > 0) {
+        const dayAgoMs = Date.now() - 24 * 3600 * 1000;
+        const opens24 = (tradesHistory || []).filter((t: any) => t && t.entryTime && new Date(t.entryTime).getTime() >= dayAgoMs).length;
+        if (opens24 >= maxOpens24h) {
+          canEnter = false;
+          config.error = `Daily open cap: ${opens24} entries in the last 24h (max ${maxOpens24h}, env MAX_OPENS_PER_24H). Standing aside.`;
+          console.log(`[Jupiter Daemon] ${config.error}`);
+        }
       }
 
       // Macro regime filter: block counter-macro entries — no new LONGs while the
@@ -4886,7 +5015,8 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       const reentryBlockPct = (config as any).reentryBlockPct ?? 0.6;   // % of price
       const reentryBlockMin = (config as any).reentryBlockMinutes ?? 60; // minutes
       const failed = (config as any).lastFailedEntry;
-      if (canEnter && !forceTrigger && reentryBlockPct > 0 && failed && enterSide === failed.side) {
+      if (canEnter && !forceTrigger && reentryBlockPct > 0 && failed && enterSide === failed.side
+          && (!failed.token || failed.token === entryToken)) { // price levels only comparable on the same market
         const ageMin = (Date.now() - (failed.at || 0)) / 60000;
         const distPct = Math.abs(pred.price - failed.price) / failed.price * 100;
         if (ageMin <= reentryBlockMin && distPct <= reentryBlockPct) {
@@ -4912,7 +5042,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         // the momentum path (composite score Σ vs threshold, gated by trend/Supertrend/MACD-RSI).
         // Traders reading the journal shouldn't have to infer this from the raw Σ number.
         const strategyLabel = pred.trend === "RANGE-FADE" ? "Mean-Reversion" : "Momentum";
-        const ctx = `[${strategyLabel}] ${pred.action}` +
+        const ctx = `[${strategyLabel}] ${entryToken} ${pred.action}` +
           ` · Σ=${(sigma >= 0 ? "+" : "") + sigma.toFixed(3)} vs ±${SIGNAL_THRESHOLD}` +
           ` · trend ${pred.trend}${adx !== undefined ? ` · ADX ${adx.toFixed(0)}` : ""}` +
           ` · macro ${macroRegimeNote} · px $${pred.price?.toFixed(2)}`;
@@ -5036,6 +5166,11 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             entryPrice = jupPrice;
           }
 
+          // SOL's USD price for valuing SOL-denominated collateral/balances. Equal to entryPrice
+          // only when the entry itself is on SOL; a failure resolves 0 → the affordability check
+          // below then routes the trade to PAPER instead of guessing.
+          const solPriceUsd = entryToken === "SOL" ? entryPrice : await getPerpMarketPrice("SOL").catch(() => 0);
+
           // 4. Trade sizing. Collateral (margin) is set either explicitly via positionSizeUsd
           //    (collateral = size / leverage) or as allocationPercent of the wallet. We then
           //    enforce Jupiter's hard $10 minimum collateral for new positions.
@@ -5050,8 +5185,9 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           } else if (collateralAsset === "USDT" || collateralAsset === "USDC") {
             collateralUsd = collateralBalance * allocationFraction;
           } else {
-            // SOL collateral: approximate USD value via the traded asset price (SOL-centric).
-            collateralUsd = solBalance * allocationFraction * entryPrice;
+            // SOL collateral: value it at SOL's own price — entryPrice is the TRADED asset's
+            // price, which is only the same thing when the entry is on SOL itself.
+            collateralUsd = solBalance * allocationFraction * solPriceUsd;
           }
 
           // Conviction-based sizing: scale collateral by signal strength so the strongest,
@@ -5081,7 +5217,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           // If the wallet can't cover the required collateral, fall back to PAPER (don't fail on-chain).
           const availableCollateralUsd = (collateralAsset === "USDT" || collateralAsset === "USDC")
             ? collateralBalance
-            : solBalance * entryPrice;
+            : solBalance * solPriceUsd;
           if (mode !== "PAPER" && collateralUsd > availableCollateralUsd) {
             console.log(`[Jupiter Daemon] Need $${collateralUsd.toFixed(2)} collateral but only $${availableCollateralUsd.toFixed(2)} available in ${collateralAsset} — switching to PAPER.`);
             mode = "PAPER";
@@ -5133,7 +5269,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             realizedPnlPct: 0,     // leveraged % already banked via partial scale-out(s)
             remainingFrac: 1,      // open fraction of the position (1 → 0.5 after the scale-out)
             version: APP_VERSION.version, // build the trade was executed under (commit-stamped)
-            token: String(config.token || "SOL").toUpperCase(),
+            token: entryToken,
             entryReason,
             entryMarket,
             sentiment: pred.sentiment,
@@ -5141,8 +5277,8 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             news: pred.latestNews || pred.headlines?.map((h: any) => h.title || h) || []
           };
           config.lastTradeAddedAt = new Date().toISOString();
-          console.log(`[Jupiter Daemon] Automated Position Opened! Side: ${enterSide}, Size: ${sizeInSol.toFixed(4)} SOL @ $${entryPrice.toFixed(2)} [Collateral: ${collateralAsset} (${mode})]`);
-          addAuditLog(config, `OPEN ${enterSide} @ $${entryPrice.toFixed(2)} [${mode}, ${sizeInSol.toFixed(4)} SOL, ${config.leverage || 5}x] — executed under ${APP_VERSION.display}`, "trade");
+          console.log(`[Jupiter Daemon] Automated Position Opened! Side: ${enterSide} ${entryToken}, Size: ${sizeInSol.toFixed(4)} ${entryToken} @ $${entryPrice.toFixed(2)} [Collateral: ${collateralAsset} (${mode})]`);
+          addAuditLog(config, `OPEN ${enterSide} ${entryToken} @ $${entryPrice.toFixed(2)} [${mode}, ${sizeInSol.toFixed(4)} ${entryToken}, ${config.leverage || 5}x] — executed under ${APP_VERSION.display}`, "trade");
 
           let onChainSignature = "";
           let realOpenFailed = false;
@@ -5156,11 +5292,12 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
               // same asset, only caught on the eventual combined CLOSE).
               try {
                 const preOpenPositions = await runJupCli(["perps", "positions", "--key", jupCliKeyName(config)]);
-                const existing = ((preOpenPositions && preOpenPositions.positions) || []).find(
-                  (p: any) => String(p.asset).toUpperCase() === String(config.token || "SOL").toUpperCase()
-                );
+                // Single-position rule is GLOBAL across all markets (multi-asset): any existing
+                // on-chain position — same token or not — means the slot is taken. This also
+                // covers the desync case where the local tracker lost a position on another asset.
+                const existing = ((preOpenPositions && preOpenPositions.positions) || [])[0];
                 if (existing) {
-                  throw new Error(`Refusing to OPEN — an on-chain position for ${config.token} already exists (${existing.positionPubkey || "unknown"}). Local activeTrade state was desynced.`);
+                  throw new Error(`Refusing to OPEN ${entryToken} — an on-chain position already exists (${String(existing.asset || "?")} ${existing.positionPubkey || "unknown"}). Single-position rule; local activeTrade state was desynced.`);
                 }
               } catch (guardErr: any) {
                 if (guardErr instanceof Error && guardErr.message.startsWith("Refusing to OPEN")) throw guardErr;
@@ -5168,8 +5305,8 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
                 console.error("[Jupiter Daemon] Pre-open position check failed (continuing):", guardErr.message);
               }
 
-              console.log(`[Jupiter Perps] Executing REAL onchain OPEN: ${enterSide} ${config.token} (notional ${sizeInSol.toFixed(4)} units)`);
-              const signature = await executeOnChainTradeServerSide(enterSide as "LONG" | "SHORT", sizeInSol, { tpPct, slPct, collateralAsset });
+              console.log(`[Jupiter Perps] Executing REAL onchain OPEN: ${enterSide} ${entryToken} (notional ${sizeInSol.toFixed(4)} units)`);
+              const signature = await executeOnChainTradeServerSide(enterSide as "LONG" | "SHORT", sizeInSol, { tpPct, slPct, collateralAsset, asset: entryToken });
               if (signature) {
                 onChainSignature = signature;
                 if (activeTrade) activeTrade.openSignature = signature;
@@ -5194,7 +5331,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
 
           if (activeTrade) try {
             const telegramConfig = loadTelegramConfig();
-            const logMsg = `Automated Open: ${enterSide} at $${entryPrice.toFixed(2)} [Size: ${sizeInSol.toFixed(4)} SOL, Lev: ${config.leverage || 5}x] [${APP_VERSION.display}]` + (onChainSignature ? ` (Tx: ${onChainSignature.slice(0, 8)}...)` : "");
+            const logMsg = `Automated Open: ${enterSide} ${entryToken} at $${entryPrice.toFixed(2)} [Size: ${sizeInSol.toFixed(4)} ${entryToken}, Lev: ${config.leverage || 5}x] [${APP_VERSION.display}]` + (onChainSignature ? ` (Tx: ${onChainSignature.slice(0, 8)}...)` : "");
             addAuditLog(telegramConfig, logMsg, "trade");
             saveTelegramConfig(telegramConfig);
             
@@ -5218,8 +5355,8 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
                 `*Action*: OPEN ${sideIcon} ${enterSide}\n` +
                 `*Market*: ${entryMarket}\n` +
                 (entryReason ? `*Entry Reason*: ${entryReason}\n` : "") +
-                `*Asset*: ${config.token}\n` +
-                `*Size*: ${sizeInSol.toFixed(4)} SOL\n` +
+                `*Asset*: ${entryToken}\n` +
+                `*Size*: ${sizeInSol.toFixed(4)} ${entryToken}\n` +
                 `*Leverage*: ${lev}x\n` +
                 `*Entry Price*: $${entryPrice.toFixed(2)}\n` +
                 `*Take Profit Limit*: +${tpPct.toFixed(1)}% ($${tpPrice.toFixed(2)})\n` +
@@ -6616,6 +6753,7 @@ app.post("/api/jupiter-config", async (req, res) => {
       frequencyMinutes,
       cooldownMinutes,
       token,
+      tokens,
       topic,
       weights,
       interval,
@@ -6766,6 +6904,7 @@ app.post("/api/jupiter-config", async (req, res) => {
     }
 
     if (token) current.token = token;
+    if (tokens !== undefined) current.tokens = tradeTokens({ ...current, tokens }); // normalize + whitelist
     if (topic) current.topic = topic;
     if (weights) current.weights = weights;
     if (interval) current.interval = normalizeTradeInterval(interval);
@@ -6803,9 +6942,9 @@ app.post("/api/jupiter-config", async (req, res) => {
 
     if (forceClose && current.activeTrade) {
       const entryPrice = current.activeTrade.entryPrice;
-      let exitPrice = await getJupiterQuotePrice();
+      let exitPrice = await getJupiterQuotePrice(current.activeTrade.token || current.token);
       if (exitPrice <= 0) {
-        const pred = await getPredictionData(current.token, current.topic, current.weights);
+        const pred = await getPredictionData(current.activeTrade.token || current.token, current.topic, current.weights);
         exitPrice = pred.price;
       }
 
@@ -6838,7 +6977,8 @@ app.post("/api/jupiter-config", async (req, res) => {
         entryTime: current.activeTrade.entryTime,
         exitTime: exitTimeStr,
         takeProfitPct: current.activeTrade.takeProfitPct !== undefined ? current.activeTrade.takeProfitPct : tpPct,
-        stopLossPct: current.activeTrade.stopLossPct !== undefined ? current.activeTrade.stopLossPct : slPct
+        stopLossPct: current.activeTrade.stopLossPct !== undefined ? current.activeTrade.stopLossPct : slPct,
+        token: current.activeTrade.token || String(current.token || "SOL").toUpperCase()
       };
       current.tradesHistory.push(manualClosedLog);
       appendJournalEntry("Auto-Trade (Jupiter)", manualClosedLog); // permanent, never reset
@@ -6846,7 +6986,7 @@ app.post("/api/jupiter-config", async (req, res) => {
       if (current.privateKey) {
          console.log(`[Jupiter Config Override] Executing mainnet on-chain CLOSE for ${current.activeTrade.sizeInSol} SOL...`);
          try {
-           await executeOnChainTradeServerSide("CLOSE", current.activeTrade.sizeInSol);
+           await executeOnChainTradeServerSide("CLOSE", current.activeTrade.sizeInSol, { asset: current.activeTrade.token });
          } catch (err: any) {
            console.error("[Jupiter Override] Failed to execute on-chain close:", err.message);
          }
@@ -6868,9 +7008,9 @@ app.post("/api/jupiter-config", async (req, res) => {
       // If a position is already open, settle it first before opening the new one!
       if (current.activeTrade) {
         const entryPrice = current.activeTrade.entryPrice;
-        let exitPrice = await getJupiterQuotePrice();
+        let exitPrice = await getJupiterQuotePrice(current.activeTrade.token || current.token);
         if (exitPrice <= 0) {
-          const pred = await getPredictionData(current.token, current.topic, current.weights);
+          const pred = await getPredictionData(current.activeTrade.token || current.token, current.topic, current.weights);
           exitPrice = pred.price;
         }
 
@@ -6911,7 +7051,7 @@ app.post("/api/jupiter-config", async (req, res) => {
         if (current.privateKey && current.activeTrade?.mode !== "PAPER") {
            console.log(`[Jupiter Config Override] Executing mainnet on-chain CLOSE first for ${current.activeTrade.sizeInSol} SOL...`);
            try {
-             await executeOnChainTradeServerSide("CLOSE", current.activeTrade.sizeInSol);
+             await executeOnChainTradeServerSide("CLOSE", current.activeTrade.sizeInSol, { asset: current.activeTrade.token });
            } catch (err: any) {
              console.error("[Jupiter Override] Failed to execute on-chain close first:", err.message);
            }

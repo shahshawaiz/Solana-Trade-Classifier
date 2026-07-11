@@ -124,16 +124,17 @@ const TIMEFRAMES = [
   { tf: "5 days", role: "Macro regime from DXY / 10-Y yield / VIX trend → RISK-ON / OFF / NEUTRAL", knob: "useMacroFilter" },
   { tf: "30m / 45m / 6h", role: "Entry cooldown · pause after 2 straight losses · circuit-breaker auto-reset", knob: "risk rails" },
   { tf: "360 min", role: "Stagnation stop: still under +0.5% with no scale-out → cut it before borrow fees bleed it", knob: "STAGNANT_EXIT_MINUTES" },
-  { tf: "rolling 24 h", role: "Maximum 4 position opens", knob: "daily cap" }
+  { tf: "rolling 24 h", role: "Maximum 6 position opens across all markets", knob: "MAX_OPENS_PER_24H" },
+  { tf: "per cycle", role: "Multi-market scan order when flat: primary token, then the other configured markets", knob: "tokens (SOL · ETH · BTC)" }
 ];
 
 const RISK_RAILS = [
-  { name: "Single position", desc: "One open position at a time — the wallet's real on-chain positions are re-checked before every REAL open, so a state desync can never double exposure." },
+  { name: "Single position", desc: "One open position at a time ACROSS ALL MARKETS — the wallet's real on-chain positions are re-checked before every REAL open, so a state desync can never double exposure." },
   { name: "Macro filter", desc: "No new longs while the dollar/yields/volatility backdrop is RISK-OFF; no new shorts while RISK-ON." },
   { name: "Cooldowns", desc: "30 min between entries · 45 min pause after 2 consecutive losses · circuit breaker at 8 straight losses (auto-resets 6h after the last loss)." },
   { name: "Leverage cap", desc: "Hard MAX_LEVERAGE (5×) clamp at config load, config save, and trade sizing — 89% of all historical losses came from 11–20× May trades." },
-  { name: "Daily cap", desc: "At most 4 position opens per rolling 24 hours." },
-  { name: "Re-entry block", desc: "Never re-arms the same side at the same price level right after a loss." }
+  { name: "Daily cap", desc: "At most 6 position opens per rolling 24 hours across all markets (MAX_OPENS_PER_24H)." },
+  { name: "Re-entry block", desc: "Never re-arms the same side at the same price level on the same market right after a loss." }
 ];
 
 export const StrategyGuide = () => (
@@ -158,7 +159,7 @@ export const StrategyGuide = () => (
         <SectionHeading icon={Zap} kicker="The 30-second version" title="Four questions, every 20 minutes" />
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           {[
-            ["Is there a bias?", "Weighted composite Σ of MACD, RSI and Supertrend on 1h candles must exceed ±0.25 conviction."],
+            ["Is there a bias?", "Weighted composite Σ of MACD, RSI and Supertrend on 1h candles must exceed ±0.25 conviction. If the primary market holds, the same test scans ETH and BTC — frequency through breadth, one position slot."],
             ["What market is this?", "ADX(14) routes it: strong trend → momentum · ranging → fade the range edge · weak trend → stand aside."],
             ["Is the entry safe?", "Trend-alignment, no-chasing, macro, cooldown and pyramiding gates all have to agree."],
             ["Manage what's open", "ATR ladder banks half at +1.5×ATR, moves the stop to breakeven, trails the rest. Hard TP/SL live on-chain."]
@@ -179,7 +180,11 @@ export const StrategyGuide = () => (
         <SectionHeading icon={Activity} kicker="Entry pipeline" title="From candles to an open position" />
         <div className="bg-bg-card border border-border-dim rounded-2xl p-5">
           <div className="max-w-md mx-auto">
-            <FlowBox title="⏱ Every 20 minutes">Fetch fresh 1-hour candles and compute all indicators.</FlowBox>
+            <FlowBox title="⏱ Every 20 minutes">
+              Fetch fresh 1-hour candles and compute all indicators — for the open position's market, or, when
+              flat, for the primary market first and then the other configured markets (SOL → ETH → BTC) until
+              one has an actionable signal. One position slot across all markets.
+            </FlowBox>
             <FlowArrow />
             <FlowBox title="Composite bias Σ">
               MACD <span className="font-mono">×0.90</span> · RSI <span className="font-mono">×0.85</span> · Supertrend{" "}
