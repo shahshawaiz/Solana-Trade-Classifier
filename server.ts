@@ -487,11 +487,16 @@ export function normalizeTradeInterval(interval: any): string {
 // across all markets: the wallet can't collateralize concurrent $10-min positions, and a single
 // position keeps risk identical to the single-asset bot.
 const SUPPORTED_PERP_TOKENS = ["SOL", "ETH", "BTC"];
+// Default scan list is SOL+ETH only: the 90d 1h canonical backtest (2026-07-11) ran PF 1.50/1.86
+// on SOL/ETH but only 1.16 on BTC pre-fees — BTC's lower volatility puts its ATR targets too close
+// to the ~0.3% round-trip fee floor, the same math that rules out sub-hourly trading. BTC stays
+// whitelisted; opt in explicitly via config.tokens if its regime changes.
+const DEFAULT_SCAN_TOKENS = ["SOL", "ETH"];
 export function tradeTokens(config: any): string[] {
   const primary = String(config?.token || "SOL").toUpperCase();
   const raw = Array.isArray(config?.tokens) && config.tokens.length > 0
     ? config.tokens.map((t: any) => String(t).toUpperCase())
-    : [primary, ...SUPPORTED_PERP_TOKENS];
+    : [primary, ...DEFAULT_SCAN_TOKENS];
   const out: string[] = [];
   for (const t of [primary, ...raw]) {
     if (SUPPORTED_PERP_TOKENS.includes(t) && !out.includes(t)) out.push(t);
@@ -3266,7 +3271,7 @@ function loadJupiterConfig(): JupiterConfig {
     cooldownMinutes: 30,
     lastTradeAddedAt: "",
     token: "SOL",
-    tokens: [...SUPPORTED_PERP_TOKENS],
+    tokens: [...DEFAULT_SCAN_TOKENS],
     topic: "crypto,war",
     weights: { sentiment: 0, technical: 0.9, liquidity: 0.85, elliottWave: 0, supertrend: 0.9, fvg: 0, dca: 0 },
     lastTradePnL: 0,

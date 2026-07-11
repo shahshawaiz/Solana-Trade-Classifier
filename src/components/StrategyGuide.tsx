@@ -125,7 +125,7 @@ const TIMEFRAMES = [
   { tf: "30m / 45m / 6h", role: "Entry cooldown · pause after 2 straight losses · circuit-breaker auto-reset", knob: "risk rails" },
   { tf: "360 min", role: "Stagnation stop: still under +0.5% with no scale-out → cut it before borrow fees bleed it", knob: "STAGNANT_EXIT_MINUTES" },
   { tf: "rolling 24 h", role: "Maximum 6 position opens across all markets", knob: "MAX_OPENS_PER_24H" },
-  { tf: "per cycle", role: "Multi-market scan order when flat: primary token, then the other configured markets", knob: "tokens (SOL · ETH · BTC)" }
+  { tf: "per cycle", role: "Multi-market scan order when flat: primary token, then the other configured markets (BTC opt-in — pre-fee edge too thin in the 90d test)", knob: "tokens (SOL · ETH)" }
 ];
 
 const RISK_RAILS = [
@@ -159,7 +159,7 @@ export const StrategyGuide = () => (
         <SectionHeading icon={Zap} kicker="The 30-second version" title="Four questions, every 20 minutes" />
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           {[
-            ["Is there a bias?", "Weighted composite Σ of MACD, RSI and Supertrend on 1h candles must exceed ±0.25 conviction. If the primary market holds, the same test scans ETH and BTC — frequency through breadth, one position slot."],
+            ["Is there a bias?", "Weighted composite Σ of MACD, RSI and Supertrend on 1h candles must exceed ±0.25 conviction. If the primary market holds, the same test scans the other configured markets (default ETH) — frequency through breadth, one position slot."],
             ["What market is this?", "ADX(14) routes it: strong trend → momentum · ranging → fade the range edge · weak trend → stand aside."],
             ["Is the entry safe?", "Trend-alignment, no-chasing, macro, cooldown and pyramiding gates all have to agree."],
             ["Manage what's open", "ATR ladder banks half at +1.5×ATR, moves the stop to breakeven, trails the rest. Hard TP/SL live on-chain."]
@@ -182,7 +182,7 @@ export const StrategyGuide = () => (
           <div className="max-w-md mx-auto">
             <FlowBox title="⏱ Every 20 minutes">
               Fetch fresh 1-hour candles and compute all indicators — for the open position's market, or, when
-              flat, for the primary market first and then the other configured markets (SOL → ETH → BTC) until
+              flat, for the primary market first and then the other configured markets (default SOL → ETH) until
               one has an actionable signal. One position slot across all markets.
             </FlowBox>
             <FlowArrow />

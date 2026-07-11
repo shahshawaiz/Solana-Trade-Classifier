@@ -48,7 +48,7 @@ Every **20 minutes** the daemon pulls fresh **1-hour candles** and asks four que
 | **30 min / 45 min / 6 h** | Entry cooldown / two-loss pause / circuit-breaker auto-reset | risk rails |
 | **360 min** | Stagnation time-stop: still under +0.5% and no scale-out → cut it (perps borrow fees bleed ~0.087%/h even when price goes nowhere) | `STAGNANT_EXIT_MINUTES` |
 | **rolling 24 h** | Max 6 position opens across all markets | `MAX_OPENS_PER_24H` |
-| **per cycle** | Multi-market scan order when flat: primary token first, then the other configured markets | `tokens` (default SOL, ETH, BTC) |
+| **per cycle** | Multi-market scan order when flat: primary token first, then the other configured markets | `tokens` (default SOL, ETH — BTC opt-in, PF 1.16 pre-fees in the 90d test) |
 
 **Why 1h and not 5m/15m?** Round-trip fees + hourly borrow cost ~0.35% per trade, while sub-hourly
 ATR targets are only ~0.5–0.9% — the Mar–Jul 2026 sweep found **every** sub-hourly entry variant
