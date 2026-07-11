@@ -7,7 +7,8 @@ It also documents the three engines (live, server backtest, benchmark) and their
 > ⚠️ **Reality check.** Backtest numbers are in-sample and optimistic; they exclude funding,
 > slippage, and most fees. The honest expectation for a well-built version of this is
 > *break-even-to-slightly-positive pre-fees*. See [STRATEGY_RESULTS.md](../STRATEGY_RESULTS.md) for
-> the methodology and the skeptical framing. Default execution mode is **PAPER**.
+> the methodology and the skeptical framing. The shipped config runs **REAL** execution — switch
+> `tradingMode` to `PAPER` to simulate.
 
 ---
 
@@ -36,7 +37,11 @@ quotes (OHLC) + news ──▶ performCoreAnalysis ──▶ Σ (composite bias)
                        +  time-limit  +  in-profit reversal
 ```
 
-Default candle interval is **15m**; the canonical backtest in STRATEGY_RESULTS.md runs **1h**.
+The live daemon trades **1h candles** (clamped to `1h`/`1d` by `normalizeTradeInterval` at config
+load *and* save — the Mar–Jul 2026 sweep found every sub-hourly variant fee-negative). The
+canonical backtest in STRATEGY_RESULTS.md also runs **1h**; backtest endpoints still accept
+sub-hourly intervals for research. See the README's "Timeframes" table for what every other
+window (20-min loop, 60-min range, 5-day macro, …) is used for.
 
 ---
 
@@ -103,7 +108,8 @@ profile (chosen to stop the bot standing aside every cycle):
    Additionally **ADX(14) > `ADX_ENTRY_MIN`** (default **25**) for the momentum entry itself: a Mar–Jul 2026
    1h sweep (fees + borrow modeled) found ADX 15–25 momentum entries fee-negative in *every* variant tested,
    while ADX>25 entries ran ~62% win rate / PF 1.5 in the trending window. 15–25 = trend exists, stand aside.
-2. **15m Supertrend direction** — block counter-trend entries on the higher timeframe (applied on 5m/15m).
+2. **15m Supertrend direction** — block counter-trend entries on the higher timeframe. Only applied
+   when trading 5m/15m candles, so it is **inactive at the 1h live interval** (kept for research runs).
 3. **Momentum trigger = MACD-sign OR RSI(21)-timing** — *either* confirms (previously required **both**,
    plus a MACD histogram "rising 2 bars" condition, which almost never coincided → the bot never traded).
    - MACD-sign: histogram > 0 for LONG, < 0 for SHORT.
@@ -191,7 +197,7 @@ Exits are **never** blocked by these gates — only new entries.
 
 ## 6. Execution
 
-- **PAPER** (default): fully simulated; positions, partials, and PnL are bookkept, no on-chain orders.
+- **PAPER**: fully simulated; positions, partials, and PnL are bookkept, no on-chain orders.
 - **REAL**: opens/closes (including the partial scale-out's half-size reduce) execute on Jupiter Perps
   via the CLI (`executeOnChainTradeServerSide`). A position is only tracked if it actually opened
   on-chain (no phantom positions).
