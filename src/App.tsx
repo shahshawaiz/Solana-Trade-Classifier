@@ -722,7 +722,7 @@ export default function App() {
   const [journalResyncing, setJournalResyncing] = useState(false);
   const [journalResyncMsg, setJournalResyncMsg] = useState<string | null>(null);
   const [journalViewMode, setJournalViewMode] = useState<'grid' | 'table'>('grid');
-  const [journalStatsPeriod, setJournalStatsPeriod] = useState<'daily' | 'weekly' | 'monthly'>('daily');
+  const [journalStatsPeriod, setJournalStatsPeriod] = useState<'lifetime' | 'daily' | 'weekly' | 'monthly'>('lifetime');
   const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
   const [macroData, setMacroData] = useState<any | null>(null);
   const [macroLoading, setMacroLoading] = useState(false);
@@ -943,9 +943,39 @@ export default function App() {
   // math below stays in UTC-getter space against a Date built from the ET y/m/d — never the
   // browser's local timezone — so the bucket boundaries can't drift with the viewer's locale.
   const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  // Lifetime rollup over the FULL ledger — deliberately independent of the server's
+  // `statsResetAt` (which the /api/journal `stats` field is scoped to, and which moves whenever
+  // a backfill/reset happens server-side, e.g. a fresh deploy re-importing on-chain history).
+  // The journal tab's numbers should reflect the trades actually on screen, not which build
+  // recorded them, so this is computed straight from `journalData.trades`.
+  const journalLifetimeStats = useMemo(() => {
+    const trades = (journalData?.trades || []).filter((t: any) => typeof t.pnl === "number");
+    if (!trades.length) return null;
+    const wins = trades.filter((t: any) => t.pnl > 0);
+    const losses = trades.filter((t: any) => t.pnl < 0);
+    const totalPnL = trades.reduce((s: number, t: any) => s + t.pnl, 0);
+    const durations = trades.map((t: any) => t.durationMins).filter((d: any) => typeof d === "number");
+    const best = trades.reduce((m: any, t: any) => (m === null || t.pnl > m.pnl ? t : m), null);
+    const worst = trades.reduce((m: any, t: any) => (m === null || t.pnl < m.pnl ? t : m), null);
+    return {
+      total: trades.length,
+      wins: wins.length,
+      losses: losses.length,
+      winRate: (wins.length / trades.length) * 100,
+      totalPnL,
+      avgPnL: totalPnL / trades.length,
+      avgDurationMins: durations.length ? Math.round(durations.reduce((s: number, d: number) => s + d, 0) / durations.length) : 0,
+      longCount: trades.filter((t: any) => t.side === "LONG").length,
+      shortCount: trades.filter((t: any) => t.side === "SHORT").length,
+      best,
+      worst,
+    };
+  }, [journalData]);
+
   const journalPeriodStats = useMemo(() => {
     const trades = journalData?.trades || [];
-    if (!trades.length) return [];
+    if (!trades.length || journalStatsPeriod === 'lifetime') return [];
     const pad = (n: number) => String(n).padStart(2, "0");
     const dayLabel = (d: Date) => `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
     const buckets = new Map<string, { key: string; label: string; trades: any[] }>();
@@ -5585,43 +5615,19 @@ export default function App() {
                 </div>
               )}
 
-              {/* Performance stats */}
-              {journalData?.stats && journalData.stats.total > 0 && (
-                <section className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-                  {[
-                    { label: "Total Trades", value: journalData.stats.total, tone: "neutral" },
-                    { label: "Win Rate", value: `${journalData.stats.winRate.toFixed(1)}%`, tone: journalData.stats.winRate >= 50 ? "pos" : "neg" },
-                    { label: "Total PnL", value: `${journalData.stats.totalPnL >= 0 ? "+" : ""}${journalData.stats.totalPnL.toFixed(2)}%`, tone: journalData.stats.totalPnL >= 0 ? "pos" : "neg" },
-                    { label: "Avg PnL", value: `${journalData.stats.avgPnL >= 0 ? "+" : ""}${journalData.stats.avgPnL.toFixed(2)}%`, tone: journalData.stats.avgPnL >= 0 ? "pos" : "neg" },
-                    { label: "Best / Worst", value: `${journalData.stats.best ? (journalData.stats.best.pnl >= 0 ? "+" : "") + journalData.stats.best.pnl.toFixed(1) : "—"} / ${journalData.stats.worst ? journalData.stats.worst.pnl.toFixed(1) : "—"}%`, tone: "neutral" },
-                    { label: "Avg Duration", value: journalData.stats.avgDurationMins >= 60 ? `${Math.floor(journalData.stats.avgDurationMins / 60)}h ${journalData.stats.avgDurationMins % 60}m` : `${journalData.stats.avgDurationMins}m`, tone: "neutral" },
-                  ].map((s) => (
-                    <div key={s.label} className="p-3 bg-bg-card border border-border-dim rounded-lg">
-                      <span className="text-[8.5px] uppercase tracking-wider text-text-dim font-bold block mb-1">{s.label}</span>
-                      <span className={cn(
-                        "text-base font-black tracking-tight",
-                        s.tone === "pos" ? "text-sol-green" : s.tone === "neg" ? "text-red-400" : "text-text-heading"
-                      )}>{s.value}</span>
-                    </div>
-                  ))}
-                  <div className="col-span-2 sm:col-span-3 lg:col-span-6 flex gap-4 text-[10px] text-text-dim font-mono pt-1">
-                    <span>🟢 LONG: <span className="text-text-heading font-bold">{journalData.stats.longCount}</span></span>
-                    <span>🔴 SHORT: <span className="text-text-heading font-bold">{journalData.stats.shortCount}</span></span>
-                    <span>Wins: <span className="text-sol-green font-bold">{journalData.stats.wins}</span></span>
-                    <span>Losses: <span className="text-red-400 font-bold">{journalData.stats.losses}</span></span>
-                  </div>
-                </section>
-              )}
-
-              {/* Period performance (daily / weekly / monthly PnL) */}
-              {journalPeriodStats.length > 0 && (
+              {/* Journal stats — a single time-scope selector drives which view renders: Lifetime
+                  shows the aggregate stat tiles, Daily/Weekly/Monthly shows the per-period
+                  breakdown table. Only one renders at a time, and both are computed straight from
+                  journalData.trades (the full ledger) — never gated by the server's statsResetAt,
+                  so the numbers always match what's actually in the ledger below. */}
+              {(journalData?.trades || []).length > 0 && (
                 <section className="space-y-3">
                   <div className="flex items-center justify-between gap-2 border-b border-border-dim/60 pb-2">
                     <span className="text-[10px] font-mono font-bold text-text-heading uppercase tracking-[0.2em] flex items-center gap-2">
-                      <Calendar className="w-3 h-3 text-sol-purple" /> Period Performance
+                      <Calendar className="w-3 h-3 text-sol-purple" /> Journal Stats
                     </span>
                     <div className="flex items-center gap-1 p-0.5 rounded-lg bg-bg-input border border-border-dim">
-                      {(['daily', 'weekly', 'monthly'] as const).map((p) => (
+                      {(['lifetime', 'daily', 'weekly', 'monthly'] as const).map((p) => (
                         <button
                           key={p}
                           type="button"
@@ -5636,46 +5642,76 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-                  <div className="overflow-x-auto rounded-lg border border-border-dim">
-                    <table className="w-full text-[10.5px] font-mono">
-                      <thead>
-                        <tr className="bg-bg-input text-text-dim uppercase text-[8.5px] tracking-wider">
-                          <th className="text-left px-3 py-2 font-bold">Period</th>
-                          <th className="text-right px-3 py-2 font-bold">Trades</th>
-                          <th className="text-right px-3 py-2 font-bold">W / L</th>
-                          <th className="text-right px-3 py-2 font-bold">Win Rate</th>
-                          <th className="text-right px-3 py-2 font-bold">Total PnL</th>
-                          <th className="text-right px-3 py-2 font-bold">Total PnL $</th>
-                          <th className="text-right px-3 py-2 font-bold">Avg PnL</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {journalPeriodStats.map((p) => (
-                          <tr key={p.key} className="border-t border-border-dim/40 hover:bg-bg-card transition-colors">
-                            <td className="px-3 py-2 text-text-heading font-semibold whitespace-nowrap">{p.label}</td>
-                            <td className="px-3 py-2 text-right text-text-heading">{p.count}</td>
-                            <td className="px-3 py-2 text-right">
-                              <span className="text-sol-green">{p.wins}</span>
-                              <span className="text-text-dim"> / </span>
-                              <span className="text-red-400">{p.losses}</span>
-                            </td>
-                            <td className={cn("px-3 py-2 text-right font-bold", p.winRate >= 50 ? "text-sol-green" : "text-red-400")}>
-                              {p.winRate.toFixed(1)}%
-                            </td>
-                            <td className={cn("px-3 py-2 text-right font-bold", p.totalPnl >= 0 ? "text-sol-green" : "text-red-400")}>
-                              {p.totalPnl >= 0 ? "+" : ""}{p.totalPnl.toFixed(2)}%
-                            </td>
-                            <td className={cn("px-3 py-2 text-right", p.totalPnlUsd === null ? "text-text-dim" : p.totalPnlUsd >= 0 ? "text-sol-green" : "text-red-400")}>
-                              {p.totalPnlUsd === null ? "—" : `${p.totalPnlUsd >= 0 ? "+" : ""}$${p.totalPnlUsd.toFixed(2)}`}
-                            </td>
-                            <td className={cn("px-3 py-2 text-right", p.avgPnl >= 0 ? "text-sol-green" : "text-red-400")}>
-                              {p.avgPnl >= 0 ? "+" : ""}{p.avgPnl.toFixed(2)}%
-                            </td>
-                          </tr>
+
+                  {journalStatsPeriod === 'lifetime' ? (
+                    journalLifetimeStats && (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                        {[
+                          { label: "Total Trades", value: journalLifetimeStats.total, tone: "neutral" },
+                          { label: "Win Rate", value: `${journalLifetimeStats.winRate.toFixed(1)}%`, tone: journalLifetimeStats.winRate >= 50 ? "pos" : "neg" },
+                          { label: "Total PnL", value: `${journalLifetimeStats.totalPnL >= 0 ? "+" : ""}${journalLifetimeStats.totalPnL.toFixed(2)}%`, tone: journalLifetimeStats.totalPnL >= 0 ? "pos" : "neg" },
+                          { label: "Avg PnL", value: `${journalLifetimeStats.avgPnL >= 0 ? "+" : ""}${journalLifetimeStats.avgPnL.toFixed(2)}%`, tone: journalLifetimeStats.avgPnL >= 0 ? "pos" : "neg" },
+                          { label: "Best / Worst", value: `${journalLifetimeStats.best ? (journalLifetimeStats.best.pnl >= 0 ? "+" : "") + journalLifetimeStats.best.pnl.toFixed(1) : "—"} / ${journalLifetimeStats.worst ? journalLifetimeStats.worst.pnl.toFixed(1) : "—"}%`, tone: "neutral" },
+                          { label: "Avg Duration", value: journalLifetimeStats.avgDurationMins >= 60 ? `${Math.floor(journalLifetimeStats.avgDurationMins / 60)}h ${journalLifetimeStats.avgDurationMins % 60}m` : `${journalLifetimeStats.avgDurationMins}m`, tone: "neutral" },
+                        ].map((s) => (
+                          <div key={s.label} className="p-3 bg-bg-card border border-border-dim rounded-lg">
+                            <span className="text-[8.5px] uppercase tracking-wider text-text-dim font-bold block mb-1">{s.label}</span>
+                            <span className={cn(
+                              "text-base font-black tracking-tight",
+                              s.tone === "pos" ? "text-sol-green" : s.tone === "neg" ? "text-red-400" : "text-text-heading"
+                            )}>{s.value}</span>
+                          </div>
                         ))}
-                      </tbody>
-                    </table>
-                  </div>
+                        <div className="col-span-2 sm:col-span-3 lg:col-span-6 flex gap-4 text-[10px] text-text-dim font-mono pt-1">
+                          <span>🟢 LONG: <span className="text-text-heading font-bold">{journalLifetimeStats.longCount}</span></span>
+                          <span>🔴 SHORT: <span className="text-text-heading font-bold">{journalLifetimeStats.shortCount}</span></span>
+                          <span>Wins: <span className="text-sol-green font-bold">{journalLifetimeStats.wins}</span></span>
+                          <span>Losses: <span className="text-red-400 font-bold">{journalLifetimeStats.losses}</span></span>
+                        </div>
+                      </div>
+                    )
+                  ) : (
+                    <div className="overflow-x-auto rounded-lg border border-border-dim">
+                      <table className="w-full text-[10.5px] font-mono">
+                        <thead>
+                          <tr className="bg-bg-input text-text-dim uppercase text-[8.5px] tracking-wider">
+                            <th className="text-left px-3 py-2 font-bold">Period</th>
+                            <th className="text-right px-3 py-2 font-bold">Trades</th>
+                            <th className="text-right px-3 py-2 font-bold">W / L</th>
+                            <th className="text-right px-3 py-2 font-bold">Win Rate</th>
+                            <th className="text-right px-3 py-2 font-bold">Total PnL</th>
+                            <th className="text-right px-3 py-2 font-bold">Total PnL $</th>
+                            <th className="text-right px-3 py-2 font-bold">Avg PnL</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {journalPeriodStats.map((p) => (
+                            <tr key={p.key} className="border-t border-border-dim/40 hover:bg-bg-card transition-colors">
+                              <td className="px-3 py-2 text-text-heading font-semibold whitespace-nowrap">{p.label}</td>
+                              <td className="px-3 py-2 text-right text-text-heading">{p.count}</td>
+                              <td className="px-3 py-2 text-right">
+                                <span className="text-sol-green">{p.wins}</span>
+                                <span className="text-text-dim"> / </span>
+                                <span className="text-red-400">{p.losses}</span>
+                              </td>
+                              <td className={cn("px-3 py-2 text-right font-bold", p.winRate >= 50 ? "text-sol-green" : "text-red-400")}>
+                                {p.winRate.toFixed(1)}%
+                              </td>
+                              <td className={cn("px-3 py-2 text-right font-bold", p.totalPnl >= 0 ? "text-sol-green" : "text-red-400")}>
+                                {p.totalPnl >= 0 ? "+" : ""}{p.totalPnl.toFixed(2)}%
+                              </td>
+                              <td className={cn("px-3 py-2 text-right", p.totalPnlUsd === null ? "text-text-dim" : p.totalPnlUsd >= 0 ? "text-sol-green" : "text-red-400")}>
+                                {p.totalPnlUsd === null ? "—" : `${p.totalPnlUsd >= 0 ? "+" : ""}$${p.totalPnlUsd.toFixed(2)}`}
+                              </td>
+                              <td className={cn("px-3 py-2 text-right", p.avgPnl >= 0 ? "text-sol-green" : "text-red-400")}>
+                                {p.avgPnl >= 0 ? "+" : ""}{p.avgPnl.toFixed(2)}%
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </section>
               )}
 
