@@ -4401,7 +4401,7 @@ async function determineCollateralAsset(walletAddress: string, mode: "REAL" | "P
 async function executeOnChainTradeServerSide(
   direction: "LONG" | "SHORT" | "CLOSE",
   executeSizeSol = 0.05,
-  opts: { tpPct?: number; slPct?: number; collateralAsset?: string; asset?: string } = {}
+  opts: { tpPct?: number; slPct?: number; collateralAsset?: string; asset?: string; sizeUsd?: number } = {}
 ): Promise<string | null> {
   const config = loadJupiterConfig();
   const keyName = jupCliKeyName(config);
@@ -4413,7 +4413,7 @@ async function executeOnChainTradeServerSide(
 
   try {
     if (direction === "CLOSE") {
-      // Find the open position for this asset (or any) and close it fully.
+      // Find the open position for this asset (or any) and close it.
       const posResult = await runJupCli(["perps", "positions", "--key", keyName]);
       const list = (posResult && posResult.positions) || [];
       const match = list.find((p: any) => assetAliases.includes(String(p.asset).toUpperCase())) || list[0];
@@ -4421,9 +4421,16 @@ async function executeOnChainTradeServerSide(
         console.log(`[Jupiter Perps CLI] No open position found to CLOSE for ${asset}.`);
         return null;
       }
-      const res = await runJupCli(["perps", "close", "--position", match.positionPubkey, "--key", keyName]);
+      // The CLI closes the ENTIRE position unless --size (a USD notional amount) is given, in
+      // which case it reduces by exactly that much. opts.sizeUsd is set ONLY by the scale-out
+      // partial close (see the +1.5×ATR handler) — every other caller wants (and gets) a full
+      // close of whatever remains. Without this, a "partial" scale-out was silently closing the
+      // whole real position while the daemon kept tracking a phantom 50% runner against it.
+      const closeArgs = ["perps", "close", "--position", match.positionPubkey, "--key", keyName];
+      if (opts.sizeUsd && opts.sizeUsd > 0) closeArgs.push("--size", opts.sizeUsd.toFixed(2));
+      const res = await runJupCli(closeArgs);
       const sig = (res && (res.signature || (Array.isArray(res.signatures) && res.signatures[0]))) || null;
-      console.log(`[Jupiter Perps CLI] CLOSE submitted. Position: ${match.positionPubkey} Tx: ${sig}`);
+      console.log(`[Jupiter Perps CLI] CLOSE submitted${opts.sizeUsd ? ` (partial, $${opts.sizeUsd.toFixed(2)})` : ""}. Position: ${match.positionPubkey} Tx: ${sig}`);
       return sig;
     }
 
@@ -4550,6 +4557,24 @@ async function executeOnChainTradeServerSide(
   }
 }
 
+// Push a moved software stop (breakeven move / ATR-trail ratchet — see evaluateExit) to the
+// on-chain SL trigger. executeOnChainTradeServerSide's OPEN branch attaches an on-chain TP/SL so
+// Jupiter's own keeper protects the position even if this daemon is offline, but that trigger is
+// otherwise static from open — without this re-sync it stays frozen at the ORIGINAL entry∓1.5×ATR
+// stop forever, silently undoing the breakeven/trail protection the moment the daemon restarts.
+// Best-effort: caller logs/swallows errors — the daemon's in-memory stopPrice remains the
+// authoritative close decision regardless; this only keeps the on-chain fallback in sync with it.
+async function updateOnChainStopLoss(asset: string, newSlPrice: number, config: any): Promise<void> {
+  const keyName = jupCliKeyName(config);
+  const assetAliases = perpAssetAliases(String(asset || "SOL").toUpperCase());
+  const posResult = await runJupCli(["perps", "positions", "--key", keyName]);
+  const list = (posResult && posResult.positions) || [];
+  const match = list.find((p: any) => assetAliases.includes(String(p.asset).toUpperCase()));
+  if (!match || !match.positionPubkey) return; // no matching on-chain position — nothing to sync
+  await runJupCli(["perps", "set", "--position", match.positionPubkey, "--sl", newSlPrice.toFixed(6), "--key", keyName]);
+  console.log(`[Jupiter Perps CLI] Synced on-chain SL -> $${newSlPrice.toFixed(6)} for position ${match.positionPubkey}.`);
+}
+
 // Background auto-execution logic for Connected Jupiter/Phantom Wallets
 async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
   const config = loadJupiterConfig();
@@ -4655,6 +4680,7 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         if (activeTrade.remainingFrac === undefined) activeTrade.remainingFrac = 1;
         if (activeTrade.realizedPnlPct === undefined) activeTrade.realizedPnlPct = 0;
 
+        const prevStopPrice = activeTrade.stopPrice;
         const res = evaluateExit({
           side: activeTrade.side,
           entryPrice,
@@ -4679,8 +4705,12 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           addAuditLog(config, `SCALE-OUT ${(frac * 100).toFixed(0)}% ${activeTrade.side} @ $${exitPrice.toFixed(2)} (+${EXIT_PARTIAL_MULT}×ATR) — banked ${banked >= 0 ? "+" : ""}${banked.toFixed(2)}%; stop → breakeven $${entryPrice.toFixed(2)}. Runner ${(activeTrade.remainingFrac * 100).toFixed(0)}% now trailing.`, "trade");
           try {
             if (config.privateKey && activeTrade.mode !== "PAPER") {
-              console.log(`[Jupiter Perps] Executing REAL partial CLOSE (${(frac * 100).toFixed(0)}%). Size: ${closeSize.toFixed(4)}`);
-              await executeOnChainTradeServerSide("CLOSE", closeSize, { asset: activeTrade.token || managedToken });
+              // sizeUsd tells the CLI to reduce the position by exactly this notional instead of
+              // closing it entirely — omitting --size (the pre-fix behavior) fully closed the
+              // real position here, leaving the daemon tracking a "runner" that no longer existed.
+              const closeSizeUsd = closeSize * exitPrice;
+              console.log(`[Jupiter Perps] Executing REAL partial CLOSE (${(frac * 100).toFixed(0)}%). Size: ${closeSize.toFixed(4)} (~$${closeSizeUsd.toFixed(2)})`);
+              await executeOnChainTradeServerSide("CLOSE", closeSize, { asset: activeTrade.token || managedToken, sizeUsd: closeSizeUsd });
             } else {
               console.log(`[Jupiter Perps] PAPER partial scale-out ${(frac * 100).toFixed(0)}% (simulated).`);
             }
@@ -4699,6 +4729,14 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           } else {
             closeReason = `Stop Loss ($${activeTrade.stopPrice.toFixed(2)})`;
           }
+        }
+
+        // Keep the on-chain SL trigger in sync with the software's breakeven-move/trail ratchet
+        // (see updateOnChainStopLoss). Skip if we're closing this tick anyway — no point pushing
+        // a stop update to a position we're about to tear down.
+        if (!res.close && activeTrade.stopPrice !== prevStopPrice && config.privateKey && activeTrade.mode !== "PAPER") {
+          updateOnChainStopLoss(activeTrade.token || managedToken, activeTrade.stopPrice, config).catch((e: any) =>
+            console.error("[Jupiter Daemon] Failed to sync on-chain SL:", e.message));
         }
       } else {
         // Legacy fallback (no ATR at entry): fixed TP/SL on the stored leveraged %.
@@ -5257,10 +5295,14 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
           // scale-out and the trail all use the same noise-safe distance.
           const atrVal = flooredAtr(Number(pred.atr) || 0, entryPrice);
           if (atrVal > 0 && entryPrice > 0) {
-            const slMult = Number(pred.atrSlMult) || 1.5;
-            const tpMult = Number(pred.atrTpMult) || 3.0;
-            slPct = ((slMult * atrVal) / entryPrice) * 100 * leverage;
-            tpPct = ((tpMult * atrVal) / entryPrice) * 100 * leverage;
+            // EXIT_SL_MULT/EXIT_TP_MULT — the SAME constants evaluateExit uses — not the older
+            // pred.atrSlMult/atrTpMult pair (1.5/3.0, predates the shared exit engine). Those two
+            // drifted apart from EXIT_TP_MULT (4.0): the on-chain TP trigger this tpPct feeds into
+            // (executeOnChainTradeServerSide) was firing a full close at +3×ATR, a keeper-enforced
+            // cap the software's own trail/hard-cap logic (4×ATR) could never actually reach on a
+            // real trade.
+            slPct = ((EXIT_SL_MULT * atrVal) / entryPrice) * 100 * leverage;
+            tpPct = ((EXIT_TP_MULT * atrVal) / entryPrice) * 100 * leverage;
           } else if (pred.suggestedTpPrice && pred.suggestedSlPrice && entryPrice > 0) {
             // No ATR — derive the limits from the ticker's recent 20-bar swing range (the
             // suggested TP/SL prices fall back to swing high/low), scaled by leverage, instead

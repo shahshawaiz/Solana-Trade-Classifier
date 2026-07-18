@@ -28,7 +28,8 @@ import {
   ChevronUp,
   X,
   LayoutGrid,
-  List
+  List,
+  Calendar
 } from "lucide-react";
 import { 
   LineChart, 
@@ -721,6 +722,7 @@ export default function App() {
   const [journalResyncing, setJournalResyncing] = useState(false);
   const [journalResyncMsg, setJournalResyncMsg] = useState<string | null>(null);
   const [journalViewMode, setJournalViewMode] = useState<'grid' | 'table'>('grid');
+  const [journalStatsPeriod, setJournalStatsPeriod] = useState<'daily' | 'weekly' | 'monthly'>('daily');
   const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
   const [macroData, setMacroData] = useState<any | null>(null);
   const [macroLoading, setMacroLoading] = useState(false);
@@ -935,6 +937,59 @@ export default function App() {
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  // Buckets closed trades into calendar day/week(Mon-start)/month periods (ET calendar day,
+  // matching every other journal timestamp in this view) and rolls up PnL per bucket. All date
+  // math below stays in UTC-getter space against a Date built from the ET y/m/d — never the
+  // browser's local timezone — so the bucket boundaries can't drift with the viewer's locale.
+  const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const journalPeriodStats = useMemo(() => {
+    const trades = journalData?.trades || [];
+    if (!trades.length) return [];
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const dayLabel = (d: Date) => `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+    const buckets = new Map<string, { key: string; label: string; trades: any[] }>();
+    for (const t of trades) {
+      if (!t.exitTime || typeof t.pnl !== "number") continue;
+      const dayKey = etFormat(new Date(t.exitTime), "yyyy-MM-dd");
+      const [y, m, d] = dayKey.split("-").map(Number);
+      const dayUtc = new Date(Date.UTC(y, m - 1, d));
+      let key: string, label: string;
+      if (journalStatsPeriod === 'daily') {
+        key = dayKey;
+        label = dayLabel(dayUtc);
+      } else if (journalStatsPeriod === 'weekly') {
+        const mondayOffset = (dayUtc.getUTCDay() + 6) % 7; // 0=Mon..6=Sun
+        const weekStart = new Date(dayUtc.getTime() - mondayOffset * 86400000);
+        const weekEnd = new Date(weekStart.getTime() + 6 * 86400000);
+        key = `${weekStart.getUTCFullYear()}-${pad(weekStart.getUTCMonth() + 1)}-${pad(weekStart.getUTCDate())}`;
+        label = `${dayLabel(weekStart)} – ${dayLabel(weekEnd)}`;
+      } else {
+        key = dayKey.slice(0, 7);
+        label = `${MONTH_NAMES[m - 1]} ${y}`;
+      }
+      if (!buckets.has(key)) buckets.set(key, { key, label, trades: [] });
+      buckets.get(key)!.trades.push(t);
+    }
+    return Array.from(buckets.values()).map((b) => {
+      const wins = b.trades.filter((t) => t.pnl > 0).length;
+      const losses = b.trades.filter((t) => t.pnl < 0).length;
+      const totalPnl = b.trades.reduce((s, t) => s + (t.pnl || 0), 0);
+      const totalPnlUsd = b.trades.reduce((s, t) => s + (typeof t.pnlUsd === "number" ? t.pnlUsd : 0), 0);
+      const hasUsd = b.trades.some((t) => typeof t.pnlUsd === "number");
+      return {
+        key: b.key,
+        label: b.label,
+        count: b.trades.length,
+        wins,
+        losses,
+        winRate: (wins / b.trades.length) * 100,
+        totalPnl,
+        totalPnlUsd: hasUsd ? totalPnlUsd : null,
+        avgPnl: totalPnl / b.trades.length,
+      };
+    }).sort((a, b) => b.key.localeCompare(a.key));
+  }, [journalData, journalStatsPeriod]);
 
   const generateInterpolatedPoints = () => {
     if (!forecastData) return [];
@@ -5554,6 +5609,72 @@ export default function App() {
                     <span>🔴 SHORT: <span className="text-text-heading font-bold">{journalData.stats.shortCount}</span></span>
                     <span>Wins: <span className="text-sol-green font-bold">{journalData.stats.wins}</span></span>
                     <span>Losses: <span className="text-red-400 font-bold">{journalData.stats.losses}</span></span>
+                  </div>
+                </section>
+              )}
+
+              {/* Period performance (daily / weekly / monthly PnL) */}
+              {journalPeriodStats.length > 0 && (
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between gap-2 border-b border-border-dim/60 pb-2">
+                    <span className="text-[10px] font-mono font-bold text-text-heading uppercase tracking-[0.2em] flex items-center gap-2">
+                      <Calendar className="w-3 h-3 text-sol-purple" /> Period Performance
+                    </span>
+                    <div className="flex items-center gap-1 p-0.5 rounded-lg bg-bg-input border border-border-dim">
+                      {(['daily', 'weekly', 'monthly'] as const).map((p) => (
+                        <button
+                          key={p}
+                          type="button"
+                          onClick={() => setJournalStatsPeriod(p)}
+                          className={cn(
+                            "text-[9px] font-bold uppercase tracking-wider py-1 px-2.5 rounded cursor-pointer transition-colors capitalize",
+                            journalStatsPeriod === p ? "bg-sol-purple/20 text-sol-purple" : "text-text-dim hover:text-text-heading"
+                          )}
+                        >
+                          {p}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto rounded-lg border border-border-dim">
+                    <table className="w-full text-[10.5px] font-mono">
+                      <thead>
+                        <tr className="bg-bg-input text-text-dim uppercase text-[8.5px] tracking-wider">
+                          <th className="text-left px-3 py-2 font-bold">Period</th>
+                          <th className="text-right px-3 py-2 font-bold">Trades</th>
+                          <th className="text-right px-3 py-2 font-bold">W / L</th>
+                          <th className="text-right px-3 py-2 font-bold">Win Rate</th>
+                          <th className="text-right px-3 py-2 font-bold">Total PnL</th>
+                          <th className="text-right px-3 py-2 font-bold">Total PnL $</th>
+                          <th className="text-right px-3 py-2 font-bold">Avg PnL</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {journalPeriodStats.map((p) => (
+                          <tr key={p.key} className="border-t border-border-dim/40 hover:bg-bg-card transition-colors">
+                            <td className="px-3 py-2 text-text-heading font-semibold whitespace-nowrap">{p.label}</td>
+                            <td className="px-3 py-2 text-right text-text-heading">{p.count}</td>
+                            <td className="px-3 py-2 text-right">
+                              <span className="text-sol-green">{p.wins}</span>
+                              <span className="text-text-dim"> / </span>
+                              <span className="text-red-400">{p.losses}</span>
+                            </td>
+                            <td className={cn("px-3 py-2 text-right font-bold", p.winRate >= 50 ? "text-sol-green" : "text-red-400")}>
+                              {p.winRate.toFixed(1)}%
+                            </td>
+                            <td className={cn("px-3 py-2 text-right font-bold", p.totalPnl >= 0 ? "text-sol-green" : "text-red-400")}>
+                              {p.totalPnl >= 0 ? "+" : ""}{p.totalPnl.toFixed(2)}%
+                            </td>
+                            <td className={cn("px-3 py-2 text-right", p.totalPnlUsd === null ? "text-text-dim" : p.totalPnlUsd >= 0 ? "text-sol-green" : "text-red-400")}>
+                              {p.totalPnlUsd === null ? "—" : `${p.totalPnlUsd >= 0 ? "+" : ""}$${p.totalPnlUsd.toFixed(2)}`}
+                            </td>
+                            <td className={cn("px-3 py-2 text-right", p.avgPnl >= 0 ? "text-sol-green" : "text-red-400")}>
+                              {p.avgPnl >= 0 ? "+" : ""}{p.avgPnl.toFixed(2)}%
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </section>
               )}
