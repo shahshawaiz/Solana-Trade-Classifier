@@ -720,6 +720,13 @@ export default function App() {
   const [token, setToken] = useState("SOL");
   const [predictionHeadlines, setPredictionHeadlines] = useState<any[]>([]);
   const [currentView, setCurrentView] = useState<'dashboard' | 'apiDocs' | 'about' | 'jupiter' | 'forecast' | 'liquidation' | 'journal' | 'strategy' | 'chat'>('jupiter');
+  // Set by "Discuss with Assistant" on a trade record — jumps to the Assistant tab and seeds the
+  // chat with that trade's context so the conversation starts already grounded in it.
+  const [chatSeedTrade, setChatSeedTrade] = useState<any | null>(null);
+  const discussTradeWithAssistant = (trade: any) => {
+    setChatSeedTrade(trade);
+    setCurrentView('chat');
+  };
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [journalData, setJournalData] = useState<any | null>(null);
   const [journalLoading, setJournalLoading] = useState(false);
@@ -5857,7 +5864,7 @@ export default function App() {
                             {expandedTradeId === trade.id && (
                               <>
                                 <TradeChart trade={trade} token={trade.token || token} />
-                                <ClaudeTradeAnalysis trade={trade} />
+                                <ClaudeTradeAnalysis trade={trade} onDiscuss={discussTradeWithAssistant} />
                               </>
                             )}
                           </div>
@@ -5953,7 +5960,7 @@ export default function App() {
                                       </div>
                                       <div>
                                         <TradeChart trade={trade} token={trade.token || token} />
-                                        <ClaudeTradeAnalysis trade={trade} />
+                                        <ClaudeTradeAnalysis trade={trade} onDiscuss={discussTradeWithAssistant} />
                                       </div>
                                     </div>
                                   </td>
@@ -5972,7 +5979,7 @@ export default function App() {
         ) : currentView === 'strategy' ? (
           <StrategyGuide />
         ) : currentView === 'chat' ? (
-          <ClaudeChat />
+          <ClaudeChat seedTrade={chatSeedTrade} onSeedConsumed={() => setChatSeedTrade(null)} />
         ) : (
           <main className="flex-1 flex flex-col p-8 bg-bg-main overflow-y-auto custom-scrollbar">
             <div className="max-w-4xl mx-auto w-full space-y-12 pb-20">

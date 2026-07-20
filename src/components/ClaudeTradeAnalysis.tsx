@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from "react";
-import { Sparkles, Loader2, RefreshCw } from "lucide-react";
+import { Sparkles, Loader2, RefreshCw, MessageSquare } from "lucide-react";
 
 // Shared between the grid and table Trade Journal views (mirrors TradeChart's placement) so a
 // single "Analyze with Claude" entry point works from either layout without duplicating the
 // fetch/render logic.
-export const ClaudeTradeAnalysis: React.FC<{ trade: any }> = ({ trade }) => {
+export const ClaudeTradeAnalysis: React.FC<{ trade: any; onDiscuss?: (trade: any) => void }> = ({ trade, onDiscuss }) => {
   const [analysis, setAnalysis] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [checkingHistory, setCheckingHistory] = useState(true);
@@ -50,15 +50,26 @@ export const ClaudeTradeAnalysis: React.FC<{ trade: any }> = ({ trade }) => {
   if (checkingHistory) return null;
 
   return (
-    <div className="mt-2 border-t border-border-dim/20 pt-2">
+    <div className="mt-2 border-t border-border-dim/20 pt-2 space-y-1.5">
       {!analysis && !loading && (
-        <button
-          type="button"
-          onClick={runAnalysis}
-          className="w-full flex items-center justify-center gap-1.5 text-[9px] font-bold uppercase tracking-wider text-sol-purple hover:text-sol-purple/80 cursor-pointer transition-colors"
-        >
-          <Sparkles className="w-3 h-3" /> Analyze with Claude
-        </button>
+        <div className="flex gap-1.5">
+          <button
+            type="button"
+            onClick={runAnalysis}
+            className="flex-1 flex items-center justify-center gap-1.5 text-[9px] font-bold uppercase tracking-wider text-sol-purple hover:text-sol-purple/80 cursor-pointer transition-colors border border-border-dim/40 rounded-lg py-1.5"
+          >
+            <Sparkles className="w-3 h-3" /> Analyze with Claude
+          </button>
+          {onDiscuss && (
+            <button
+              type="button"
+              onClick={() => onDiscuss(trade)}
+              className="flex-1 flex items-center justify-center gap-1.5 text-[9px] font-bold uppercase tracking-wider text-text-dim hover:text-text-heading cursor-pointer transition-colors border border-border-dim/40 rounded-lg py-1.5"
+            >
+              <MessageSquare className="w-3 h-3" /> Discuss with Assistant
+            </button>
+          )}
+        </div>
       )}
       {loading && (
         <div className="flex items-center justify-center gap-1.5 text-[9px] font-bold uppercase tracking-wider text-text-dim py-1">
@@ -74,15 +85,27 @@ export const ClaudeTradeAnalysis: React.FC<{ trade: any }> = ({ trade }) => {
             <div className="flex items-center gap-1.5 text-[8.5px] uppercase tracking-wider text-sol-purple font-bold">
               <Sparkles className="w-3 h-3" /> Claude Analysis
             </div>
-            <button
-              type="button"
-              onClick={runAnalysis}
-              disabled={loading}
-              title="Re-run analysis"
-              className="flex items-center gap-1 text-[8.5px] uppercase tracking-wider text-text-dim hover:text-text-heading cursor-pointer disabled:opacity-40"
-            >
-              <RefreshCw className="w-2.5 h-2.5" /> Re-analyze
-            </button>
+            <div className="flex items-center gap-2">
+              {onDiscuss && (
+                <button
+                  type="button"
+                  onClick={() => onDiscuss(trade)}
+                  title="Continue this in the Assistant chat"
+                  className="flex items-center gap-1 text-[8.5px] uppercase tracking-wider text-text-dim hover:text-text-heading cursor-pointer"
+                >
+                  <MessageSquare className="w-2.5 h-2.5" /> Discuss
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={runAnalysis}
+                disabled={loading}
+                title="Re-run analysis"
+                className="flex items-center gap-1 text-[8.5px] uppercase tracking-wider text-text-dim hover:text-text-heading cursor-pointer disabled:opacity-40"
+              >
+                <RefreshCw className="w-2.5 h-2.5" /> Re-analyze
+              </button>
+            </div>
           </div>
           {analysis}
         </div>

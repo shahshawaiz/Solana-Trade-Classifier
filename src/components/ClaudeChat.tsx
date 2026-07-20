@@ -5,6 +5,7 @@ import { format } from "date-fns";
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  displayContent?: string; // shown in the bubble instead of `content` — used to hide the raw JSON context sent for a seeded trade behind a short human-readable line.
   toolCalls?: Array<{ name: string; input: any }>;
 }
 
@@ -25,21 +26,25 @@ const SUGGESTED_PROMPTS = [
   "Do SHORT trades underperform LONG trades in my history?",
 ];
 
-const ChatPanel: React.FC = () => {
+const ChatPanel: React.FC<{ seedTrade?: any | null; onSeedConsumed?: () => void }> = ({ seedTrade, onSeedConsumed }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const lastSeedIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, sending]);
 
-  const send = async (text: string) => {
-    const content = text.trim();
-    if (!content || sending) return;
-    const nextMessages: ChatMessage[] = [...messages, { role: "user", content }];
+  // display is what renders in the bubble; payload (defaults to display) is what's actually sent
+  // to Claude — lets a seeded trade show a short human line while Claude still gets the full JSON.
+  const send = async (display: string, payload?: string) => {
+    const displayText = display.trim();
+    if (!displayText || sending) return;
+    const payloadText = (payload ?? display).trim();
+    const nextMessages: ChatMessage[] = [...messages, { role: "user", content: payloadText, displayContent: displayText }];
     setMessages(nextMessages);
     setInput("");
     setSending(true);
@@ -59,6 +64,28 @@ const ChatPanel: React.FC = () => {
       setSending(false);
     }
   };
+
+  // A trade clicked via "Discuss with Assistant" seeds the conversation automatically — the user
+  // shouldn't have to re-describe context the app already has.
+  useEffect(() => {
+    if (!seedTrade || !seedTrade.id || lastSeedIdRef.current === seedTrade.id) return;
+    lastSeedIdRef.current = seedTrade.id;
+    const label = `${seedTrade.side || ""} ${seedTrade.token || ""} ${typeof seedTrade.pnl === "number" ? (seedTrade.pnl >= 0 ? "+" : "") + seedTrade.pnl.toFixed(2) + "%" : ""}`.trim();
+    let whenStr = "";
+    try { whenStr = format(new Date(seedTrade.exitTime || seedTrade.entryTime), "MMM d, HH:mm"); } catch {}
+    const display = `Let's discuss this trade: ${label}${whenStr ? ` (${whenStr})` : ""}`;
+    const isLoss = typeof seedTrade.pnl === "number" && seedTrade.pnl < 0;
+    const payload = `I want to discuss this specific trade from my journal. ${
+      isLoss
+        ? "It lost — tell me the smallest concrete change that would have won it or cut the loss, without touching what's working elsewhere in the strategy."
+        : "It won — tell me what specifically worked, and flag anything that was actually a close call worth a second look."
+    }\n\nTrade data (JSON):\n${JSON.stringify(seedTrade, null, 2)}`;
+    send(display, payload);
+    // Consumed once — clears the parent's seed so a later, unrelated visit to this tab (e.g. via
+    // the nav bar) doesn't silently re-fire the same trade context into a fresh mount.
+    onSeedConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seedTrade]);
 
   return (
     <div className="flex-1 flex flex-col min-h-0 gap-4">
@@ -102,7 +129,7 @@ const ChatPanel: React.FC = () => {
                   ))}
                 </div>
               )}
-              {m.content}
+              {m.displayContent ?? m.content}
             </div>
           </div>
         ))}
@@ -217,8 +244,13 @@ const HistoryPanel: React.FC = () => {
   );
 };
 
-export const ClaudeChat: React.FC = () => {
+export const ClaudeChat: React.FC<{ seedTrade?: any | null; onSeedConsumed?: () => void }> = ({ seedTrade, onSeedConsumed }) => {
   const [tab, setTab] = useState<"chat" | "history">("chat");
+
+  // A seeded trade should always land on the live chat, even if the user was browsing History.
+  useEffect(() => {
+    if (seedTrade) setTab("chat");
+  }, [seedTrade]);
 
   return (
     <div className="flex-1 flex flex-col max-w-3xl mx-auto w-full p-6 gap-4 min-h-0">
@@ -249,7 +281,7 @@ export const ClaudeChat: React.FC = () => {
         </div>
       </div>
 
-      {tab === "chat" ? <ChatPanel /> : <HistoryPanel />}
+      {tab === "chat" ? <ChatPanel seedTrade={seedTrade} onSeedConsumed={onSeedConsumed} /> : <HistoryPanel />}
     </div>
   );
 };
