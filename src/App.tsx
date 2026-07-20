@@ -59,6 +59,7 @@ import { TradeChart } from "./components/TradeChart";
 import { StrategyGuide } from "./components/StrategyGuide";
 import { ClaudeTradeAnalysis } from "./components/ClaudeTradeAnalysis";
 import { ClaudeChat } from "./components/ClaudeChat";
+import { FloatingChatWidget, FloatingChatSeed } from "./components/FloatingChatWidget";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -720,12 +721,13 @@ export default function App() {
   const [token, setToken] = useState("SOL");
   const [predictionHeadlines, setPredictionHeadlines] = useState<any[]>([]);
   const [currentView, setCurrentView] = useState<'dashboard' | 'apiDocs' | 'about' | 'jupiter' | 'forecast' | 'liquidation' | 'journal' | 'strategy' | 'chat'>('jupiter');
-  // Set by "Discuss with Assistant" on a trade record — jumps to the Assistant tab and seeds the
-  // chat with that trade's context so the conversation starts already grounded in it.
-  const [chatSeedTrade, setChatSeedTrade] = useState<any | null>(null);
-  const discussTradeWithAssistant = (trade: any) => {
-    setChatSeedTrade(trade);
-    setCurrentView('chat');
+  // "Analyze with Claude" (on a trade record or the Journal Stats panel) opens this floating,
+  // bottom-right chat widget seeded with that context — see FloatingChatWidget.
+  const [floatingChatOpen, setFloatingChatOpen] = useState(false);
+  const [floatingChatSeed, setFloatingChatSeed] = useState<FloatingChatSeed | null>(null);
+  const openFloatingAnalysis = (seed: FloatingChatSeed) => {
+    setFloatingChatSeed(seed);
+    setFloatingChatOpen(true);
   };
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [journalData, setJournalData] = useState<any | null>(null);
@@ -991,46 +993,10 @@ export default function App() {
     };
   }, [journalData, journalStatsPeriod]);
 
-  const [perfAnalysis, setPerfAnalysis] = useState<string | null>(null);
-  const [perfAnalysisLoading, setPerfAnalysisLoading] = useState(false);
-  const [perfAnalysisError, setPerfAnalysisError] = useState<string | null>(null);
-  const runPerfAnalysis = async () => {
-    setPerfAnalysisLoading(true);
-    setPerfAnalysisError(null);
-    try {
-      const { list, ...stats } = journalWindowStats as any;
-      const res = await fetch("/api/claude/analyze-performance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trades: list, stats, period: journalStatsPeriod }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || "Analysis failed.");
-      setPerfAnalysis(json.analysis);
-    } catch (e: any) {
-      setPerfAnalysisError(e.message || "Analysis failed.");
-    } finally {
-      setPerfAnalysisLoading(false);
-    }
+  const analyzeJournalWindowWithClaude = () => {
+    const { list, ...stats } = journalWindowStats as any;
+    openFloatingAnalysis({ kind: "performance", trades: list, stats, period: journalStatsPeriod });
   };
-  // Every analysis is persisted server-side (see /api/claude/history) — pull the most recent one
-  // for the currently selected window so a past recommendation reappears instead of vanishing on
-  // reload or when switching back to a window ("24H" vs "Lifetime") already analyzed before.
-  useEffect(() => {
-    let cancelled = false;
-    setPerfAnalysis(null);
-    setPerfAnalysisError(null);
-    (async () => {
-      try {
-        const res = await fetch(`/api/claude/history?kind=performance&period=${encodeURIComponent(journalStatsPeriod)}&limit=1`);
-        const json = await res.json();
-        if (!cancelled && json.entries?.length) setPerfAnalysis(json.entries[0].analysis);
-      } catch (e) {
-        // no persisted analysis yet — leave the "Analyze" button in place.
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [journalStatsPeriod]);
 
   const generateInterpolatedPoints = () => {
     if (!forecastData) return [];
@@ -5689,41 +5655,13 @@ export default function App() {
                         <span>Losses: <span className="text-red-400 font-bold">{journalWindowStats.losses}</span></span>
                       </div>
                       <div className="col-span-2 sm:col-span-3 lg:col-span-6">
-                        {!perfAnalysis && !perfAnalysisLoading && (
-                          <button
-                            type="button"
-                            onClick={runPerfAnalysis}
-                            className="w-full flex items-center justify-center gap-1.5 text-[9px] font-bold uppercase tracking-wider text-sol-purple hover:text-sol-purple/80 cursor-pointer transition-colors border border-border-dim/40 rounded-lg py-2"
-                          >
-                            <Sparkles className="w-3 h-3" /> Analyze Recent Performance with Claude
-                          </button>
-                        )}
-                        {perfAnalysisLoading && (
-                          <div className="flex items-center justify-center gap-1.5 text-[9px] font-bold uppercase tracking-wider text-text-dim py-2">
-                            <Loader2 className="w-3 h-3 animate-spin" /> Analyzing {journalWindowStats.total} trade{journalWindowStats.total === 1 ? "" : "s"}…
-                          </div>
-                        )}
-                        {perfAnalysisError && (
-                          <div className="text-[10px] text-red-400 text-center py-1">{perfAnalysisError}</div>
-                        )}
-                        {perfAnalysis && (
-                          <div className="bg-bg-input/30 rounded-lg border border-border-dim/40 p-3 text-[10.5px] leading-relaxed text-text-body whitespace-pre-wrap font-sans">
-                            <div className="flex items-center justify-between mb-1.5">
-                              <div className="flex items-center gap-1.5 text-[8.5px] uppercase tracking-wider text-sol-purple font-bold">
-                                <Sparkles className="w-3 h-3" /> Claude Analysis
-                              </div>
-                              <button
-                                type="button"
-                                onClick={runPerfAnalysis}
-                                title="Re-run analysis (past runs stay in Assistant > History)"
-                                className="flex items-center gap-1 text-[8.5px] uppercase tracking-wider text-text-dim hover:text-text-heading cursor-pointer"
-                              >
-                                <RefreshCw className="w-2.5 h-2.5" /> Re-analyze
-                              </button>
-                            </div>
-                            {perfAnalysis}
-                          </div>
-                        )}
+                        <button
+                          type="button"
+                          onClick={analyzeJournalWindowWithClaude}
+                          className="w-full flex items-center justify-center gap-1.5 text-[9px] font-bold uppercase tracking-wider text-sol-purple hover:text-sol-purple/80 cursor-pointer transition-colors border border-border-dim/40 rounded-lg py-2"
+                        >
+                          <Sparkles className="w-3 h-3" /> Analyze Recent Performance with Claude
+                        </button>
                       </div>
                     </div>
                   ) : (
@@ -5864,7 +5802,7 @@ export default function App() {
                             {expandedTradeId === trade.id && (
                               <>
                                 <TradeChart trade={trade} token={trade.token || token} />
-                                <ClaudeTradeAnalysis trade={trade} onDiscuss={discussTradeWithAssistant} />
+                                <ClaudeTradeAnalysis trade={trade} onAnalyze={(t) => openFloatingAnalysis({ kind: "trade", trade: t })} />
                               </>
                             )}
                           </div>
@@ -5960,7 +5898,7 @@ export default function App() {
                                       </div>
                                       <div>
                                         <TradeChart trade={trade} token={trade.token || token} />
-                                        <ClaudeTradeAnalysis trade={trade} onDiscuss={discussTradeWithAssistant} />
+                                        <ClaudeTradeAnalysis trade={trade} onAnalyze={(t) => openFloatingAnalysis({ kind: "trade", trade: t })} />
                                       </div>
                                     </div>
                                   </td>
@@ -5979,7 +5917,7 @@ export default function App() {
         ) : currentView === 'strategy' ? (
           <StrategyGuide />
         ) : currentView === 'chat' ? (
-          <ClaudeChat seedTrade={chatSeedTrade} onSeedConsumed={() => setChatSeedTrade(null)} />
+          <ClaudeChat />
         ) : (
           <main className="flex-1 flex flex-col p-8 bg-bg-main overflow-y-auto custom-scrollbar">
             <div className="max-w-4xl mx-auto w-full space-y-12 pb-20">
@@ -6732,6 +6670,13 @@ export default function App() {
           <span className="hidden md:inline">API: NEWSAPI.ORG</span>
         </div>
       </footer>
+
+      <FloatingChatWidget
+        open={floatingChatOpen}
+        onOpenChange={setFloatingChatOpen}
+        seed={floatingChatSeed}
+        onSeedConsumed={() => setFloatingChatSeed(null)}
+      />
     </div>
   );
 }

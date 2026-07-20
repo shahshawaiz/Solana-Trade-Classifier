@@ -8,7 +8,6 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceDot,
-  ReferenceLine,
 } from "recharts";
 import { format } from "date-fns";
 
@@ -179,6 +178,17 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
     return [min - pad, max + pad];
   }, [tradeWindowQuotes, entryPriceDisplay, exitPriceDisplay, tpPrice, slPrice]);
 
+  // Drawn as regular data-driven Lines (constant value across every point) rather than
+  // ReferenceLine — ReferenceLine renders through a separate recharts code path that wasn't
+  // showing up at all in practice, whereas a plain Line is the exact mechanism already proven to
+  // render the price series correctly, so reusing it is the more reliable way to guarantee these
+  // are actually visible.
+  const chartData = useMemo(() => quotes.map((q) => ({
+    ...q,
+    tp: typeof tpPrice === "number" ? tpPrice : undefined,
+    sl: typeof slPrice === "number" ? slPrice : undefined,
+  })), [quotes, tpPrice, slPrice]);
+
   let entryTimeStr = "";
   let exitTimeStr = "";
   try { entryTimeStr = format(new Date(trade.entryTime), "MMM d, HH:mm"); } catch {}
@@ -203,7 +213,7 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
     <div className="mt-2 relative bg-bg-input/30 rounded-lg border border-border-dim/40 p-2">
       <div className="h-[220px] w-full text-[9px] font-mono">
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={quotes} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+          <ComposedChart data={chartData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#2a1f42" opacity={0.2} />
             <XAxis
               dataKey="time"
@@ -225,28 +235,14 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
             <Tooltip
               contentStyle={{ backgroundColor: "#1e133e", borderColor: "#4c1d95", color: "#f8fafc", fontSize: 10 }}
               labelFormatter={(v) => { try { return format(new Date(v), "MMM d, HH:mm"); } catch { return ""; } }}
-              formatter={(v: any) => [`$${Number(v).toFixed(2)}`, "Price"]}
+              formatter={(v: any, n: any) => [`$${Number(v).toFixed(2)}`, n]}
             />
             <Line type="monotone" dataKey="close" stroke="#8b5cf6" strokeWidth={1.5} dot={false} name={`${token} Price`} isAnimationActive={false} />
             {typeof tpPrice === "number" && (
-              <ReferenceLine
-                y={tpPrice}
-                stroke={tpColor}
-                strokeDasharray="4 3"
-                strokeWidth={1.5}
-                ifOverflow="extendDomain"
-                label={{ value: `TP $${tpPrice.toFixed(2)}`, position: "insideTopLeft", fill: tpColor, fontSize: 8 }}
-              />
+              <Line type="linear" dataKey="tp" stroke={tpColor} strokeWidth={1.5} strokeDasharray="6 3" dot={false} activeDot={false} connectNulls name="Take Profit" isAnimationActive={false} />
             )}
             {typeof slPrice === "number" && (
-              <ReferenceLine
-                y={slPrice}
-                stroke={slColor}
-                strokeDasharray="4 3"
-                strokeWidth={1.5}
-                ifOverflow="extendDomain"
-                label={{ value: `SL $${slPrice.toFixed(2)}`, position: "insideBottomLeft", fill: slColor, fontSize: 8 }}
-              />
+              <Line type="linear" dataKey="sl" stroke={slColor} strokeWidth={1.5} strokeDasharray="6 3" dot={false} activeDot={false} connectNulls name="Stop Loss" isAnimationActive={false} />
             )}
             {entrySnap && typeof entryPriceDisplay === "number" && (
               <ReferenceDot

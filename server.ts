@@ -1877,93 +1877,29 @@ app.post("/api/claude/chat", async (req, res) => {
   }
 });
 
-app.post("/api/claude/analyze-trade", async (req, res) => {
+// Trade/performance analysis now happens as a normal /api/claude/chat conversation (seeded with
+// trade or performance JSON by the client — see FloatingChatWidget), not a separate one-shot
+// endpoint. History is opt-in: nothing is written here automatically, only when the user hits
+// "Save to Memory", which is what this route is for.
+app.post("/api/claude/save-to-memory", (req, res) => {
   try {
-    const trade = req.body?.trade;
-    if (!trade || typeof trade !== "object") return res.status(400).json({ error: "trade is required" });
-    const isLoss = typeof trade.pnl === "number" && trade.pnl < 0;
-
-    const prompt = isLoss
-      ? `Analyze this single LOSING closed trade from my automated Solana perps strategy. Give the smallest, most \
-concrete adjustment (SL/TP distance, exit timing, an entry filter, sizing) that would have turned this specific \
-trade into a win or meaningfully cut the loss — don't suggest loosening core strategy gates just to fix one trade, \
-since the strategy is winning in aggregate. If this was just normal variance with no real fix (sound setup, price \
-moved against it), say so plainly instead of inventing one. Keep it to a tight, direct paragraph or two, no headers.\n\n` +
-        `Trade data (JSON):\n${JSON.stringify(trade, null, 2)}`
-      : `Analyze this single WINNING closed trade from my automated Solana perps strategy. Call out what specifically \
-worked — the entry timing, the TP/SL sizing, the exit — so it's clear what to keep doing, and flag anything that \
-worked out but was actually a close call (e.g., barely avoided the SL) worth a closer look. Keep it to a tight, \
-direct paragraph or two, no headers.\n\n` +
-        `Trade data (JSON):\n${JSON.stringify(trade, null, 2)}`;
-
-    const response = await getClaude().messages.create({
-      model: CLAUDE_MODEL,
-      max_tokens: 700,
-      messages: [{ role: "user", content: prompt }],
-    });
-    const analysis = response.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
-
+    const { kind, label, trade, period, stats, transcript } = req.body || {};
+    if (!kind || !Array.isArray(transcript) || !transcript.length) {
+      return res.status(400).json({ error: "kind and a non-empty transcript are required" });
+    }
     appendClaudeHistoryEntry({
-      kind: "trade",
-      tradeId: trade.id,
-      label: `${trade.side || ""} ${trade.token || ""} ${typeof trade.pnl === "number" ? (trade.pnl >= 0 ? "+" : "") + trade.pnl.toFixed(2) + "%" : ""}`.trim(),
-      trade: { id: trade.id, side: trade.side, token: trade.token, pnl: trade.pnl, entryTime: trade.entryTime, exitTime: trade.exitTime },
-      analysis,
-    });
-
-    return res.json({ analysis });
-  } catch (error: any) {
-    console.error("[Claude Analyze Trade] Failed:", error?.message || error);
-    return res.status(500).json({ error: error?.message || "Claude analysis error" });
-  }
-});
-
-app.post("/api/claude/analyze-performance", async (req, res) => {
-  try {
-    const trades = Array.isArray(req.body?.trades) ? req.body.trades : [];
-    const stats = req.body?.stats || {};
-    const period = req.body?.period || "lifetime";
-    if (!trades.length) return res.status(400).json({ error: "trades is required" });
-
-    // Trim the payload to what actually informs a pattern-level critique — full news/version
-    // metadata per trade would just burn tokens without changing the analysis.
-    const trimmed = trades.slice(0, 100).map((t: any) => ({
-      side: t.side, pnl: t.pnl, entryPrice: t.entryPrice, exitPrice: t.exitPrice,
-      takeProfitPct: t.takeProfitPct, stopLossPct: t.stopLossPct, leverage: t.leverage,
-      durationMins: t.durationMins, entryReason: t.entryReason, closeReason: t.closeReason,
-      entryMarket: t.entryMarket, sentiment: t.sentiment, technicalScore: t.technicalScore,
-      entryTime: t.entryTime, exitTime: t.exitTime,
-    }));
-
-    const prompt = `Analyze the following batch of closed trades (period: ${period}) from my automated Solana perps \
-strategy. Look for patterns across trades: recurring losing setups, TP/SL sizing issues, time-of-day or duration \
-effects, sides that underperform, entries whose stated reasoning doesn't match the outcome. For the recurring loss \
-patterns you find, recommend the smallest concrete adjustment that would flip them to wins WITHOUT loosening the \
-core gates responsible for the winning trades (the strategy is validated in aggregate — the goal is fixing specific \
-leaks, not redesigning it). Be specific and cite actual trades/numbers. End with the 2-3 most actionable \
-recommendations, ranked. No filler, no generic trading advice.\n\n` +
-      `Aggregate stats (JSON): ${JSON.stringify(stats)}\n\n` +
-      `Trades (JSON): ${JSON.stringify(trimmed)}`;
-
-    const response = await getClaude().messages.create({
-      model: CLAUDE_MODEL,
-      max_tokens: 1200,
-      messages: [{ role: "user", content: prompt }],
-    });
-    const analysis = response.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
-
-    appendClaudeHistoryEntry({
-      kind: "performance",
+      kind,
+      label,
+      tradeId: trade?.id,
+      trade: trade ? { id: trade.id, side: trade.side, token: trade.token, pnl: trade.pnl, entryTime: trade.entryTime, exitTime: trade.exitTime } : undefined,
       period,
-      label: `${period} · ${trades.length} trade${trades.length === 1 ? "" : "s"} · ${typeof stats.totalPnL === "number" ? (stats.totalPnL >= 0 ? "+" : "") + stats.totalPnL.toFixed(2) + "%" : ""}`.trim(),
       stats,
-      analysis,
+      transcript: transcript.map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.content || "") })),
     });
-
-    return res.json({ analysis });
+    return res.json({ ok: true });
   } catch (error: any) {
-    console.error("[Claude Analyze Performance] Failed:", error?.message || error);
-    return res.status(500).json({ error: error?.message || "Claude analysis error" });
+    console.error("[Claude Save To Memory] Failed:", error?.message || error);
+    return res.status(500).json({ error: error?.message || "Failed to save to memory" });
   }
 });
 
