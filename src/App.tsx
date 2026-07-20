@@ -1006,11 +1006,23 @@ export default function App() {
       setPerfAnalysisLoading(false);
     }
   };
-  // Reset any stale analysis when the user switches the stats window — otherwise a "24H" critique
-  // could sit on screen after they flip to "Lifetime".
+  // Every analysis is persisted server-side (see /api/claude/history) — pull the most recent one
+  // for the currently selected window so a past recommendation reappears instead of vanishing on
+  // reload or when switching back to a window ("24H" vs "Lifetime") already analyzed before.
   useEffect(() => {
+    let cancelled = false;
     setPerfAnalysis(null);
     setPerfAnalysisError(null);
+    (async () => {
+      try {
+        const res = await fetch(`/api/claude/history?kind=performance&period=${encodeURIComponent(journalStatsPeriod)}&limit=1`);
+        const json = await res.json();
+        if (!cancelled && json.entries?.length) setPerfAnalysis(json.entries[0].analysis);
+      } catch (e) {
+        // no persisted analysis yet — leave the "Analyze" button in place.
+      }
+    })();
+    return () => { cancelled = true; };
   }, [journalStatsPeriod]);
 
   const generateInterpolatedPoints = () => {
@@ -5695,10 +5707,11 @@ export default function App() {
                               </div>
                               <button
                                 type="button"
-                                onClick={() => setPerfAnalysis(null)}
-                                className="text-[8.5px] uppercase tracking-wider text-text-dim hover:text-text-heading cursor-pointer"
+                                onClick={runPerfAnalysis}
+                                title="Re-run analysis (past runs stay in Assistant > History)"
+                                className="flex items-center gap-1 text-[8.5px] uppercase tracking-wider text-text-dim hover:text-text-heading cursor-pointer"
                               >
-                                Clear
+                                <RefreshCw className="w-2.5 h-2.5" /> Re-analyze
                               </button>
                             </div>
                             {perfAnalysis}

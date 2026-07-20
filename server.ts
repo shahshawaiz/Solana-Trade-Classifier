@@ -1673,6 +1673,41 @@ app.post("/api/journal/resync", async (_req, res) => {
 // the exact trade/stat data on screen, so it's passed straight through) and a tool-using chat
 // agent that can pull live journal + strategy data on its own for open-ended Q&A.
 
+// Every completed trade/performance analysis is appended here so past recommendations survive a
+// page reload — same tmpdir+root persistence pattern as the trade journal itself.
+const CLAUDE_HISTORY_FILE = path.join(os.tmpdir(), "claude_analysis_history.json");
+const CLAUDE_HISTORY_MAX = 300;
+
+function loadClaudeHistory(): any[] {
+  const rootPath = path.join(process.cwd(), "claude_analysis_history.json");
+  if (!fs.existsSync(CLAUDE_HISTORY_FILE) && fs.existsSync(rootPath)) {
+    try { fs.copyFileSync(rootPath, CLAUDE_HISTORY_FILE); } catch (e) {}
+  }
+  for (const p of [CLAUDE_HISTORY_FILE, rootPath]) {
+    try {
+      if (fs.existsSync(p)) {
+        const arr = JSON.parse(fs.readFileSync(p, "utf-8"));
+        if (Array.isArray(arr)) return arr;
+      }
+    } catch (e) {}
+  }
+  return [];
+}
+
+function saveClaudeHistory(entries: any[]) {
+  const rootPath = path.join(process.cwd(), "claude_analysis_history.json");
+  const trimmed = entries.length > CLAUDE_HISTORY_MAX ? entries.slice(entries.length - CLAUDE_HISTORY_MAX) : entries;
+  const json = JSON.stringify(trimmed, null, 2);
+  try { fs.writeFileSync(CLAUDE_HISTORY_FILE, json, "utf-8"); } catch (e) { console.error("Failed to save Claude history to tmp", e); }
+  try { fs.writeFileSync(rootPath, json, "utf-8"); } catch (e: any) { console.error("Failed to save Claude history to root:", e.message); }
+}
+
+function appendClaudeHistoryEntry(entry: any) {
+  const store = loadClaudeHistory();
+  store.push({ id: Math.random().toString(36).slice(2, 10), createdAt: new Date().toISOString(), ...entry });
+  saveClaudeHistory(store);
+}
+
 function sanitizeStrategyConfig(jup: JupiterConfig) {
   // Mirrors what the Jupiter Perps tab itself exposes to the UI, minus secrets — privateKey,
   // rpcUrl, and walletAddress never leave the server for this feature.
@@ -1777,10 +1812,21 @@ async function executeClaudeTool(name: string, input: any): Promise<any> {
   }
 }
 
-const CLAUDE_CHAT_SYSTEM_PROMPT = `You are a trading-strategy assistant embedded in a Solana perps trading dashboard. You have tools to \
-look up the user's real trade history, live strategy configuration, strategy documentation, and the daemon's audit log. \
-Use them whenever a question depends on real data — don't guess at numbers you can look up. Be direct and specific \
-(cite actual trades/numbers), and flag concrete issues or patterns rather than giving generic trading advice.`;
+const CLAUDE_CHAT_SYSTEM_PROMPT = `You are a trading-strategy assistant embedded in a Solana perps trading dashboard, with tools to look up \
+the user's real trade history, live strategy configuration, strategy documentation, and the daemon's audit log. Use \
+them whenever a question depends on real data — don't guess at numbers you can look up.
+
+Your primary job: when a losing trade comes up — named directly, surfaced via get_trade_journal with outcome=loss, \
+or implied by "why did I lose" / "what went wrong" — give a concrete, narrow recommendation for the smallest change \
+that would have flipped that specific trade into a win or meaningfully cut the loss (a different SL/TP distance, an \
+earlier or later exit trigger, an added entry filter, different sizing). The strategy has been validated in \
+aggregate (see get_strategy_docs / the win-rate and PF numbers in STRATEGY_RESULTS.md) — never recommend loosening \
+or removing a core gate (entry confirmation, regime filter, risk caps) just to fix one trade; that risks the trades \
+it's currently winning. If a loss was just normal variance with no real fix (the setup was sound, price just moved \
+against it), say so plainly instead of inventing a fix.
+
+Justify every recommendation with real numbers pulled from the tools. For other questions (config, docs, general \
+Q&A) use the tools whenever the answer depends on real data.`;
 
 app.post("/api/claude/chat", async (req, res) => {
   try {
@@ -1835,11 +1881,20 @@ app.post("/api/claude/analyze-trade", async (req, res) => {
   try {
     const trade = req.body?.trade;
     if (!trade || typeof trade !== "object") return res.status(400).json({ error: "trade is required" });
+    const isLoss = typeof trade.pnl === "number" && trade.pnl < 0;
 
-    const prompt = `Analyze this single closed trade from my automated Solana perps strategy. Be specific and \
-concrete — call out anything questionable about the entry, the exit, or the TP/SL sizing, and whether the stated \
-entry/exit reasoning holds up given the numbers. Keep it to a tight, direct paragraph or two, no headers.\n\n` +
-      `Trade data (JSON):\n${JSON.stringify(trade, null, 2)}`;
+    const prompt = isLoss
+      ? `Analyze this single LOSING closed trade from my automated Solana perps strategy. Give the smallest, most \
+concrete adjustment (SL/TP distance, exit timing, an entry filter, sizing) that would have turned this specific \
+trade into a win or meaningfully cut the loss — don't suggest loosening core strategy gates just to fix one trade, \
+since the strategy is winning in aggregate. If this was just normal variance with no real fix (sound setup, price \
+moved against it), say so plainly instead of inventing one. Keep it to a tight, direct paragraph or two, no headers.\n\n` +
+        `Trade data (JSON):\n${JSON.stringify(trade, null, 2)}`
+      : `Analyze this single WINNING closed trade from my automated Solana perps strategy. Call out what specifically \
+worked — the entry timing, the TP/SL sizing, the exit — so it's clear what to keep doing, and flag anything that \
+worked out but was actually a close call (e.g., barely avoided the SL) worth a closer look. Keep it to a tight, \
+direct paragraph or two, no headers.\n\n` +
+        `Trade data (JSON):\n${JSON.stringify(trade, null, 2)}`;
 
     const response = await getClaude().messages.create({
       model: CLAUDE_MODEL,
@@ -1847,6 +1902,15 @@ entry/exit reasoning holds up given the numbers. Keep it to a tight, direct para
       messages: [{ role: "user", content: prompt }],
     });
     const analysis = response.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+
+    appendClaudeHistoryEntry({
+      kind: "trade",
+      tradeId: trade.id,
+      label: `${trade.side || ""} ${trade.token || ""} ${typeof trade.pnl === "number" ? (trade.pnl >= 0 ? "+" : "") + trade.pnl.toFixed(2) + "%" : ""}`.trim(),
+      trade: { id: trade.id, side: trade.side, token: trade.token, pnl: trade.pnl, entryTime: trade.entryTime, exitTime: trade.exitTime },
+      analysis,
+    });
+
     return res.json({ analysis });
   } catch (error: any) {
     console.error("[Claude Analyze Trade] Failed:", error?.message || error);
@@ -1873,8 +1937,11 @@ app.post("/api/claude/analyze-performance", async (req, res) => {
 
     const prompt = `Analyze the following batch of closed trades (period: ${period}) from my automated Solana perps \
 strategy. Look for patterns across trades: recurring losing setups, TP/SL sizing issues, time-of-day or duration \
-effects, sides that underperform, entries whose stated reasoning doesn't match the outcome. Be specific and cite \
-actual trades/numbers. End with the 2-3 most actionable issues, ranked. No filler, no generic trading advice.\n\n` +
+effects, sides that underperform, entries whose stated reasoning doesn't match the outcome. For the recurring loss \
+patterns you find, recommend the smallest concrete adjustment that would flip them to wins WITHOUT loosening the \
+core gates responsible for the winning trades (the strategy is validated in aggregate — the goal is fixing specific \
+leaks, not redesigning it). Be specific and cite actual trades/numbers. End with the 2-3 most actionable \
+recommendations, ranked. No filler, no generic trading advice.\n\n` +
       `Aggregate stats (JSON): ${JSON.stringify(stats)}\n\n` +
       `Trades (JSON): ${JSON.stringify(trimmed)}`;
 
@@ -1884,10 +1951,38 @@ actual trades/numbers. End with the 2-3 most actionable issues, ranked. No fille
       messages: [{ role: "user", content: prompt }],
     });
     const analysis = response.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+
+    appendClaudeHistoryEntry({
+      kind: "performance",
+      period,
+      label: `${period} · ${trades.length} trade${trades.length === 1 ? "" : "s"} · ${typeof stats.totalPnL === "number" ? (stats.totalPnL >= 0 ? "+" : "") + stats.totalPnL.toFixed(2) + "%" : ""}`.trim(),
+      stats,
+      analysis,
+    });
+
     return res.json({ analysis });
   } catch (error: any) {
     console.error("[Claude Analyze Performance] Failed:", error?.message || error);
     return res.status(500).json({ error: error?.message || "Claude analysis error" });
+  }
+});
+
+app.get("/api/claude/history", (req, res) => {
+  try {
+    const kind = typeof req.query.kind === "string" ? req.query.kind : undefined;
+    const tradeId = typeof req.query.tradeId === "string" ? req.query.tradeId : undefined;
+    const period = typeof req.query.period === "string" ? req.query.period : undefined;
+    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 300);
+
+    let entries = loadClaudeHistory();
+    if (kind) entries = entries.filter((e: any) => e.kind === kind);
+    if (tradeId) entries = entries.filter((e: any) => e.tradeId === tradeId);
+    if (period) entries = entries.filter((e: any) => e.period === period);
+    entries = entries.slice().reverse().slice(0, limit);
+
+    return res.json({ entries });
+  } catch (error: any) {
+    return res.status(500).json({ error: error?.message || "Failed to load Claude history" });
   }
 });
 

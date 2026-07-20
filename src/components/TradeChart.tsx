@@ -152,9 +152,22 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
   // Recharts only auto-fits the Y axis to the line's own data (candle closes) — the actual fill
   // prices can sit just outside that range (slippage vs. the nearest candle), which would clip
   // the reference dots. Expand the domain to guarantee both markers are always visible.
+  //
+  // Deliberately scoped to candles WITHIN the trade window, not the full fetched range (which
+  // pads 50% of the trade's duration before/after purely to give the line chart some visual
+  // lead-in/lead-out). A price spike in that padding — common on longer holds — would otherwise
+  // dominate the domain and compress the entry/exit/TP/SL band down to a sliver right on top of
+  // the entry dot, effectively hiding the TP/SL lines entirely.
+  const tradeWindowQuotes = useMemo(() => {
+    const lo = Math.min(entryMs, exitMs);
+    const hi = Math.max(entryMs, exitMs);
+    const inWindow = quotes.filter((q) => q.time >= lo && q.time <= hi);
+    return inWindow.length ? inWindow : quotes;
+  }, [quotes, entryMs, exitMs]);
+
   const yDomain = useMemo((): [number, number] | ["auto", "auto"] => {
     const values: number[] = [];
-    quotes.forEach((q) => { values.push(q.high, q.low); });
+    tradeWindowQuotes.forEach((q) => { values.push(q.high, q.low); });
     if (typeof entryPriceDisplay === "number") values.push(entryPriceDisplay);
     if (typeof exitPriceDisplay === "number") values.push(exitPriceDisplay);
     if (typeof tpPrice === "number") values.push(tpPrice);
@@ -162,9 +175,9 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
     if (!values.length) return ["auto", "auto"];
     const min = Math.min(...values);
     const max = Math.max(...values);
-    const pad = (max - min) * 0.08 || max * 0.01 || 1;
+    const pad = (max - min) * 0.12 || max * 0.01 || 1;
     return [min - pad, max + pad];
-  }, [quotes, entryPriceDisplay, exitPriceDisplay, tpPrice, slPrice]);
+  }, [tradeWindowQuotes, entryPriceDisplay, exitPriceDisplay, tpPrice, slPrice]);
 
   let entryTimeStr = "";
   let exitTimeStr = "";
@@ -220,7 +233,7 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
                 y={tpPrice}
                 stroke={tpColor}
                 strokeDasharray="4 3"
-                strokeWidth={1}
+                strokeWidth={1.5}
                 ifOverflow="extendDomain"
                 label={{ value: `TP $${tpPrice.toFixed(2)}`, position: "insideTopLeft", fill: tpColor, fontSize: 8 }}
               />
@@ -230,7 +243,7 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
                 y={slPrice}
                 stroke={slColor}
                 strokeDasharray="4 3"
-                strokeWidth={1}
+                strokeWidth={1.5}
                 ifOverflow="extendDomain"
                 label={{ value: `SL $${slPrice.toFixed(2)}`, position: "insideBottomLeft", fill: slColor, fontSize: 8 }}
               />
