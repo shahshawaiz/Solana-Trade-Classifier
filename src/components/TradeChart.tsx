@@ -8,6 +8,7 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceDot,
+  ReferenceLine,
 } from "recharts";
 import { format } from "date-fns";
 
@@ -32,6 +33,9 @@ interface TradeChartTrade {
   version?: string;
   closeVersion?: string;
   backfilled?: boolean;
+  takeProfitPct?: number;
+  stopLossPct?: number;
+  leverage?: number;
 }
 
 interface TradeChartProps {
@@ -124,6 +128,26 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
   const isWin = trade.pnl >= 0;
   const entryColor = "#3b82f6"; // neutral blue — marks "open", regardless of side/outcome
   const exitColor = isWin ? "#22c55e" : "#ef4444";
+  const tpColor = "#22c55e";
+  const slColor = "#ef4444";
+
+  // TP/SL price levels, derived the same way the daemon computes them at fill time (see
+  // tpPriceLimit/slPriceLimit in server.ts): a pct-of-collateral target divided by leverage,
+  // applied above entry for a LONG's take-profit (below for its stop-loss), and inverted for a
+  // SHORT. Ordering them against entry/exit on the same price axis is the point of this chart —
+  // it's the only place that shows whether an exit actually landed on its TP/SL line or bailed
+  // early/late (e.g. a manual close or circuit breaker) short of it.
+  const leverage = trade.leverage && trade.leverage > 0 ? trade.leverage : 1;
+  const tpPrice = useMemo(() => {
+    if (typeof trade.takeProfitPct !== "number" || typeof entryPriceDisplay !== "number") return null;
+    const frac = (trade.takeProfitPct / 100) / leverage;
+    return trade.side === "LONG" ? entryPriceDisplay * (1 + frac) : entryPriceDisplay * (1 - frac);
+  }, [trade.takeProfitPct, trade.side, entryPriceDisplay, leverage]);
+  const slPrice = useMemo(() => {
+    if (typeof trade.stopLossPct !== "number" || typeof entryPriceDisplay !== "number") return null;
+    const frac = (trade.stopLossPct / 100) / leverage;
+    return trade.side === "LONG" ? entryPriceDisplay * (1 - frac) : entryPriceDisplay * (1 + frac);
+  }, [trade.stopLossPct, trade.side, entryPriceDisplay, leverage]);
 
   // Recharts only auto-fits the Y axis to the line's own data (candle closes) — the actual fill
   // prices can sit just outside that range (slippage vs. the nearest candle), which would clip
@@ -133,12 +157,14 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
     quotes.forEach((q) => { values.push(q.high, q.low); });
     if (typeof entryPriceDisplay === "number") values.push(entryPriceDisplay);
     if (typeof exitPriceDisplay === "number") values.push(exitPriceDisplay);
+    if (typeof tpPrice === "number") values.push(tpPrice);
+    if (typeof slPrice === "number") values.push(slPrice);
     if (!values.length) return ["auto", "auto"];
     const min = Math.min(...values);
     const max = Math.max(...values);
     const pad = (max - min) * 0.08 || max * 0.01 || 1;
     return [min - pad, max + pad];
-  }, [quotes, entryPriceDisplay, exitPriceDisplay]);
+  }, [quotes, entryPriceDisplay, exitPriceDisplay, tpPrice, slPrice]);
 
   let entryTimeStr = "";
   let exitTimeStr = "";
@@ -189,6 +215,26 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
               formatter={(v: any) => [`$${Number(v).toFixed(2)}`, "Price"]}
             />
             <Line type="monotone" dataKey="close" stroke="#8b5cf6" strokeWidth={1.5} dot={false} name={`${token} Price`} isAnimationActive={false} />
+            {typeof tpPrice === "number" && (
+              <ReferenceLine
+                y={tpPrice}
+                stroke={tpColor}
+                strokeDasharray="4 3"
+                strokeWidth={1}
+                ifOverflow="extendDomain"
+                label={{ value: `TP $${tpPrice.toFixed(2)}`, position: "insideTopLeft", fill: tpColor, fontSize: 8 }}
+              />
+            )}
+            {typeof slPrice === "number" && (
+              <ReferenceLine
+                y={slPrice}
+                stroke={slColor}
+                strokeDasharray="4 3"
+                strokeWidth={1}
+                ifOverflow="extendDomain"
+                label={{ value: `SL $${slPrice.toFixed(2)}`, position: "insideBottomLeft", fill: slColor, fontSize: 8 }}
+              />
+            )}
             {entrySnap && typeof entryPriceDisplay === "number" && (
               <ReferenceDot
                 x={entrySnap.time}
@@ -240,6 +286,18 @@ export const TradeChart: React.FC<TradeChartProps> = ({ trade, token }) => {
           <span className="w-2 h-2 rounded-full" style={{ backgroundColor: entryColor }} /> Entry
           <span className="normal-case font-normal text-text-dim/70 font-mono">{entryTimeStr}</span>
         </span>
+        {typeof tpPrice === "number" && (
+          <span className="flex items-center gap-1">
+            <span className="w-2 h-0.5" style={{ backgroundColor: tpColor }} /> TP
+            <span className="normal-case font-normal text-text-dim/70 font-mono">${tpPrice.toFixed(2)}</span>
+          </span>
+        )}
+        {typeof slPrice === "number" && (
+          <span className="flex items-center gap-1">
+            <span className="w-2 h-0.5" style={{ backgroundColor: slColor }} /> SL
+            <span className="normal-case font-normal text-text-dim/70 font-mono">${slPrice.toFixed(2)}</span>
+          </span>
+        )}
         <span className="flex items-center gap-1">
           <span className="w-2 h-2 rounded-full" style={{ backgroundColor: exitColor }} /> Exit ({isWin ? "Win" : "Loss"})
           <span className="normal-case font-normal text-text-dim/70 font-mono">{exitTimeStr}</span>
