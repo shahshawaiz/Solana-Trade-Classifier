@@ -29,7 +29,9 @@ import {
   X,
   LayoutGrid,
   List,
-  Calendar
+  Calendar,
+  Sparkles,
+  Loader2
 } from "lucide-react";
 import { 
   LineChart, 
@@ -55,6 +57,8 @@ import { LiquidityHeatmap } from "./components/LiquidityHeatmap";
 import { LiquidationHistogram } from "./components/LiquidationHistogram";
 import { TradeChart } from "./components/TradeChart";
 import { StrategyGuide } from "./components/StrategyGuide";
+import { ClaudeTradeAnalysis } from "./components/ClaudeTradeAnalysis";
+import { ClaudeChat } from "./components/ClaudeChat";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -715,7 +719,7 @@ export default function App() {
   });
   const [token, setToken] = useState("SOL");
   const [predictionHeadlines, setPredictionHeadlines] = useState<any[]>([]);
-  const [currentView, setCurrentView] = useState<'dashboard' | 'apiDocs' | 'about' | 'jupiter' | 'forecast' | 'liquidation' | 'journal' | 'strategy'>('jupiter');
+  const [currentView, setCurrentView] = useState<'dashboard' | 'apiDocs' | 'about' | 'jupiter' | 'forecast' | 'liquidation' | 'journal' | 'strategy' | 'chat'>('jupiter');
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [journalData, setJournalData] = useState<any | null>(null);
   const [journalLoading, setJournalLoading] = useState(false);
@@ -957,7 +961,7 @@ export default function App() {
           // parseable — guard the same way the trade cards below already do for this field.
           return Number.isFinite(ms) && ms >= Date.now() - windowDays * 86400000;
         });
-    if (!trades.length) return { total: 0 };
+    if (!trades.length) return { total: 0, list: [] };
     const wins = trades.filter((t: any) => t.pnl > 0);
     const losses = trades.filter((t: any) => t.pnl < 0);
     const totalPnL = trades.reduce((s: number, t: any) => s + t.pnl, 0);
@@ -976,8 +980,38 @@ export default function App() {
       shortCount: trades.filter((t: any) => t.side === "SHORT").length,
       best,
       worst,
+      list: trades,
     };
   }, [journalData, journalStatsPeriod]);
+
+  const [perfAnalysis, setPerfAnalysis] = useState<string | null>(null);
+  const [perfAnalysisLoading, setPerfAnalysisLoading] = useState(false);
+  const [perfAnalysisError, setPerfAnalysisError] = useState<string | null>(null);
+  const runPerfAnalysis = async () => {
+    setPerfAnalysisLoading(true);
+    setPerfAnalysisError(null);
+    try {
+      const { list, ...stats } = journalWindowStats as any;
+      const res = await fetch("/api/claude/analyze-performance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trades: list, stats, period: journalStatsPeriod }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Analysis failed.");
+      setPerfAnalysis(json.analysis);
+    } catch (e: any) {
+      setPerfAnalysisError(e.message || "Analysis failed.");
+    } finally {
+      setPerfAnalysisLoading(false);
+    }
+  };
+  // Reset any stale analysis when the user switches the stats window — otherwise a "24H" critique
+  // could sit on screen after they flip to "Lifetime".
+  useEffect(() => {
+    setPerfAnalysis(null);
+    setPerfAnalysisError(null);
+  }, [journalStatsPeriod]);
 
   const generateInterpolatedPoints = () => {
     if (!forecastData) return [];
@@ -2515,8 +2549,14 @@ export default function App() {
           >
             Strategy
           </button>
-          <button 
-            onClick={() => setCurrentView('about')} 
+          <button
+            onClick={() => setCurrentView('chat')}
+            className={cn("hover:text-sol-purple transition-colors flex items-center gap-1", currentView === 'chat' && "text-sol-purple")}
+          >
+            <Sparkles className="w-3 h-3" /> Assistant
+          </button>
+          <button
+            onClick={() => setCurrentView('about')}
             className={cn("hover:text-sol-purple transition-colors", currentView === 'about' && "text-sol-purple")}
           >
             About
@@ -5629,6 +5669,42 @@ export default function App() {
                         <span>Wins: <span className="text-sol-green font-bold">{journalWindowStats.wins}</span></span>
                         <span>Losses: <span className="text-red-400 font-bold">{journalWindowStats.losses}</span></span>
                       </div>
+                      <div className="col-span-2 sm:col-span-3 lg:col-span-6">
+                        {!perfAnalysis && !perfAnalysisLoading && (
+                          <button
+                            type="button"
+                            onClick={runPerfAnalysis}
+                            className="w-full flex items-center justify-center gap-1.5 text-[9px] font-bold uppercase tracking-wider text-sol-purple hover:text-sol-purple/80 cursor-pointer transition-colors border border-border-dim/40 rounded-lg py-2"
+                          >
+                            <Sparkles className="w-3 h-3" /> Analyze Recent Performance with Claude
+                          </button>
+                        )}
+                        {perfAnalysisLoading && (
+                          <div className="flex items-center justify-center gap-1.5 text-[9px] font-bold uppercase tracking-wider text-text-dim py-2">
+                            <Loader2 className="w-3 h-3 animate-spin" /> Analyzing {journalWindowStats.total} trade{journalWindowStats.total === 1 ? "" : "s"}…
+                          </div>
+                        )}
+                        {perfAnalysisError && (
+                          <div className="text-[10px] text-red-400 text-center py-1">{perfAnalysisError}</div>
+                        )}
+                        {perfAnalysis && (
+                          <div className="bg-bg-input/30 rounded-lg border border-border-dim/40 p-3 text-[10.5px] leading-relaxed text-text-body whitespace-pre-wrap font-sans">
+                            <div className="flex items-center justify-between mb-1.5">
+                              <div className="flex items-center gap-1.5 text-[8.5px] uppercase tracking-wider text-sol-purple font-bold">
+                                <Sparkles className="w-3 h-3" /> Claude Analysis
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setPerfAnalysis(null)}
+                                className="text-[8.5px] uppercase tracking-wider text-text-dim hover:text-text-heading cursor-pointer"
+                              >
+                                Clear
+                              </button>
+                            </div>
+                            {perfAnalysis}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   ) : (
                     <div className="text-center text-[11px] text-text-dim py-6 border border-border-dim rounded-lg">
@@ -5766,7 +5842,10 @@ export default function App() {
                               Price Chart
                             </button>
                             {expandedTradeId === trade.id && (
-                              <TradeChart trade={trade} token={trade.token || token} />
+                              <>
+                                <TradeChart trade={trade} token={trade.token || token} />
+                                <ClaudeTradeAnalysis trade={trade} />
+                              </>
                             )}
                           </div>
                         </div>
@@ -5859,7 +5938,10 @@ export default function App() {
                                         <TradeDetailFields trade={trade} />
                                         <TradeSignalAndNews trade={trade} />
                                       </div>
-                                      <TradeChart trade={trade} token={trade.token || token} />
+                                      <div>
+                                        <TradeChart trade={trade} token={trade.token || token} />
+                                        <ClaudeTradeAnalysis trade={trade} />
+                                      </div>
                                     </div>
                                   </td>
                                 </tr>
@@ -5876,6 +5958,8 @@ export default function App() {
           </main>
         ) : currentView === 'strategy' ? (
           <StrategyGuide />
+        ) : currentView === 'chat' ? (
+          <ClaudeChat />
         ) : (
           <main className="flex-1 flex flex-col p-8 bg-bg-main overflow-y-auto custom-scrollbar">
             <div className="max-w-4xl mx-auto w-full space-y-12 pb-20">

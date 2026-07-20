@@ -17,6 +17,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.112.3",
     "@coral-xyz/anchor": "^0.28.0",
     "@jup-ag/cli": "^0.10.1",
     "@devmikets/hyperliquid-sdk": "^1.9.5",

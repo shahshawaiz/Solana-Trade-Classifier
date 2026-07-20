@@ -3,6 +3,7 @@ import path from "path";
 import os from "os";
 import * as yahooFinanceModule from "yahoo-finance2";
 import { GoogleGenAI } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
 import dotenv from "dotenv";
 function subDays(date: Date, days: number): Date {
   const result = new Date(date);
@@ -724,6 +725,19 @@ function getAi(): GoogleGenAI {
   }
   return aiClient;
 }
+
+// Initialize Claude (Anthropic) client (Lazy) — powers the trade-analysis and chat-agent features.
+let claudeClient: Anthropic | null = null;
+function getClaude(): Anthropic {
+  if (!claudeClient) {
+    if (!process.env.CLAUDE_API_KEY) {
+      throw new Error("CLAUDE_API_KEY is missing");
+    }
+    claudeClient = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+  }
+  return claudeClient;
+}
+const CLAUDE_MODEL = "claude-sonnet-5";
 
 // Resilient wrapper for Gemini content generation to handle 503, 429, and other transient errors.
 let isGeminiQuotaExhausted = false;
@@ -1651,6 +1665,229 @@ app.post("/api/journal/resync", async (_req, res) => {
     });
   } catch (error: any) {
     return res.status(500).json({ error: error?.message || "journal resync error" });
+  }
+});
+
+// --- Claude (Anthropic) integration -----------------------------------------
+// Two surfaces: one-shot trade/performance analysis (no tool access — the client already has
+// the exact trade/stat data on screen, so it's passed straight through) and a tool-using chat
+// agent that can pull live journal + strategy data on its own for open-ended Q&A.
+
+function sanitizeStrategyConfig(jup: JupiterConfig) {
+  // Mirrors what the Jupiter Perps tab itself exposes to the UI, minus secrets — privateKey,
+  // rpcUrl, and walletAddress never leave the server for this feature.
+  return {
+    tradingMode: jup.tradingMode,
+    token: jup.token,
+    tokens: jup.tokens,
+    topic: jup.topic,
+    leverage: jup.leverage,
+    allocationPercent: jup.allocationPercent,
+    positionSizeUsd: jup.positionSizeUsd,
+    takeProfitPct: jup.takeProfitPct,
+    stopLossPct: jup.stopLossPct,
+    interval: jup.interval,
+    cooldownMinutes: jup.cooldownMinutes,
+    weights: jup.weights,
+    useRegimeFilter: jup.useRegimeFilter,
+    minReversalProfitPct: jup.minReversalProfitPct,
+    reentryBlockPct: jup.reentryBlockPct,
+    reentryBlockMinutes: jup.reentryBlockMinutes,
+    useConvictionSizing: jup.useConvictionSizing,
+    convictionSizeFloor: jup.convictionSizeFloor,
+    meanReversionEnabled: jup.meanReversionEnabled,
+    enabled: jup.enabled,
+    activeTrade: jup.activeTrade,
+  };
+}
+
+const CLAUDE_TOOLS: any[] = [
+  {
+    name: "get_trade_journal",
+    description: "Fetch closed trades from the trade journal, most recent first. Use this to look at trade history, find losing/winning trades, or compute patterns.",
+    input_schema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Max number of trades to return (default 20, max 200)." },
+        side: { type: "string", enum: ["LONG", "SHORT"], description: "Filter to only this side." },
+        outcome: { type: "string", enum: ["win", "loss"], description: "Filter to only winning or only losing trades." },
+        token: { type: "string", description: "Filter to only this traded asset (e.g. SOL, ETH, BTC)." },
+      },
+    },
+  },
+  {
+    name: "get_strategy_config",
+    description: "Get the current live strategy configuration: leverage, TP/SL %, signal weights, regime/reentry/conviction-sizing settings, and the currently open position (if any). Secrets (keys, RPC URL, wallet address) are never included.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_strategy_docs",
+    description: "Get the full text of the strategy's authoritative documentation (docs/STRATEGY.md), explaining how entries/exits/risk-controls work and where each piece lives in code.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_recent_audit_log",
+    description: "Get the daemon's recent per-cycle reasoning trail (why it entered/held/skipped each tick) — useful for diagnosing why a particular decision was or wasn't made.",
+    input_schema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Max number of recent audit log entries to return (default 30, max 200)." },
+      },
+    },
+  },
+];
+
+async function executeClaudeTool(name: string, input: any): Promise<any> {
+  switch (name) {
+    case "get_trade_journal": {
+      const incoming: Array<{ source: string; trade: any }> = [];
+      try {
+        const tg = loadTelegramConfig();
+        (tg.tradesHistory || []).forEach((t: any) => incoming.push({ source: "Alert Daemon", trade: t }));
+      } catch (e) {}
+      try {
+        const jup = loadJupiterConfig();
+        (jup.tradesHistory || []).forEach((t: any) => incoming.push({ source: "Auto-Trade (Jupiter)", trade: t }));
+      } catch (e) {}
+      const stored = syncJournalStore(incoming);
+      let trades = mapJournalTrades(stored);
+      if (input?.side) trades = trades.filter((t: any) => t.side === input.side);
+      if (input?.outcome === "win") trades = trades.filter((t: any) => t.pnl > 0);
+      if (input?.outcome === "loss") trades = trades.filter((t: any) => t.pnl < 0);
+      if (input?.token) trades = trades.filter((t: any) => (t.token || "").toUpperCase() === String(input.token).toUpperCase());
+      const limit = Math.min(Math.max(Number(input?.limit) || 20, 1), 200);
+      return { trades: trades.slice(0, limit), totalMatching: trades.length };
+    }
+    case "get_strategy_config":
+      return sanitizeStrategyConfig(loadJupiterConfig());
+    case "get_strategy_docs": {
+      try {
+        return { markdown: fs.readFileSync(path.join(process.cwd(), "docs", "STRATEGY.md"), "utf-8") };
+      } catch (e: any) {
+        return { error: `Failed to read strategy docs: ${e?.message || e}` };
+      }
+    }
+    case "get_recent_audit_log": {
+      const jup = loadJupiterConfig();
+      const limit = Math.min(Math.max(Number(input?.limit) || 30, 1), 200);
+      return { entries: (jup.auditLogs || []).slice(-limit).reverse() };
+    }
+    default:
+      return { error: `Unknown tool: ${name}` };
+  }
+}
+
+const CLAUDE_CHAT_SYSTEM_PROMPT = `You are a trading-strategy assistant embedded in a Solana perps trading dashboard. You have tools to \
+look up the user's real trade history, live strategy configuration, strategy documentation, and the daemon's audit log. \
+Use them whenever a question depends on real data — don't guess at numbers you can look up. Be direct and specific \
+(cite actual trades/numbers), and flag concrete issues or patterns rather than giving generic trading advice.`;
+
+app.post("/api/claude/chat", async (req, res) => {
+  try {
+    const clientMessages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    if (!clientMessages.length) return res.status(400).json({ error: "messages is required" });
+
+    const messages: any[] = clientMessages.map((m: any) => ({
+      role: m.role === "assistant" ? "assistant" : "user",
+      content: m.content,
+    }));
+
+    const toolCalls: Array<{ name: string; input: any }> = [];
+    let finalText = "";
+
+    for (let iteration = 0; iteration < 6; iteration++) {
+      const response = await getClaude().messages.create({
+        model: CLAUDE_MODEL,
+        max_tokens: 1536,
+        system: CLAUDE_CHAT_SYSTEM_PROMPT,
+        tools: CLAUDE_TOOLS,
+        messages,
+      });
+
+      messages.push({ role: "assistant", content: response.content });
+
+      if (response.stop_reason !== "tool_use") {
+        finalText = response.content
+          .filter((b: any) => b.type === "text")
+          .map((b: any) => b.text)
+          .join("\n");
+        break;
+      }
+
+      const toolResults: any[] = [];
+      for (const block of response.content as any[]) {
+        if (block.type !== "tool_use") continue;
+        toolCalls.push({ name: block.name, input: block.input });
+        const result = await executeClaudeTool(block.name, block.input);
+        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(result) });
+      }
+      messages.push({ role: "user", content: toolResults });
+    }
+
+    return res.json({ reply: finalText || "(No response — try rephrasing.)", toolCalls });
+  } catch (error: any) {
+    console.error("[Claude Chat] Failed:", error?.message || error);
+    return res.status(500).json({ error: error?.message || "Claude chat error" });
+  }
+});
+
+app.post("/api/claude/analyze-trade", async (req, res) => {
+  try {
+    const trade = req.body?.trade;
+    if (!trade || typeof trade !== "object") return res.status(400).json({ error: "trade is required" });
+
+    const prompt = `Analyze this single closed trade from my automated Solana perps strategy. Be specific and \
+concrete — call out anything questionable about the entry, the exit, or the TP/SL sizing, and whether the stated \
+entry/exit reasoning holds up given the numbers. Keep it to a tight, direct paragraph or two, no headers.\n\n` +
+      `Trade data (JSON):\n${JSON.stringify(trade, null, 2)}`;
+
+    const response = await getClaude().messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 700,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const analysis = response.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+    return res.json({ analysis });
+  } catch (error: any) {
+    console.error("[Claude Analyze Trade] Failed:", error?.message || error);
+    return res.status(500).json({ error: error?.message || "Claude analysis error" });
+  }
+});
+
+app.post("/api/claude/analyze-performance", async (req, res) => {
+  try {
+    const trades = Array.isArray(req.body?.trades) ? req.body.trades : [];
+    const stats = req.body?.stats || {};
+    const period = req.body?.period || "lifetime";
+    if (!trades.length) return res.status(400).json({ error: "trades is required" });
+
+    // Trim the payload to what actually informs a pattern-level critique — full news/version
+    // metadata per trade would just burn tokens without changing the analysis.
+    const trimmed = trades.slice(0, 100).map((t: any) => ({
+      side: t.side, pnl: t.pnl, entryPrice: t.entryPrice, exitPrice: t.exitPrice,
+      takeProfitPct: t.takeProfitPct, stopLossPct: t.stopLossPct, leverage: t.leverage,
+      durationMins: t.durationMins, entryReason: t.entryReason, closeReason: t.closeReason,
+      entryMarket: t.entryMarket, sentiment: t.sentiment, technicalScore: t.technicalScore,
+      entryTime: t.entryTime, exitTime: t.exitTime,
+    }));
+
+    const prompt = `Analyze the following batch of closed trades (period: ${period}) from my automated Solana perps \
+strategy. Look for patterns across trades: recurring losing setups, TP/SL sizing issues, time-of-day or duration \
+effects, sides that underperform, entries whose stated reasoning doesn't match the outcome. Be specific and cite \
+actual trades/numbers. End with the 2-3 most actionable issues, ranked. No filler, no generic trading advice.\n\n` +
+      `Aggregate stats (JSON): ${JSON.stringify(stats)}\n\n` +
+      `Trades (JSON): ${JSON.stringify(trimmed)}`;
+
+    const response = await getClaude().messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 1200,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const analysis = response.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+    return res.json({ analysis });
+  } catch (error: any) {
+    console.error("[Claude Analyze Performance] Failed:", error?.message || error);
+    return res.status(500).json({ error: error?.message || "Claude analysis error" });
   }
 });
 
