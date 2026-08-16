@@ -481,19 +481,15 @@ export function normalizeTradeInterval(interval: any): string {
   return DAEMON_ALLOWED_INTERVALS.includes(iv) ? iv : "1h";
 }
 
-// Markets the daemon may scan for entries. Frequency comes from BREADTH (more markets, same
-// validated per-trade 1h strategy), never from lower per-trade quality — sub-hourly/weak-trend
-// entries are fee-negative (see normalizeTradeInterval / ADX_ENTRY_MIN). Only assets with a
-// Jupiter Perps market AND a TOKEN-USD Yahoo feed qualify. Still ONE open position at a time
-// across all markets: the wallet can't collateralize concurrent $10-min positions, and a single
-// position keeps risk identical to the single-asset bot.
+// Markets the daemon may scan for entries. User decision (2026-08-16): Solana-only — the
+// multi-asset ETH/BTC scan fragmented the wallet's spot balance across five tokens, none of
+// which cleared Jupiter Perps' $10 single-asset collateral minimum, so real trades were
+// silently falling back to paper. SUPPORTED_PERP_TOKENS still lists the venue's full market
+// universe (SOL/ETH/BTC, verified against CLI v0.10.1 + jup.ag, 2026-07-11) as the whitelist
+// `tradeTokens()` validates against; DEFAULT_SCAN_TOKENS is what the daemon scans absent an
+// explicit config.tokens override.
 const SUPPORTED_PERP_TOKENS = ["SOL", "ETH", "BTC"];
-// Jupiter Perps' complete market universe — the venue has no other pairs (verified against the
-// CLI v0.10.1 markets list and jup.ag, 2026-07-11), so this is also the breadth ceiling.
-// Per-market 90d 1h canonical backtest (pre-fees): SOL PF 1.50, ETH PF 1.86, BTC PF 1.16 —
-// BTC is marginal (low vol puts its ATR targets near the ~0.3% RT fee floor) but user-enabled
-// for maximum breadth; the entry gates, cooldown, daily cap and single position slot bound it.
-const DEFAULT_SCAN_TOKENS = [...SUPPORTED_PERP_TOKENS];
+const DEFAULT_SCAN_TOKENS = ["SOL"];
 export function tradeTokens(config: any): string[] {
   const primary = String(config?.token || "SOL").toUpperCase();
   const raw = Array.isArray(config?.tokens) && config.tokens.length > 0
