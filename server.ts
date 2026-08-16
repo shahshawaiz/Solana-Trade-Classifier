@@ -5273,7 +5273,8 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       // daemon (cooldown was hardcoded elapsed); with the multi-asset scan multiplying entry
       // opportunities they are now enforced for real. Both are global across all markets — the
       // point is limiting the WALLET's churn/fee exposure, not any single market's.
-      const cooldownMin = Math.max(Number(config.cooldownMinutes) || 30, 0);
+      const rawCooldownMin = Number(config.cooldownMinutes);
+      const cooldownMin = Math.max(Number.isFinite(rawCooldownMin) ? rawCooldownMin : 30, 0);
       if (canEnter && !forceTrigger && cooldownMin > 0 && config.lastTradeAddedAt) {
         const sinceMin = (Date.now() - new Date(config.lastTradeAddedAt).getTime()) / 60000;
         if (Number.isFinite(sinceMin) && sinceMin >= 0 && sinceMin < cooldownMin) {
@@ -7226,7 +7227,10 @@ app.post("/api/jupiter-config", async (req, res) => {
     }
 
     if (cooldownMinutes !== undefined) {
-      current.cooldownMinutes = Number(cooldownMinutes) || 30;
+      const parsedCooldown = Number(cooldownMinutes);
+      if (!isNaN(parsedCooldown) && parsedCooldown >= 0) {
+        current.cooldownMinutes = parsedCooldown;
+      }
     }
 
     if (token) current.token = token;
