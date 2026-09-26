@@ -379,6 +379,46 @@ export function resolveEntry(
   return { side: mr.side, aRec: mr.aRec, regime: "RANGING" };
 }
 
+// ───────────── Signal side (single parser for the live daemon) ─────────────
+// The live daemon used to derive its side by string-matching pred.action against four exact
+// labels. resolveEntry/evaluateSignal actually emit DESCRIPTIVE labels — "Hold Chop Zone",
+// "Hold (ADX is ranging: …)", "Hold (extended: …)", "Range Fade — rejected off …" — none of which
+// matched, so the side came back null. Two consequences, both invisible to /api/backtest (which
+// uses the canonical positionSide):
+//   1. null !== activeTrade.side, so every in-profit (≥ minReversalProfitPct) position was closed
+//      as a "Trend Reversal" the moment the entry gates stopped passing — e.g. the extension guard
+//      firing BECAUSE the trade was working. 11 of the 19 daemon-managed Aug 18 – Sep 25 2026 trades
+//      closed as "signal flipped to null" at +1.2…+4%, ~0.5% of price, before the +1.5×ATR scale-out.
+//   2. Mean-reversion "Range Fade" entries could never open live, though the backtest takes them.
+// pred.positionSide is the canonical LONG/SHORT/HOLD from resolveEntry; use it, and fall back to
+// the action text's leading words only for callers that don't carry positionSide.
+export function signalSide(pred: { positionSide?: string; action?: string } | null | undefined): "LONG" | "SHORT" | "HOLD" {
+  const ps = String(pred?.positionSide || "").toUpperCase();
+  if (ps === "LONG" || ps === "SHORT" || ps === "HOLD") return ps as "LONG" | "SHORT" | "HOLD";
+  const a = String(pred?.action || "");
+  if (/^(Long Buy|Short Buy \(Oversold\))/.test(a)) return "LONG";
+  if (/^(Short Sell|Long Sell \(Overbought\))/.test(a)) return "SHORT";
+  return "HOLD";
+}
+
+// Signal-driven early exit for an OPEN position. Two cases, both only once the trade has cleared
+// the fee/noise buffer (minProfitPct, leveraged %) — below it the ATR stop / breakeven / trail /
+// time-stop govern, so a signal change can never realize a fee-eaten micro-loss:
+//   • "reversal"      — the signal points the OTHER way (the daemon may re-enter that side).
+//   • "thesis-lapse"  — the signal no longer supports the side (HOLD: Σ faded, chop, ADX or the
+//                       extension guard now blocking). Bank the winner instead of waiting for the
+//                       +1.5×ATR scale-out. This is exactly what live did (accidentally, via the
+//                       null side above) from Aug 18 – Sep 25 2026. A parity replay of the live
+//                       loop (scripts/live-replay.ts, SOL 1h, Mar–Sep 2026) scored this rule above
+//                       reversal-only overall (PF 1.38 vs 1.10 with the 600-min time-stop; all three
+//                       windows at 360, two of three at 600), so it's kept deliberately — now
+//                       explicit, tested, and mirrored in /api/backtest.
+export function signalExitReason(openSide: "LONG" | "SHORT", sigSide: "LONG" | "SHORT" | "HOLD", pnlPct: number, minProfitPct: number): "reversal" | "thesis-lapse" | null {
+  if (sigSide === openSide) return null;
+  if (!(pnlPct >= minProfitPct)) return null;
+  return sigSide === "HOLD" ? "thesis-lapse" : "reversal";
+}
+
 // ───────────────────────── Exit strategy (shared) ─────────────────────────
 // Volatility-adaptive exit: partial scale-out + breakeven + ATR trailing stop. One source of
 // truth for the live daemon, the /api/backtest engine, and scripts/macro-benchmark.ts, so the
@@ -416,10 +456,12 @@ export function flooredAtr(atr: number, price: number): number {
 // that is STAGNANT_EXIT_MINUTES old, has not reached its partial scale-out, and shows less than
 // STAGNANT_MIN_PNL_PCT leveraged profit is structurally negative-EV on perps (hourly borrow accrues
 // on notional regardless) — close it and stop the bleed. Post-scale-out runners are exempt (risk-free).
-// Default 360 (not tighter): replaying the full 49-trade on-chain journal (Jun 20 – Jul 9) against
-// Binance 15m data, 360 min beat both 180 min (which cut slow-starting winners that needed 4–7h to
-// reach their partial) and no-time-stop (which let stagnant positions bleed borrow fees for 19h+).
-export const STAGNANT_EXIT_MINUTES = Number(process.env.STAGNANT_EXIT_MINUTES) || 360;
+// Default 600 (was 360). History: a 49-trade Jun 20 – Jul 9 journal replay picked 360 over 180 (which
+// cut slow-starting winners) and no-stop (19h+ borrow bleed). The 2026-09 parity replay of the live
+// loop over Mar 1 – Sep 26 (scripts/live-replay.ts) found 480/600/720 ALL beat 360 in every window
+// (Mar–May, Jun–Jul, Aug 18–Sep 26) — 8 of the 19 daemon-managed Aug–Sep live trades were time-stops
+// (7 losers, −$0.85 net) — while ≥840 degrades again. 600 is the middle of that plateau, not its edge.
+export const STAGNANT_EXIT_MINUTES = Number(process.env.STAGNANT_EXIT_MINUTES) || 600;
 export const STAGNANT_MIN_PNL_PCT = process.env.STAGNANT_MIN_PNL_PCT !== undefined ? Number(process.env.STAGNANT_MIN_PNL_PCT) : 0.5;
 
 // Hard leverage cap. The journal's catastrophic losses all trace to uncapped leverage: the May
@@ -509,6 +551,41 @@ export function perpAssetAliases(token: string): string[] {
   if (t === "BTC" || t === "WBTC") return ["BTC", "WBTC"];
   if (t === "ETH" || t === "WETH") return ["ETH", "WETH"];
   return [t];
+}
+
+// ───────────── Orphaned on-chain positions ─────────────
+// A REAL open can land on-chain while the CLI call still reports failure (RPC confirmation
+// timeout, missing signature field, 90s execFile timeout…). The daemon then rolled back its
+// tracker and the position ran UNMANAGED — no breakeven, no trail, no time-stop, no signal exit —
+// until Jupiter's keeper hit the static on-chain SL. On-chain history shows exactly that three
+// times in Aug–Sep 2026 (Aug 25, Sep 6, Sep 23 longs: −$1.50 after fees — more than the period's
+// entire −$0.11 net). These helpers let the daemon ADOPT such a position instead.
+export function findOnChainPosition(positions: any[] | null | undefined, token: string): any | null {
+  const aliases = perpAssetAliases(token);
+  return (positions || []).find((p: any) => p && aliases.includes(String(p.asset || "").toUpperCase())) || null;
+}
+
+// Build the daemon's activeTrade record for an on-chain position it isn't tracking, from the
+// CLI's `perps positions` row ({ side, sizeUsd, entryPriceUsd, leverage, positionPubkey }).
+// Exits are re-armed from scratch: fresh ATR stop from the on-chain entry, no partial taken.
+export function adoptOnChainPosition(p: any, opts: { token: string; atr: number; leverageFallback: number; nowIso: string; reason: string; version?: string }): any | null {
+  const side = String(p?.side || "").toUpperCase();
+  const entryPrice = Number(p?.entryPriceUsd);
+  const sizeUsd = Number(p?.sizeUsd);
+  if ((side !== "LONG" && side !== "SHORT") || !(entryPrice > 0) || !(sizeUsd > 0)) return null;
+  const leverage = clampLeverage(Math.round(Number(p?.leverage)) || opts.leverageFallback);
+  const atr = opts.atr > 0 ? flooredAtr(opts.atr, entryPrice) : 0;
+  const ex = initExitState(side as "LONG" | "SHORT", entryPrice, atr);
+  const slPct = atr > 0 ? ((EXIT_SL_MULT * atr) / entryPrice) * 100 * leverage : 2;
+  const tpPct = atr > 0 ? ((EXIT_TP_MULT * atr) / entryPrice) * 100 * leverage : 4;
+  return {
+    side, entryPrice, entryTime: opts.nowIso, sizeInSol: sizeUsd / entryPrice, leverage,
+    mode: "REAL", takeProfitPct: tpPct, stopLossPct: slPct,
+    trailPeak: entryPrice, atrAtEntry: atr, stopPrice: atr > 0 ? ex.stopPrice : undefined,
+    partialTaken: false, realizedPnlPct: 0, remainingFrac: 1,
+    token: String(opts.token).toUpperCase(), positionPubkey: p.positionPubkey,
+    adopted: true, entryReason: opts.reason, version: opts.version,
+  };
 }
 
 export interface ExitState {
@@ -1082,20 +1159,139 @@ app.get("/api/macro", async (_req, res) => {
 const JOURNAL_FILE = path.join(os.tmpdir(), "trade_journal.json");
 const JOURNAL_MAX = 5000; // hard backstop so the file can't grow without bound
 
+// ── Journal seed ─────────────────────────────────────────────────────────────
+// The journal store lives in os.tmpdir(), which Railway wipes on every deploy, and the on-chain
+// backfill can only rebuild what `jup perps history` still returns (and has no entry reasons,
+// markets, news or versions). seed/trade-journal-seed.csv — the Journal tab's own CSV export
+// format — is merged into the store on every load, idempotently (deterministic ids, and a row is
+// skipped if the store already holds the same trade: same side, exit within 2 min). Override the
+// file with JOURNAL_SEED_FILE; JOURNAL_SEED=off disables. Ids use "csv-", NOT "seed-": the
+// backfill deletes "seed-" rows as demo placeholders.
+const JOURNAL_SEED_FILE = process.env.JOURNAL_SEED_FILE || path.join(process.cwd(), "seed", "trade-journal-seed.csv");
+
+// Minimal RFC 4180 CSV parser: quoted fields, "" escapes, commas/newlines inside quotes, CRLF.
+export function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+  const src = String(text || "").replace(/^\uFEFF/, "");
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (src[i + 1] === '"') { field += '"'; i++; } else inQuotes = false;
+      } else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && src[i + 1] === "\n") i++;
+      row.push(field); field = "";
+      if (row.length > 1 || row[0] !== "") rows.push(row);
+      row = [];
+    } else field += c;
+  }
+  if (field !== "" || row.length > 0) { row.push(field); if (row.length > 1 || row[0] !== "") rows.push(row); }
+  return rows;
+}
+
+// Map the Journal tab's CSV export back into journal-store rows.
+export function journalRowsFromSeedCsv(text: string, seedName = "trade-journal-seed.csv"): any[] {
+  const rows = parseCsv(text);
+  if (rows.length < 2) return [];
+  const header = rows[0].map(h => h.trim());
+  const col = (r: string[], name: string) => { const i = header.indexOf(name); return i >= 0 ? (r[i] ?? "").trim() : ""; };
+  const num = (v: string) => { if (v === "") return undefined; const n = Number(v); return Number.isFinite(n) ? n : undefined; };
+  const out: any[] = [];
+  for (const r of rows.slice(1)) {
+    const side = col(r, "Side").toUpperCase();
+    const entryTime = col(r, "Entry Time");
+    const exitTime = col(r, "Exit Time");
+    if ((side !== "LONG" && side !== "SHORT") || !entryTime || !exitTime) continue;
+    const pnlPct = num(col(r, "Realized PnL %"));
+    const version = col(r, "Execution Version") || undefined;
+    const news = col(r, "News Catalysts");
+    out.push({
+      id: `csv-${side.toLowerCase()}-${new Date(exitTime).getTime()}`,
+      source: col(r, "Source") || "Auto-Trade (Jupiter)",
+      side,
+      leverage: num(col(r, "Leverage")),
+      mode: col(r, "Mode") || "REAL",
+      entryTime: new Date(entryTime).toISOString(),
+      exitTime: new Date(exitTime).toISOString(),
+      entryPrice: num(col(r, "Entry Price")),
+      exitPrice: num(col(r, "Exit Price")),
+      pnl: pnlPct ?? 0,
+      realizedPnlPct: pnlPct,
+      realizedPnlUsd: num(col(r, "Realized PnL $")),
+      feesReconciled: /^yes/i.test(col(r, "Fees Included?")),
+      sizeInSol: num(col(r, "Size (SOL)")),
+      takeProfitPct: num(col(r, "TP %")),
+      stopLossPct: num(col(r, "SL %")),
+      entryMarket: col(r, "Market (Entry)") || undefined,
+      entryReason: col(r, "Entry Reason") || undefined,
+      exitMarket: col(r, "Market (Exit)") || undefined,
+      closeReason: col(r, "Exit Reason") || undefined,
+      sentiment: num(col(r, "Sentiment")),
+      technicalScore: num(col(r, "Technical")),
+      news: news ? news.split(" | ") : [],
+      version,
+      closeVersion: col(r, "Close Version") || undefined,
+      token: "SOL",
+      backfilled: !version, // rows without a build stamp came from the on-chain import
+      seededFrom: seedName,
+    });
+  }
+  return out;
+}
+
+// Idempotent merge of seed rows into a store (pure — exported for tests).
+export function mergeJournalSeed(store: any[], seedRows: any[]): { store: any[]; added: number } {
+  const ids = new Set(store.map((e: any) => e && e.id));
+  const TOL = 2 * 60 * 1000;
+  const sameTrade = (a: any, b: any) =>
+    String(a.side).toUpperCase() === String(b.side).toUpperCase() &&
+    (!a.token || !b.token || String(a.token).toUpperCase() === String(b.token).toUpperCase()) &&
+    a.exitTime && b.exitTime && Math.abs(new Date(a.exitTime).getTime() - new Date(b.exitTime).getTime()) <= TOL;
+  const add = seedRows.filter(sr => !ids.has(sr.id) && !store.some((e: any) => e && e.source === sr.source && sameTrade(e, sr)));
+  return { store: add.length ? [...store, ...add] : store, added: add.length };
+}
+
+let journalSeedCache: any[] | null = null;
+function loadJournalSeedRows(): any[] {
+  if (String(process.env.JOURNAL_SEED || "").toLowerCase() === "off") return [];
+  if (journalSeedCache) return journalSeedCache;
+  try {
+    journalSeedCache = fs.existsSync(JOURNAL_SEED_FILE)
+      ? journalRowsFromSeedCsv(fs.readFileSync(JOURNAL_SEED_FILE, "utf-8"), path.basename(JOURNAL_SEED_FILE))
+      : [];
+  } catch (e: any) {
+    console.error("[Journal] Failed to read seed CSV:", e.message);
+    journalSeedCache = [];
+  }
+  return journalSeedCache;
+}
+
 function loadJournalStore(): any[] {
   const rootPath = path.join(process.cwd(), "trade_journal.json");
   if (!fs.existsSync(JOURNAL_FILE) && fs.existsSync(rootPath)) {
     try { fs.copyFileSync(rootPath, JOURNAL_FILE); } catch (e) {}
   }
+  let arr: any[] = [];
   for (const p of [JOURNAL_FILE, rootPath]) {
     try {
       if (fs.existsSync(p)) {
-        const arr = JSON.parse(fs.readFileSync(p, "utf-8"));
-        if (Array.isArray(arr)) return arr;
+        const parsed = JSON.parse(fs.readFileSync(p, "utf-8"));
+        if (Array.isArray(parsed)) { arr = parsed; break; }
       }
     } catch (e) {}
   }
-  return [];
+  const merged = mergeJournalSeed(arr, loadJournalSeedRows());
+  if (merged.added > 0) {
+    console.log(`[Journal] Seeded ${merged.added} trade(s) from ${path.basename(JOURNAL_SEED_FILE)}.`);
+    saveJournalStore(merged.store);
+  }
+  return merged.store;
 }
 
 function saveJournalStore(entries: any[]) {
@@ -1312,52 +1508,75 @@ async function reconcileJournalTrades(stored: any[]): Promise<{ store: any[]; ch
   return { store: stored, changed };
 }
 
-// Convert raw `jup perps history` rows (chronological) into journal-shaped closed-trade
-// records by FIFO-pairing each side's Increase (open) with its next Decrease (close) — the
-// bot only ever holds one position at a time, so per-side FIFO exactly reconstructs each
-// round trip. Every field is the real on-chain value, so these rows are born fully reconciled.
-function buildTradesFromJupHistory(rows: any[], asset: string): any[] {
+// Convert raw `jup perps history` rows into journal-shaped closed-trade records by following each
+// side's position SIZE: Increases add to the open episode, Decreases reduce it, and the episode
+// closes when the size is back to ~0. One record per round trip, from the FIRST Increase to the
+// FINAL Decrease, with PnL/fees summed over every leg. The previous per-side FIFO pairing (each
+// Increase ↔ next Decrease) went out of step on any partial scale-out (two Decreases) or stacked
+// open (two Increases) and stayed misaligned for every later trade on that side — producing rows
+// like "LONG 09-21 05:06 → 09-23 07:44" that glued one trade's entry to another trade's exit.
+// Every field is the real on-chain value, so these rows are born fully reconciled.
+export function buildTradesFromJupHistory(rows: any[], asset: string): any[] {
   const chronological = [...rows]
     .filter((r: any) => r && r.time && r.action && r.side)
     .sort((a: any, b: any) => new Date(a.time).getTime() - new Date(b.time).getTime());
 
-  const openQueue: Record<string, any[]> = { LONG: [], SHORT: [] };
+  const open: Record<string, any | null> = { LONG: null, SHORT: null };
   const trades: any[] = [];
+  const EPS_USD = 0.5; // residual below this = flat (fee/rounding dust)
 
   for (const row of chronological) {
     const side = String(row.side).toUpperCase();
     if (side !== "LONG" && side !== "SHORT") continue;
+    const sizeUsd = Math.abs(Number(row.sizeUsd) || 0);
     if (row.action === "Increase") {
-      openQueue[side].push(row);
+      const ep = open[side];
+      if (!ep) {
+        open[side] = { first: row, size: sizeUsd, peak: sizeUsd, cost: sizeUsd * Number(row.priceUsd), openFeeUsd: Number(row.feeUsd) || 0, closeFeeUsd: 0, pnlUsd: 0, legCollateral: 0, lastPct: 0 };
+      } else {
+        ep.size += sizeUsd; ep.peak = Math.max(ep.peak, ep.size);
+        ep.cost += sizeUsd * Number(row.priceUsd);
+        ep.openFeeUsd += Number(row.feeUsd) || 0;
+      }
     } else if (row.action === "Decrease") {
-      const openRow = openQueue[side].shift();
-      if (!openRow) continue; // Decrease with no matching Increase in this window — skip, can't attribute
-      const openFeeUsd = Number(openRow.feeUsd) || 0;
-      const closeFeeUsd = Number(row.feeUsd) || 0;
+      const ep = open[side];
+      if (!ep) continue; // Decrease with no open episode in this window — can't attribute
       const net = netCloseLegPnl(row);
-      trades.push({
-        id: `jup-${String(row.signature || "").slice(0, 12) || Math.random().toString(36).slice(2, 9)}`,
-        side,
-        entryPrice: Number(openRow.priceUsd),
-        exitPrice: Number(row.priceUsd),
-        entryPriceActual: Number(openRow.priceUsd),
-        exitPriceActual: Number(row.priceUsd),
-        pnl: net.pnlPct,
-        pnlEstimated: net.pnlPct,
-        realizedPnlUsd: net.pnlUsd,
-        realizedPnlPct: net.pnlPct,
-        openFeeUsd,
-        closeFeeUsd,
-        totalFeesUsd: openFeeUsd + closeFeeUsd,
-        entryTime: openRow.time,
-        exitTime: row.time,
-        openSignature: openRow.signature,
-        closeSignature: row.signature,
-        token: asset,
-        mode: "REAL",
-        feesReconciled: true,
-        backfilled: true, // imported from on-chain history, not recorded live by the daemon
-      });
+      ep.pnlUsd += net.pnlUsd;
+      ep.lastPct = net.pnlPct;
+      // Each leg's collateral share, recovered from its own $/% pair (Jupiter reports both).
+      if (Number(net.pnlPct) && Number(net.pnlUsd)) ep.legCollateral += Math.abs(net.pnlUsd / (net.pnlPct / 100));
+      ep.closeFeeUsd += Number(row.feeUsd) || 0;
+      ep.size -= sizeUsd;
+      if (ep.size <= EPS_USD || ep.size <= ep.peak * 0.02) {
+        const first = ep.first;
+        const entryAvg = ep.peak > 0 ? ep.cost / ep.peak : Number(first.priceUsd);
+        const pnlPct = ep.legCollateral > 0 ? (ep.pnlUsd / ep.legCollateral) * 100 : ep.lastPct;
+        trades.push({
+          id: `jup-${String(row.signature || "").slice(0, 12) || Math.random().toString(36).slice(2, 9)}`,
+          side,
+          entryPrice: Number(first.priceUsd),
+          exitPrice: Number(row.priceUsd),
+          entryPriceActual: entryAvg,
+          exitPriceActual: Number(row.priceUsd),
+          pnl: pnlPct,
+          pnlEstimated: pnlPct,
+          realizedPnlUsd: ep.pnlUsd,
+          realizedPnlPct: pnlPct,
+          openFeeUsd: ep.openFeeUsd,
+          closeFeeUsd: ep.closeFeeUsd,
+          totalFeesUsd: ep.openFeeUsd + ep.closeFeeUsd,
+          entryTime: first.time,
+          exitTime: row.time,
+          openSignature: first.signature,
+          closeSignature: row.signature,
+          token: asset,
+          mode: "REAL",
+          feesReconciled: true,
+          backfilled: true, // imported from on-chain history, not recorded live by the daemon
+        });
+        open[side] = null;
+      }
     }
   }
   return trades;
@@ -1421,7 +1640,10 @@ async function backfillJupiterHistoryIfNeeded(stored: any[]): Promise<{ store: a
 
   const now = new Date().toISOString();
   config.jupHistoryBackfilledAt = now;
-  config.statsResetAt = now; // full history now visible in the ledger — stats start counting fresh from here
+  // Full history now visible in the ledger — stats start counting fresh from here. EXCEPT when a
+  // journal seed is present: the seed IS the intended baseline, and resetting here (which happens
+  // on every Railway deploy, since tmp state is wiped) would hide it from the stats every time.
+  if (loadJournalSeedRows().length === 0) config.statsResetAt = now;
   try { saveJupiterConfig(config); } catch (e: any) { console.error("[Journal] Failed to persist backfill marker:", e?.message || e); }
 
   console.log(`[Journal] Backfilled ${result.added} real trade(s) from jup perps history; stats reset at ${now}.`);
@@ -1546,6 +1768,27 @@ function mapJournalTrades(reconciled: any[]) {
     };
   }).sort((a, b) => new Date(b.exitTime || 0).getTime() - new Date(a.exitTime || 0).getTime());
 }
+
+// Full audit trail for the retention window (default 30 days), newest first.
+//   GET /api/audit-log?days=30              → JSON { retentionDays, count, entries }
+//   GET /api/audit-log?days=30&format=csv   → CSV download
+app.get("/api/audit-log", (req, res) => {
+  try {
+    pruneAuditStore(true);
+    const days = Math.min(Math.max(Number(req.query.days) || AUDIT_RETENTION_DAYS, 1), AUDIT_RETENTION_DAYS);
+    const entries = pruneAuditEntries(readAuditStore(), Date.now(), days)
+      .sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    if (String(req.query.format || "").toLowerCase() === "csv") {
+      const stamp = new Date().toISOString().slice(0, 10);
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="audit-log-${days}d-${stamp}.csv"`);
+      return res.send("\uFEFF" + auditLogToCsv(entries));
+    }
+    res.json({ retentionDays: AUDIT_RETENTION_DAYS, count: entries.length, entries });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message || "Failed to read audit log" });
+  }
+});
 
 app.get("/api/journal", async (_req, res) => {
   try {
@@ -3206,18 +3449,80 @@ export function calculateDurationStr(startIso: string, endIso: string): string {
 
 // Structural type so the same audit-log store works for both the Telegram alert engine and the
 // Jupiter on-chain auto-trader (both carry an optional auditLogs array).
+// ── Persistent audit log (AUDIT_RETENTION_DAYS, default 30) ─────────────────────────────────
+// config.auditLogs stays a short rolling window (last 500) for the live UI panel and the config
+// API — ~200 lines/day would make a 30-day window bloat every config save. The full history is
+// appended to a separate JSONL store and pruned to the retention window; GET /api/audit-log serves
+// it as JSON or CSV. NOTE: os.tmpdir() is wiped on every Railway deploy — point AUDIT_LOG_FILE at a
+// mounted volume (e.g. /data/audit_log.jsonl) for the 30 days to survive redeploys.
+export const AUDIT_RETENTION_DAYS = Number(process.env.AUDIT_RETENTION_DAYS) || 30;
+const AUDIT_LOG_FILE = process.env.AUDIT_LOG_FILE || path.join(os.tmpdir(), "audit_log.jsonl");
+const AUDIT_PRUNE_EVERY_MS = 60 * 60 * 1000;
+let auditLastPruneAt = 0;
+
+export function pruneAuditEntries<T extends { timestamp: string }>(entries: T[], nowMs: number, days = AUDIT_RETENTION_DAYS): T[] {
+  const cutoff = nowMs - days * 24 * 3600 * 1000;
+  return entries.filter(e => { const t = new Date(e.timestamp).getTime(); return Number.isFinite(t) && t >= cutoff; });
+}
+
+function csvCell(v: any): string {
+  const str = v === undefined || v === null ? "" : String(v);
+  return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+}
+export function auditLogToCsv(entries: Array<{ timestamp: string; source?: string; type?: string; version?: string; message: string }>): string {
+  const header = ["Timestamp (UTC)", "Source", "Type", "Version", "Message"];
+  const lines = [header.join(",")];
+  for (const e of entries) lines.push([e.timestamp, e.source || "", e.type || "", e.version || "", e.message].map(csvCell).join(","));
+  return lines.join("\n") + "\n";
+}
+
+export function readAuditStore(): any[] {
+  try {
+    if (!fs.existsSync(AUDIT_LOG_FILE)) return [];
+    return fs.readFileSync(AUDIT_LOG_FILE, "utf-8").split("\n").filter(Boolean)
+      .map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  } catch (e: any) {
+    console.error("[Audit] Failed to read audit store:", e.message);
+    return [];
+  }
+}
+
+function pruneAuditStore(force = false) {
+  const now = Date.now();
+  if (!force && now - auditLastPruneAt < AUDIT_PRUNE_EVERY_MS) return;
+  auditLastPruneAt = now;
+  try {
+    const all = readAuditStore();
+    const kept = pruneAuditEntries(all, now);
+    if (kept.length !== all.length) {
+      fs.writeFileSync(AUDIT_LOG_FILE, kept.map(e => JSON.stringify(e)).join("\n") + (kept.length ? "\n" : ""), "utf-8");
+    }
+  } catch (e: any) {
+    console.error("[Audit] Failed to prune audit store:", e.message);
+  }
+}
+
 function addAuditLog(config: { auditLogs?: Array<AuditLogEntry> }, message: string, type: "info" | "cooldown" | "trade" | "hold") {
   if (!config.auditLogs) config.auditLogs = [];
-  config.auditLogs.push({
+  const entry: AuditLogEntry = {
     id: Math.random().toString(36).substring(2, 9),
     timestamp: new Date().toISOString(),
     message,
     type,
     version: APP_VERSION.version
-  });
+  };
+  config.auditLogs.push(entry);
   if (config.auditLogs.length > 500) {
     config.auditLogs.shift();
   }
+  // The Jupiter config is the only one carrying tradingMode — tag the source for the export.
+  const source = (config as any).tradingMode !== undefined ? "Auto-Trade" : "Alert";
+  try {
+    fs.appendFileSync(AUDIT_LOG_FILE, JSON.stringify({ ...entry, source }) + "\n", "utf-8");
+  } catch (e: any) {
+    console.error("[Audit] Failed to append audit store:", e.message);
+  }
+  pruneAuditStore();
 }
 
 export function loadTelegramConfig(): TelegramConfig {
@@ -3336,7 +3641,8 @@ export interface JupiterConfig {
   cumulativePnL: number;
   interval?: string;
   useRegimeFilter?: boolean; // 200-EMA primary-trend gate (default ON): only long above, short below.
-  minReversalProfitPct?: number; // reversal exit only fires above this leveraged profit % (default 1.5; 0 = off).
+  minReversalProfitPct?: number; // signal exit (reversal OR thesis-lapse to HOLD) only fires above this leveraged profit % (default 1.5; 0 = any profit).
+  adoptOrphanPositions?: boolean; // adopt an untracked on-chain position into management (default ON; false if you trade this wallet manually).
   reentryBlockPct?: number; // block re-arming the same side within this % of a failed entry (default 0.6; 0 = off).
   reentryBlockMinutes?: number; // duration of the same-zone re-entry lockout (default 60).
   useConvictionSizing?: boolean; // scale size by |Σ| signal strength (default ON).
@@ -3345,7 +3651,7 @@ export interface JupiterConfig {
   auditLogs?: Array<AuditLogEntry>; // per-sync reasoning trail (why each tick entered/held/skipped).
   jupHistoryBackfilledAt?: string; // set once the full on-chain trade history has been imported into the journal (one-time).
   statsResetAt?: string; // journal ledger keeps full history, but aggregate stats only count trades closed after this.
-  meanReversionEnabled?: boolean; // range-fade entries when ADX says the market is ranging (default ON — see resolveEntry).
+  meanReversionEnabled?: boolean; // range-fade entries when ADX says the market is ranging (default OFF since 2026-09 — see signalSide / scripts/live-replay.ts).
   activeTrade: {
     side: "LONG" | "SHORT";
     entryPrice: number;
@@ -3462,7 +3768,11 @@ function loadJupiterConfig(): JupiterConfig {
       if (parsed.lastTradeAddedAt === undefined) parsed.lastTradeAddedAt = "";
       if (parsed.token === undefined) parsed.token = "SOL";
       parsed.tokens = tradeTokens(parsed); // normalized multi-asset scan list (primary first)
-      if (parsed.meanReversionEnabled === undefined) parsed.meanReversionEnabled = true;
+      // Opt-in (default OFF). Live never actually opened Range-Fade entries before signalSide()
+      // (the label didn't parse), and in the 2026-09 parity replay adding MR cut the Mar–Sep profit
+      // factor from 1.38 to 1.12 (worse in Jun–Jul and Aug–Sep, better only in Mar–May chop).
+      // Turning it on is now a deliberate, measured choice.
+      if (parsed.meanReversionEnabled === undefined) parsed.meanReversionEnabled = false;
       if (parsed.topic === undefined || parsed.topic === "market" || parsed.topic === "Crypto") parsed.topic = "crypto,war";
       const legacyLosingWeights = parsed.weights && parsed.weights.sentiment === 0.9 && parsed.weights.elliottWave === 0.85;
       if (!parsed.weights || legacyLosingWeights) {
@@ -4883,9 +5193,38 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
     // be on a different token than the configured primary); when flat, this is the primary token
     // and the candidate scan below may switch pred to another market before entry evaluation.
     const managedToken = String((config.activeTrade && config.activeTrade.token) || config.token || "SOL").toUpperCase();
-    let pred = await getPredictionData(managedToken, config.topic, config.weights, config.interval || "1h", "", false, config.meanReversionEnabled !== false);
+    let pred = await getPredictionData(managedToken, config.topic, config.weights, config.interval || "1h", "", false, config.meanReversionEnabled === true);
     config.lastCheckedAt = new Date().toISOString();
     delete config.error;
+
+    // Adopt an on-chain position the tracker lost (failed-but-landed open, restart, redeploy).
+    // Without this it runs unmanaged until the static on-chain SL fires. adoptOrphanPositions:false
+    // disables (e.g. if you trade this wallet manually alongside the bot).
+    if (!config.activeTrade && config.privateKey && config.tradingMode === "REAL" && (config as any).adoptOrphanPositions !== false) {
+      try {
+        const posRes = await runJupCli(["perps", "positions", "--key", jupCliKeyName(config)]);
+        for (const tok of tradeTokens(config)) {
+          const orphan = findOnChainPosition(posRes && posRes.positions, tok);
+          if (!orphan) continue;
+          const adopted = adoptOnChainPosition(orphan, {
+            token: tok,
+            atr: tok === managedToken ? Number(pred.atr) || 0 : 0,
+            leverageFallback: clampLeverage(config.leverage),
+            nowIso: new Date().toISOString(),
+            reason: `Adopted untracked on-chain ${String(orphan.side).toUpperCase()} ${tok} @ $${Number(orphan.entryPriceUsd).toFixed(2)} (tracker had no position)`,
+            version: APP_VERSION.version,
+          });
+          if (adopted) {
+            config.activeTrade = adopted;
+            addAuditLog(config, `ADOPT ${adopted.side} ${tok} @ $${adopted.entryPrice.toFixed(2)} — on-chain position ${orphan.positionPubkey || "?"} was untracked; now managed by the shared exit engine.`, "trade");
+            console.log(`[Jupiter Daemon] Adopted orphaned on-chain ${adopted.side} ${tok} position ${orphan.positionPubkey}.`);
+          }
+          break;
+        }
+      } catch (e: any) {
+        console.warn("[Jupiter Daemon] Orphan-position check failed (continuing):", e.message);
+      }
+    }
 
     let activeTrade = config.activeTrade || null;
     let lastTradePnL = config.lastTradePnL || 0;
@@ -4901,14 +5240,9 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
       exitPrice = jupPrice;
     }
 
-    let enterSide: "LONG" | "SHORT" | "HOLD" | null = null;
-    if (action === "Long Buy" || action === "Short Buy (Oversold)") {
-      enterSide = "LONG";
-    } else if (action === "Short Sell" || action === "Long Sell (Overbought)") {
-      enterSide = "SHORT";
-    } else if (action === "Hold") {
-      enterSide = "HOLD";
-    }
+    // Canonical side from resolveEntry (see signalSide) — never null, so "Hold (…)" labels can't
+    // masquerade as a reversal and Range-Fade signals are recognised.
+    let enterSide: "LONG" | "SHORT" | "HOLD" | null = signalSide(pred);
 
     if (forceTrigger) {
       if (!enterSide || enterSide === "HOLD") {
@@ -5017,19 +5351,22 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         }
       }
 
-      // Reversal trend changes — but ONLY take a reversal exit once the trade has cleared a
-      // fee/noise buffer of profit. Previously the reversal rule fired the instant the signal
-      // flipped, closing trades in 4–5 min for tiny ±0.x% results that Jupiter's open/close +
-      // borrow fees turned net-negative (the "phantom R:R" / premature-exit problem). Now the
-      // hard SL and trailing stop are the ONLY exits for an unprofitable trade — the reversal can
-      // only realize a *winner*. minReversalProfitPct is leveraged % (default 1.5%); 0 disables.
+      // Signal-driven early exit (shared signalExitReason — same rule /api/backtest and
+      // scripts/live-replay.ts run). Only once the trade has cleared the fee/noise buffer
+      // (minReversalProfitPct, leveraged %, default 1.5; below it the ATR stop / breakeven /
+      // trail / time-stop govern). "reversal" = signal now points the other way (may re-enter
+      // that side this tick); "thesis-lapse" = signal fell back to HOLD, bank the winner.
       const minReversalProfit = (config as any).minReversalProfitPct ?? 1.5;
-      if (!shouldClose && enterSide !== "HOLD" && enterSide !== activeTrade.side) {
-        if (currentPnlPercent >= minReversalProfit) {
+      if (!shouldClose && enterSide && enterSide !== activeTrade.side) {
+        const why = signalExitReason(activeTrade.side, enterSide, currentPnlPercent, minReversalProfit);
+        if (why === "reversal") {
           shouldClose = true;
           reversalReentry = true; // Rule 04: settle and open the opposite on the same tick
           closeReason = `Trend Reversal — banked +${currentPnlPercent.toFixed(2)}% (signal flipped to ${enterSide})`;
-        } else {
+        } else if (why === "thesis-lapse") {
+          shouldClose = true;
+          closeReason = `Thesis Lapse — banked +${currentPnlPercent.toFixed(2)}% (signal no longer ${activeTrade.side}: ${pred.action})`;
+        } else if (enterSide !== "HOLD") {
           // Signal flipped but we're not yet in fee-clearing profit: hold and let the hard SL /
           // trailing stop govern the downside instead of churning out at a fee-eaten micro-loss.
           addAuditLog(config, `Reversal signal to ${enterSide} IGNORED — trade only ${currentPnlPercent >= 0 ? "+" : ""}${currentPnlPercent.toFixed(2)}% (< +${minReversalProfit}% fee buffer). Holding; SL/trail governs.`, "info");
@@ -5221,10 +5558,9 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
         for (const tok of tradeTokens(config)) {
           if (tok === managedToken) continue;
           try {
-            const altPred = await getPredictionData(tok, config.topic, config.weights, config.interval || "1h", "", false, config.meanReversionEnabled !== false);
-            let altSide: "LONG" | "SHORT" | null = null;
-            if (altPred.action === "Long Buy" || altPred.action === "Short Buy (Oversold)") altSide = "LONG";
-            else if (altPred.action === "Short Sell" || altPred.action === "Long Sell (Overbought)") altSide = "SHORT";
+            const altPred = await getPredictionData(tok, config.topic, config.weights, config.interval || "1h", "", false, config.meanReversionEnabled === true);
+            const altSig = signalSide(altPred);
+            const altSide: "LONG" | "SHORT" | null = altSig === "HOLD" ? null : altSig;
             if (altSide && altPred.isTrendConfirmed3x && altPred.trend !== "SIDEWAYS") {
               addAuditLog(config, `SCAN ${tok}: actionable ${altSide} candidate while ${managedToken} holds — evaluating ${tok} entry through the shared gates.`, "info");
               pred = altPred;
@@ -5649,6 +5985,36 @@ async function checkJupiterTradingAndState(forceTrigger: boolean = false) {
             config.error = `Automated open failed: ${e.message}`;
           }
 
+          // The CLI can report failure for an open that DID land (confirmation timeout etc.). Verify
+          // on-chain before rolling back — rolling back a live position orphans it (see
+          // adoptOnChainPosition). A "Refusing to OPEN" guard abort is a pre-existing position,
+          // which the next tick's adoption check picks up instead.
+          if (mode !== "PAPER" && realOpenFailed && activeTrade && !String(config.error || "").includes("Refusing to OPEN")) {
+            try {
+              const posRes = await runJupCli(["perps", "positions", "--key", jupCliKeyName(config)]);
+              const landed = findOnChainPosition(posRes && posRes.positions, entryToken);
+              if (landed && String(landed.side).toUpperCase() === activeTrade.side) {
+                realOpenFailed = false;
+                const onChainEntry = Number(landed.entryPriceUsd) || activeTrade.entryPrice;
+                activeTrade.entryPrice = onChainEntry;
+                activeTrade.trailPeak = onChainEntry;
+                if (Number(landed.sizeUsd) > 0) activeTrade.sizeInSol = Number(landed.sizeUsd) / onChainEntry;
+                activeTrade.positionPubkey = landed.positionPubkey;
+                config.error = "";
+                addAuditLog(config, `OPEN reported failure but the ${activeTrade.side} ${entryToken} position IS on-chain (${landed.positionPubkey || "?"}) — tracking it instead of orphaning it.`, "trade");
+                if (!Array.isArray(landed.tpsl) || landed.tpsl.length === 0) {
+                  const lev = activeTrade.leverage || 3;
+                  const tpPx = activeTrade.side === "LONG" ? onChainEntry * (1 + tpPct / 100 / lev) : onChainEntry * (1 - tpPct / 100 / lev);
+                  const slPx = activeTrade.side === "LONG" ? onChainEntry * (1 - slPct / 100 / lev) : onChainEntry * (1 + slPct / 100 / lev);
+                  runJupCli(["perps", "set", "--position", landed.positionPubkey, "--tp", tpPx.toFixed(6), "--sl", slPx.toFixed(6), "--key", jupCliKeyName(config)])
+                    .catch((e: any) => console.error("[Jupiter Daemon] Failed to attach TP/SL to recovered position:", e.message));
+                }
+              }
+            } catch (verifyErr: any) {
+              console.error("[Jupiter Daemon] Post-failure on-chain verification failed:", verifyErr.message);
+            }
+          }
+
           // Never track a position that did not actually open on-chain (prevents phantom positions / fake PnL).
           if (mode !== "PAPER" && realOpenFailed) {
             console.log("[Jupiter Daemon] Rolling back tracked position (real perps open did not execute).");
@@ -5884,7 +6250,7 @@ app.post("/api/strategy/signal", handleGetStrategyOutput);
 
 app.post("/api/backtest", async (req, res) => {
   try {
-    const { token = "SOL", interval = "1h", lookbackDays = 7, weights, initialCapital = 10000, startDate, endDate, leverage = 3, takeProfitPct = 3.25, stopLossPct = 1.625, signalThreshold = 0.25, useRegimeFilter = true, useMacroFilter = true, meanReversionEnabled = true } = req.body;
+    const { token = "SOL", interval = "1h", lookbackDays = 7, weights, initialCapital = 10000, startDate, endDate, leverage = 3, takeProfitPct = 3.25, stopLossPct = 1.625, signalThreshold = 0.25, useRegimeFilter = true, useMacroFilter = true, meanReversionEnabled = false, minReversalProfitPct = 1.5 } = req.body;
     const sigThreshold = Math.max(0, Number(signalThreshold) || 0.08);
     const symbol = `${token.toUpperCase()}-USD`;
     
@@ -6343,10 +6709,17 @@ app.post("/api/backtest", async (req, res) => {
           closeReason = `Time Stop — stagnant ${Math.round(elapsedMinutes)} min (PnL ${unrealizedPnL.toFixed(2)}% < +${STAGNANT_MIN_PNL_PCT}%)`;
         }
 
-        // Reversal only banks a winner (matches the live in-profit reversal rule).
-        if (!shouldClose && positionSide !== "HOLD" && positionSide !== pos.side && unrealizedPnL > 0) {
+        // Signal-driven early exit — the SAME shared rule the live daemon runs (signalExitReason):
+        // reversal to the other side OR thesis lapse back to HOLD, only above the fee buffer.
+        // (Previously: reversal-only, any profit > 0 — a rule live never actually ran.)
+        if (!shouldClose) {
+          const why = signalExitReason(pos.side, positionSide as any, unrealizedPnL, Number(minReversalProfitPct) || 0);
+          if (why) {
             shouldClose = true;
-            closeReason = `Trend Reversal — banked +${unrealizedPnL.toFixed(2)}% (signal flipped to ${positionSide})`;
+            closeReason = why === "reversal"
+              ? `Trend Reversal — banked +${unrealizedPnL.toFixed(2)}% (signal flipped to ${positionSide})`
+              : `Thesis Lapse — banked +${unrealizedPnL.toFixed(2)}% (signal back to HOLD)`;
+          }
         }
 
         if (shouldClose) {

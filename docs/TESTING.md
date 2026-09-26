@@ -147,3 +147,36 @@ A successful call prints `{ "success": true, "status": 200, ..., "data": { ... }
 | `recommendation: "HOLD"` with `trend:"CHOP/HOLD"` | Working as intended — chop-zone filter suppressed a low-conviction signal. |
 | `500` with an error string | Upstream data/LLM hiccup — re-run; check server logs and required env keys. |
 | Backtest error about data points | Fewer than 15 candles in range — increase `lookbackDays` or use `15m`/`30m`. |
+
+## Unit & scenario tests
+
+```bash
+npm test          # tsx test.ts — no network needed except the news-fetch integration case
+```
+
+The suite covers the strategy logic that decides real trades:
+
+- **Signal side parsing.** Descriptive HOLD labels such as "Hold (ADX …)" and "Hold Chop Zone" map to HOLD, never to null. Range-fade labels keep their side.
+- **Signal exits.** Reversal versus thesis lapse, the +1.5% fee buffer, and scenarios run through the shared ATR exit engine.
+- **Time-stop default.** The 600-minute default is asserted.
+- **Orphan recovery.** Finding an untracked on-chain position and adopting it with a fresh ATR stop and clamped leverage.
+- **On-chain pairing.** Partial scale-outs merge into one trade. Stacked opens and the real Sep 21 → Sep 23 sequence pair correctly.
+- **Journal seed.** The CSV parser, the full seed import (86 rows), the corrected rows, and idempotent merging.
+- **Audit log.** 30-day retention and CSV escaping.
+
+## Live-parity replay
+
+`scripts/live-replay.ts` replays the **live daemon's** decision loop on Binance SOLUSDT candles.
+It uses 1h signals, a 15m exit path, and Jupiter-like fees and borrow. It reuses the server's
+exported functions, so it measures exactly what live would do.
+
+```bash
+npx tsx scripts/live-replay.ts --cache ./.replay-cache                 # Mar–May, Jun–Jul, Aug–Sep, full
+STAGNANT_EXIT_MINUTES=720 npx tsx scripts/live-replay.ts --cache ./.replay-cache
+REPLAY_FEE_SIDE=0.0014 REPLAY_BORROW_HR=0.0001 npx tsx scripts/live-replay.ts --cache ./.replay-cache   # 2× cost stress
+```
+
+Any strategy env var works as an override (`EXT_MAX_ATR`, `ADX_ENTRY_MIN`, `EXIT_SL_MULT`, …).
+`REPLAY_MIN_REVERSAL_PCT` sets the signal-exit buffer. Adopt a change only when it improves
+**every** window, not just the total.
+

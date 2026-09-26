@@ -130,6 +130,8 @@ performance metrics (market vs strategy return, alpha).
 | `endDate`        | string | —       | ISO date.                                            |
 | `weights`        | object | defaults| `{ sentiment, technical, liquidity }`.              |
 | `initialCapital` | number | `10000` | Starting equity.                                     |
+| `meanReversionEnabled` | boolean | `false` | Range-fade entries when ADX ≤ 15. Off by default, matching live. |
+| `minReversalProfitPct` | number | `1.5` | Leveraged % buffer for the shared signal exit (reversal or thesis lapse). |
 | `leverage`       | number | `5`     | Position leverage.                                   |
 | `takeProfitPct`  | number | `4.0`   | TP distance in %.                                    |
 | `stopLossPct`    | number | `2.0`   | SL distance in %.                                    |
@@ -154,6 +156,15 @@ plus prediction-accuracy stats (error %, sMAPE). Requires ≥15 candles in range
 | `GET  /api/price`         | Latest price snapshot.                                             |
 | `GET  /api/historical`    | Historical OHLC candles (`token`, `interval`, date range).         |
 | `GET  /api/news`          | Recent market headlines.                                           |
+| `GET  /api/journal`       | On-chain-verified trade journal and stats (merged with `seed/trade-journal-seed.csv`). |
+| `GET  /api/audit-log`     | Audit trail for the last `days` (default and max `AUDIT_RETENTION_DAYS`, 30), newest first. Add `format=csv` for a CSV download. |
+
+```bash
+# 30-day audit log as CSV
+curl -fsS "$BASE/api/audit-log?days=30&format=csv" -o audit-log.csv
+# last 7 days as JSON
+curl -fsS "$BASE/api/audit-log?days=7" | jq '.count'
+```
 
 ## Consuming from Claude Code
 

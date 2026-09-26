@@ -5960,21 +5960,21 @@ export default function App() {
                       dca: false
                     });
                     setThreshold(0.25);
-                    // Persist the regime switch on the auto-trader: momentum when ADX trends,
-                    // mean-reversion range-fades when ADX says ranging/chop (resolveEntry).
-                    // The engine defaults ON, but applying "recommended" must also repair a
-                    // config where it was previously turned off.
-                    let mrNote = "• Mean-Reversion range-fade in chop-zone (ADX ranging): ENABLED";
+                    // Persist the regime switch on the auto-trader: momentum-only is the
+                    // recommended profile (adding mean-reversion cut the Mar–Sep 2026 replay's
+                    // profit factor 1.38 → 1.12 — see scripts/live-replay.ts), so "recommended" also
+                    // repairs a config where it was switched on.
+                    let mrNote = "• Mean-Reversion range-fade: DISABLED (momentum-only; lowered replay profit factor)";
                     try {
                       const res = await fetch("/api/jupiter-config", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ meanReversionEnabled: true })
+                        body: JSON.stringify({ meanReversionEnabled: false })
                       });
                       if (!res.ok) throw new Error(`HTTP ${res.status}`);
                       fetchJupiterConfig();
                     } catch (e: any) {
-                      mrNote = `• Mean-Reversion toggle could not be saved (${e.message || e}) — engine default is ON`;
+                      mrNote = `• Mean-Reversion toggle could not be saved (${e.message || e}) — engine default is OFF`;
                     }
                     alert(`System configuration updated to recommended optimal defaults:\n• Weights: MACD: 0.9, RSI: 0.85, Supertrend: 0.9\n• Enabled: MACD, RSI, Supertrend (others disabled)\n• Conviction Threshold: 0.25\n• Momentum strategy when ADX confirms a trend\n${mrNote}`);
                   }}
@@ -6615,9 +6615,19 @@ export default function App() {
                 · {mergedAuditLogs.length} events · auto-trade {jupiterConfig?.tradingMode === "PAPER" ? "PAPER (simulated)" : "REAL"}
               </span>
             </div>
-            <button onClick={() => setShowAuditPanel(false)} className="text-text-dim hover:text-text-heading">
-              <X className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-3">
+              <a
+                href="/api/audit-log?days=30&format=csv"
+                download
+                className="py-1 px-2.5 rounded-lg border border-border-dim/80 hover:border-sol-purple bg-bg-input text-text-heading hover:text-sol-purple flex items-center gap-1.5 transition-all text-[10px] font-bold"
+                title="Download the full 30-day audit log (both daemons) as CSV"
+              >
+                <Download className="w-3 h-3" /> Export 30d CSV
+              </a>
+              <button onClick={() => setShowAuditPanel(false)} className="text-text-dim hover:text-text-heading">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
           <div className="flex-1 overflow-y-auto custom-scrollbar px-6 py-3 space-y-1.5 font-mono text-[11px]">
             {mergedAuditLogs.length === 0 ? (

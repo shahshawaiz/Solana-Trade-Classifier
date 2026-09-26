@@ -1,4 +1,5 @@
 import React from "react";
+import { StrategyPlaybook } from "./StrategyPlaybook";
 import {
   Activity,
   AlertTriangle,
@@ -7,6 +8,7 @@ import {
   Clock,
   Gauge,
   Layers,
+  PlayCircle,
   Shield,
   Target,
   TrendingUp,
@@ -118,22 +120,24 @@ const TIMEFRAMES = [
   { tf: "every 20 min", role: "Daemon wake-up: evaluate entries / manage the open position", knob: "MIN_SYNC_MINUTES" },
   { tf: "instant", role: "Hard TP + SL trigger orders on-chain — Jupiter keepers fill them even while the bot sleeps", knob: "attached on every REAL open" },
   { tf: "2 × 1h bars", role: "Entry confirmation — current and previous bar must agree on direction", knob: "2-bar confirmation" },
-  { tf: "last ~60 min", role: "Range window for the mean-reversion fade (ranging regime only)", knob: "MEAN_REVERSION_LOOKBACK_MINUTES" },
+  { tf: "last ~60 min", role: "Range window for the optional mean-reversion fade (off by default)", knob: "MEAN_REVERSION_LOOKBACK_MINUTES" },
   { tf: "8 × 1h bars", role: "200-EMA slope — blocks longs into a falling EMA and vice versa", knob: "REGIME_SLOPE_BARS" },
   { tf: "200 × 1h bars (~8 days)", role: "200-EMA primary-trend regime: longs above, shorts below", knob: "useRegimeFilter" },
   { tf: "5 days", role: "Macro regime from DXY / 10-Y yield / VIX trend → RISK-ON / OFF / NEUTRAL", knob: "useMacroFilter" },
   { tf: "30m / 45m / 6h", role: "Entry cooldown · pause after 2 straight losses · circuit-breaker auto-reset", knob: "risk rails" },
-  { tf: "360 min", role: "Stagnation stop: still under +0.5% with no scale-out → cut it before borrow fees bleed it", knob: "STAGNANT_EXIT_MINUTES" },
-  { tf: "rolling 24 h", role: "Maximum 6 position opens across all markets", knob: "MAX_OPENS_PER_24H" },
-  { tf: "per cycle", role: "Multi-market scan order when flat: primary token, then the other configured markets — Jupiter Perps' complete universe", knob: "tokens (SOL · ETH · BTC)" }
+  { tf: "600 min", role: "Stagnation stop: still under +0.5% with no scale-out → cut it before borrow fees bleed it (raised from 360 after the Sep 2026 replay)", knob: "STAGNANT_EXIT_MINUTES" },
+  { tf: "30 days", role: "Audit-log retention: every decision, exportable as CSV from the audit panel", knob: "AUDIT_RETENTION_DAYS" },
+  { tf: "rolling 24 h", role: "Maximum 6 position opens", knob: "MAX_OPENS_PER_24H" },
+  { tf: "per cycle", role: "Markets scanned when flat: the primary token, then any others listed in tokens", knob: "tokens (default SOL only)" }
 ];
 
 const RISK_RAILS = [
-  { name: "Single position", desc: "One open position at a time ACROSS ALL MARKETS — the wallet's real on-chain positions are re-checked before every REAL open, so a state desync can never double exposure." },
+  { name: "Single position", desc: "One open position at a time — the wallet's real on-chain positions are re-checked before every REAL open, so a state desync can never double exposure." },
+  { name: "Orphan adoption", desc: "If the wallet holds a position the daemon isn't tracking (an open that reported failure but landed), the daemon adopts it and manages it with the normal exits instead of leaving it to the static on-chain stop." },
   { name: "Macro filter", desc: "No new longs while the dollar/yields/volatility backdrop is RISK-OFF; no new shorts while RISK-ON." },
   { name: "Cooldowns", desc: "30 min between entries · 45 min pause after 2 consecutive losses · circuit breaker at 8 straight losses (auto-resets 6h after the last loss)." },
   { name: "Leverage cap", desc: "Hard MAX_LEVERAGE (5×) clamp at config load, config save, and trade sizing — 89% of all historical losses came from 11–20× May trades." },
-  { name: "Daily cap", desc: "At most 6 position opens per rolling 24 hours across all markets (MAX_OPENS_PER_24H)." },
+  { name: "Daily cap", desc: "At most 6 position opens per rolling 24 hours (MAX_OPENS_PER_24H)." },
   { name: "Re-entry block", desc: "Never re-arms the same side at the same price level on the same market right after a loss." }
 ];
 
@@ -154,15 +158,21 @@ export const StrategyGuide = () => (
         </p>
       </div>
 
+      {/* Animated scenarios */}
+      <section>
+        <SectionHeading icon={PlayCircle} kicker="Watch it trade" title="Seven scenarios, played by the live rules" />
+        <StrategyPlaybook />
+      </section>
+
       {/* 30-second version */}
       <section>
         <SectionHeading icon={Zap} kicker="The 30-second version" title="Four questions, every 20 minutes" />
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           {[
-            ["Is there a bias?", "Weighted composite Σ of MACD, RSI and Supertrend on 1h candles must exceed ±0.25 conviction. If the primary market holds, the same test scans the other configured markets (ETH, BTC) — frequency through breadth, one position slot."],
-            ["What market is this?", "ADX(14) routes it: strong trend → momentum · ranging → fade the range edge · weak trend → stand aside."],
+            ["Is there a bias?", "Weighted composite Σ of MACD, RSI and Supertrend on 1h candles must exceed ±0.25 conviction. SOL only by default; one position slot."],
+            ["What market is this?", "ADX(14) routes it: strong trend (above 25) → momentum entry · anything weaker → stand aside. The range-edge fade is opt-in and off by default."],
             ["Is the entry safe?", "Trend-alignment, no-chasing, macro, cooldown and pyramiding gates all have to agree."],
-            ["Manage what's open", "ATR ladder banks half at +1.5×ATR, moves the stop to breakeven, trails the rest. Hard TP/SL live on-chain."]
+            ["Manage what's open", "ATR ladder banks half at +1.5×ATR, moves the stop to breakeven, trails the rest. Past +1.5%, a flip or a HOLD banks it. Hard TP/SL live on-chain."]
           ].map(([t, d], i) => (
             <div key={t} className="bg-bg-card border border-border-dim rounded-xl p-4">
               <div className="w-7 h-7 rounded bg-bg-input flex items-center justify-center border border-border-dim text-[10px] font-bold mb-2">
@@ -181,9 +191,8 @@ export const StrategyGuide = () => (
         <div className="bg-bg-card border border-border-dim rounded-2xl p-5">
           <div className="max-w-md mx-auto">
             <FlowBox title="⏱ Every 20 minutes">
-              Fetch fresh 1-hour candles and compute all indicators — for the open position's market, or, when
-              flat, for the primary market first and then the other configured markets (SOL → ETH → BTC) until
-              one has an actionable signal. One position slot across all markets.
+              Fetch fresh 1-hour SOL candles and compute all indicators. Other Jupiter markets are scanned only if
+              listed in <span className="font-mono">tokens</span>. One position slot at a time.
             </FlowBox>
             <FlowArrow />
             <FlowBox title="Composite bias Σ">
@@ -197,9 +206,10 @@ export const StrategyGuide = () => (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-1">
             <div>
               <div className="text-center text-[10px] font-mono font-bold text-sky-600 mb-1">ADX ≤ 15 · RANGING</div>
-              <FlowBox tone="blue" title="Mean-reversion fade">
-                Fade a <strong>rejection</strong> off the ~60-min range edge: the bar wicks past the extreme but closes
-                ≥35% of its own range back inside. A mere touch, or a close through the level, never fires — no knife-catching.
+              <FlowBox tone="blue" title="Stand aside (default)">
+                Ranging markets are skipped. The optional mean-reversion fade (<span className="font-mono">meanReversionEnabled</span>,
+                off by default) fades a <strong>rejection</strong> off the ~60-min range edge. In the Mar–Sep 2026 replay it
+                helped only in the Mar–May chop and cut the overall profit factor from 1.38 to 1.12.
               </FlowBox>
             </div>
             <div>
@@ -265,13 +275,14 @@ export const StrategyGuide = () => (
             ))}
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-5">
-            <FlowBox tone="amber" title="Stagnation time-stop (6h)">
-              No scale-out and still under +0.5% (leveraged) after 360 minutes → cut it. Perps borrow fees accrue
+            <FlowBox tone="amber" title="Stagnation time-stop (10h)">
+              No scale-out and still under +0.5% (leveraged) after 600 minutes → cut it. Perps borrow fees accrue
               hourly on notional — a "flat" 19-hour short once realized −1.89% purely from fees.
             </FlowBox>
-            <FlowBox tone="blue" title="In-profit reversal">
-              Signal flips <strong>and</strong> the trade has cleared a ≥1.5% fee/noise buffer → bank it and re-enter the
-              other side. A flip while under water is ignored — the stop governs the downside (no fee-eaten churn).
+            <FlowBox tone="blue" title="Signal exit (reversal or thesis lapse)">
+              Once the trade has cleared a ≥1.5% fee/noise buffer, bank it when the signal <strong>flips</strong> (and
+              re-enter the other side) <strong>or falls back to HOLD</strong>. Under the buffer, signal changes are
+              ignored — the stop governs the downside (no fee-eaten churn).
             </FlowBox>
           </div>
         </div>

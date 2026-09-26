@@ -13,8 +13,29 @@ const {
   fetchMarketNews,
   loadTelegramConfig,
   saveTelegramConfig,
-  CONFIG_FILE
+  CONFIG_FILE,
+  signalSide,
+  signalExitReason,
+  initExitState,
+  evaluateExit,
+  STAGNANT_EXIT_MINUTES,
+  STAGNANT_MIN_PNL_PCT,
+  EXIT_SL_MULT,
+  EXIT_PARTIAL_MULT,
+  EXIT_TRAIL_MULT,
+  EXIT_TP_MULT,
+  EXIT_PARTIAL_FRAC,
+  findOnChainPosition,
+  adoptOnChainPosition,
+  buildTradesFromJupHistory,
+  parseCsv,
+  journalRowsFromSeedCsv,
+  mergeJournalSeed,
+  auditLogToCsv,
+  pruneAuditEntries,
+  AUDIT_RETENTION_DAYS
 } = await import("./server.js");
+const Playbook = await import("./src/lib/strategyPlaybook.ts");
 
 // ANSI Terminal Styling
 const GREEN = "\x1b[32m";
@@ -345,6 +366,279 @@ describe("Automated Margin Trading State Machine & Balance Ledgering", () => {
     }
     
     assert.strictEqual(canEnter, false, "Must not enter LONG immediately after closing a LONG without a trend reset");
+  });
+});
+
+// -------------------------------------------------------------
+// 2026-09 STRATEGY REVIEW — signal side, signal exits, time-stop
+// -------------------------------------------------------------
+describe("Signal side parsing (live daemon)", () => {
+  const it = (global as any).it;
+
+  it("uses the canonical positionSide, never the descriptive action label", () => {
+    assert.strictEqual(signalSide({ positionSide: "LONG", action: "Long Buy" }), "LONG");
+    assert.strictEqual(signalSide({ positionSide: "SHORT", action: "Short Sell" }), "SHORT");
+    // Range-Fade labels used to parse to null — the side must come through.
+    assert.strictEqual(signalSide({ positionSide: "LONG", action: "Range Fade — rejected off 6-bar low $100.00" }), "LONG");
+  });
+
+  it("maps every descriptive HOLD label to HOLD (the old parser returned null for these)", () => {
+    for (const action of ["Hold", "Hold Chop Zone", "Hold (Σ below threshold)", "Hold (ADX is ranging: 12.0 <= 15)", "Hold (extended: px 1.9×ATR from EMA26 > 1.5×ATR — no chasing)"]) {
+      assert.strictEqual(signalSide({ positionSide: "HOLD", action }), "HOLD", action);
+      assert.strictEqual(signalSide({ action }), "HOLD", `fallback: ${action}`);
+    }
+  });
+
+  it("falls back to the action's leading words when positionSide is absent", () => {
+    assert.strictEqual(signalSide({ action: "Long Buy (Oversold)" }), "LONG");
+    assert.strictEqual(signalSide({ action: "Short Sell (Overbought)" }), "SHORT");
+    assert.strictEqual(signalSide(null), "HOLD");
+  });
+});
+
+describe("Signal-driven exits (reversal / thesis lapse)", () => {
+  const it = (global as any).it;
+
+  it("banks a winner when the signal falls back to HOLD (thesis lapse)", () => {
+    assert.strictEqual(signalExitReason("LONG", "HOLD", 2.2, 1.5), "thesis-lapse");
+    assert.strictEqual(signalExitReason("SHORT", "HOLD", 1.5, 1.5), "thesis-lapse");
+  });
+
+  it("flags a true reversal when the signal points the other way", () => {
+    assert.strictEqual(signalExitReason("LONG", "SHORT", 3.0, 1.5), "reversal");
+    assert.strictEqual(signalExitReason("SHORT", "LONG", 1.6, 1.5), "reversal");
+  });
+
+  it("never exits on a signal change below the fee buffer or when the signal agrees", () => {
+    assert.strictEqual(signalExitReason("LONG", "HOLD", 1.49, 1.5), null);
+    assert.strictEqual(signalExitReason("LONG", "SHORT", -2.0, 1.5), null);
+    assert.strictEqual(signalExitReason("LONG", "LONG", 5.0, 1.5), null);
+    assert.strictEqual(signalExitReason("LONG", "HOLD", NaN, 1.5), null);
+  });
+
+  it("scenario: a working long is banked on thesis lapse before the ATR scale-out", () => {
+    // Entry 100, ATR 1 → stop 98.5, partial at 101.5. Price drifts to 100.6 (+1.8% at 3x) and the
+    // extension guard makes the signal HOLD → the shared rule closes it; the exit engine alone would not.
+    const st = initExitState("LONG", 100, 1);
+    const res = evaluateExit(st, 100.6);
+    assert.strictEqual(res.close, null);
+    assert.strictEqual(res.partialFrac, 0);
+    const pnl = (100.6 / 100 - 1) * 100 * 3;
+    assert.strictEqual(signalExitReason("LONG", "HOLD", pnl, 1.5), "thesis-lapse");
+  });
+
+  it("scenario: a losing long with a HOLD signal is left to the stop, not closed early", () => {
+    const st = initExitState("LONG", 100, 1);
+    assert.strictEqual(st.stopPrice, 100 - EXIT_SL_MULT * 1);
+    const pnl = (99.4 / 100 - 1) * 100 * 3;
+    assert.strictEqual(signalExitReason("LONG", "HOLD", pnl, 1.5), null);
+    assert.strictEqual(evaluateExit(st, 99.4).close, null);
+    assert.strictEqual(evaluateExit(st, 98.4).close, "Stop Loss");
+  });
+
+  it("uses a 600-minute stagnation time-stop by default (replay plateau 480–720)", () => {
+    if (process.env.STAGNANT_EXIT_MINUTES) return; // env override in effect
+    assert.strictEqual(STAGNANT_EXIT_MINUTES, 600);
+  });
+});
+
+describe("Orphaned on-chain position recovery", () => {
+  const it = (global as any).it;
+  const cliRow = { positionPubkey: "Pos111", asset: "SOL", side: "long", leverage: 3.02, sizeUsd: 31.4, entryPriceUsd: 119.08, markPriceUsd: 118.5, tpsl: [] };
+
+  it("finds the position for a token (alias-aware) and ignores other markets", () => {
+    assert.strictEqual(findOnChainPosition([cliRow], "SOL")?.positionPubkey, "Pos111");
+    assert.strictEqual(findOnChainPosition([cliRow], "ETH"), null);
+    assert.strictEqual(findOnChainPosition([{ ...cliRow, asset: "WETH" }], "ETH")?.positionPubkey, "Pos111");
+    assert.strictEqual(findOnChainPosition(undefined, "SOL"), null);
+  });
+
+  it("adopts an untracked position with the on-chain entry and a fresh ATR stop", () => {
+    const t = adoptOnChainPosition(cliRow, { token: "SOL", atr: 1.2, leverageFallback: 3, nowIso: "2026-09-23T05:26:00.000Z", reason: "test" });
+    assert.ok(t);
+    assert.strictEqual(t.side, "LONG");
+    assert.strictEqual(t.entryPrice, 119.08);
+    assert.strictEqual(t.leverage, 3);
+    assert.strictEqual(t.mode, "REAL");
+    assert.strictEqual(t.adopted, true);
+    assert.strictEqual(t.partialTaken, false);
+    assert.ok(Math.abs(t.sizeInSol - 31.4 / 119.08) < 1e-9);
+    assert.ok(t.stopPrice < 119.08 && Math.abs(t.stopPrice - (119.08 - EXIT_SL_MULT * t.atrAtEntry)) < 1e-9);
+  });
+
+  it("rejects malformed rows and clamps absurd leverage", () => {
+    assert.strictEqual(adoptOnChainPosition({ ...cliRow, side: "flat" }, { token: "SOL", atr: 1, leverageFallback: 3, nowIso: "", reason: "" }), null);
+    assert.strictEqual(adoptOnChainPosition({ ...cliRow, entryPriceUsd: 0 }, { token: "SOL", atr: 1, leverageFallback: 3, nowIso: "", reason: "" }), null);
+    const hot = adoptOnChainPosition({ ...cliRow, leverage: 20 }, { token: "SOL", atr: 1, leverageFallback: 3, nowIso: "", reason: "" });
+    assert.ok(hot.leverage <= 5);
+  });
+});
+
+describe("On-chain history pairing (journal backfill)", () => {
+  const it = (global as any).it;
+  const inc = (time: string, side: string, price: number, size = 31.4) => ({ time, side, action: "Increase", priceUsd: price, sizeUsd: size, feeUsd: 0.02, signature: `i-${time}` });
+  const dec = (time: string, side: string, price: number, pnlUsd: number, pnlPct: number, size = 31.4) => ({ time, side, action: "Decrease", priceUsd: price, sizeUsd: size, pnlUsd, pnlPct, feeUsd: 0.02, signature: `d-${time}` });
+
+  it("keeps each round trip intact across the real Sep 21 → Sep 23 orphan sequence", () => {
+    const rows = [
+      inc("2026-09-21T05:06:40Z", "LONG", 111.47), dec("2026-09-21T06:26:39Z", "LONG", 112.35, 0.25, 2.4),
+      inc("2026-09-23T05:06:42Z", "LONG", 119.08), dec("2026-09-23T07:44:36Z", "LONG", 117.78, -0.34, -3.3),
+    ];
+    const t = buildTradesFromJupHistory(rows, "SOL");
+    assert.strictEqual(t.length, 2);
+    assert.strictEqual(t[1].entryTime, "2026-09-23T05:06:42Z"); // NOT the Sep 21 entry
+    assert.strictEqual(t[1].entryPrice, 119.08);
+  });
+
+  it("merges a partial scale-out (two Decreases) into ONE trade with summed PnL", () => {
+    const rows = [
+      inc("2026-09-02T03:01:40Z", "SHORT", 100.02, 31.43),
+      dec("2026-09-02T09:41:38Z", "SHORT", 98.67, 0.20, 3.8, 14.8),
+      dec("2026-09-02T09:41:42Z", "SHORT", 98.64, 0.23, 3.9, 16.63),
+    ];
+    const t = buildTradesFromJupHistory(rows, "SOL");
+    assert.strictEqual(t.length, 1);
+    assert.ok(Math.abs(t[0].realizedPnlUsd - (0.18 + 0.21)) < 1e-9); // each leg net of its close fee
+    assert.strictEqual(t[0].exitTime, "2026-09-02T09:41:42Z");
+  });
+
+  it("does not let a stacked open shift later pairings (the old FIFO bug)", () => {
+    const rows = [
+      inc("2026-07-03T21:56:40Z", "LONG", 82.64, 31), inc("2026-07-03T22:01:18Z", "LONG", 82.48, 31),
+      dec("2026-07-03T22:02:05Z", "LONG", 82.51, -0.09, -0.36, 62),
+      inc("2026-07-05T12:27:14Z", "LONG", 80.84), dec("2026-07-06T00:25:59Z", "LONG", 81.15, -0.22, -2.11),
+    ];
+    const t = buildTradesFromJupHistory(rows, "SOL");
+    assert.strictEqual(t.length, 2);
+    assert.strictEqual(t[1].entryTime, "2026-07-05T12:27:14Z");
+  });
+});
+
+describe("Trade journal seed (seed/trade-journal-seed.csv)", () => {
+  const it = (global as any).it;
+  const seedText = fs.readFileSync(path.join(process.cwd(), "seed", "trade-journal-seed.csv"), "utf-8");
+
+  it("parses RFC 4180 CSV (quotes, doubled quotes, embedded commas/newlines)", () => {
+    const rows = parseCsv('a,b,c\n"x, y","say ""hi""","line1\nline2"\r\n1,,3\n');
+    assert.deepStrictEqual(rows, [["a", "b", "c"], ["x, y", 'say "hi"', "line1\nline2"], ["1", "", "3"]]);
+  });
+
+  it("imports every seed row as a verified REAL journal trade with unique ids", () => {
+    const rows = journalRowsFromSeedCsv(seedText);
+    assert.strictEqual(rows.length, 86);
+    assert.strictEqual(new Set(rows.map((r: any) => r.id)).size, 86);
+    for (const r of rows) {
+      assert.ok(r.id.startsWith("csv-"), "seed ids must not use the 'seed-' prefix the backfill deletes");
+      assert.strictEqual(r.mode, "REAL");
+      assert.strictEqual(r.feesReconciled, true);
+      assert.strictEqual(typeof r.realizedPnlUsd, "number");
+    }
+    const newest = rows[0];
+    assert.strictEqual(newest.side, "LONG");
+    assert.strictEqual(newest.leverage, 3);
+    assert.strictEqual(newest.version, "2.0.0");
+    assert.ok(newest.news.length > 1);
+    const gates = rows.find((r: any) => r.exitTime === "2026-09-06T09:17:22.305Z");
+    assert.ok(gates.news.some((n: string) => n.includes('"Pure Mania-Driven Asset."')));
+  });
+
+  it("carries the on-chain-corrected entries for the three untracked positions", () => {
+    const rows = journalRowsFromSeedCsv(seedText);
+    const byExit = (iso: string) => rows.find((r: any) => r.exitTime === iso);
+    assert.strictEqual(byExit("2026-09-23T07:44:36.000Z").entryPrice, 119.08);
+    assert.strictEqual(byExit("2026-09-06T15:01:54.000Z").entryTime, "2026-09-06T14:17:25.000Z");
+    assert.strictEqual(byExit("2026-08-25T12:03:16.000Z").entryPrice, 100.56);
+  });
+
+  it("merges idempotently and skips trades the store already holds", () => {
+    const seed = journalRowsFromSeedCsv(seedText);
+    const first = mergeJournalSeed([], seed);
+    assert.strictEqual(first.added, 86);
+    const again = mergeJournalSeed(first.store, seed);
+    assert.strictEqual(again.added, 0);
+    // An on-chain backfilled copy of the newest trade (exit 30s apart) must suppress its seed row.
+    const onChain = { id: "jup-abc", source: "Auto-Trade (Jupiter)", side: "LONG", token: "SOL", exitTime: "2026-09-25T14:26:43.000Z" };
+    const withChain = mergeJournalSeed([onChain], seed);
+    assert.strictEqual(withChain.added, 85);
+  });
+});
+
+describe("Audit log retention & CSV export", () => {
+  const it = (global as any).it;
+
+  it("keeps 30 days by default and drops older entries", () => {
+    assert.strictEqual(AUDIT_RETENTION_DAYS, Number(process.env.AUDIT_RETENTION_DAYS) || 30);
+    const now = Date.parse("2026-09-26T12:00:00Z");
+    const entries = [
+      { timestamp: "2026-09-26T11:00:00Z", message: "fresh" },
+      { timestamp: "2026-08-28T12:00:01Z", message: "29.99 days" },
+      { timestamp: "2026-08-27T11:59:59Z", message: "30+ days" },
+      { timestamp: "garbage", message: "bad" },
+    ];
+    assert.deepStrictEqual(pruneAuditEntries(entries, now, 30).map((e: any) => e.message), ["fresh", "29.99 days"]);
+  });
+
+  it("exports CSV with a header and correct escaping", () => {
+    const csv = auditLogToCsv([
+      { timestamp: "2026-09-26T11:00:00Z", source: "Auto-Trade", type: "trade", version: "2.0.0", message: 'CLOSE LONG @ $119.85 — "Thesis Lapse", banked +2.2%' },
+      { timestamp: "2026-09-26T10:40:00Z", source: "Auto-Trade", type: "hold", message: "line1\nline2" },
+    ]);
+    const rows = parseCsv(csv);
+    assert.deepStrictEqual(rows[0], ["Timestamp (UTC)", "Source", "Type", "Version", "Message"]);
+    assert.strictEqual(rows[1][4], 'CLOSE LONG @ $119.85 — "Thesis Lapse", banked +2.2%');
+    assert.strictEqual(rows[2][4], "line1\nline2");
+    assert.strictEqual(rows[2][3], "");
+  });
+});
+
+describe("In-app Strategy Playbook parity (src/lib/strategyPlaybook.ts vs server.ts)", () => {
+  const it = (global as any).it;
+  const P = Playbook.PLAYBOOK;
+
+  it("uses the server's exit constants", () => {
+    assert.strictEqual(P.SL, EXIT_SL_MULT);
+    assert.strictEqual(P.PARTIAL, EXIT_PARTIAL_MULT);
+    assert.strictEqual(P.FRAC, EXIT_PARTIAL_FRAC);
+    assert.strictEqual(P.TRAIL, EXIT_TRAIL_MULT);
+    assert.strictEqual(P.TP, EXIT_TP_MULT);
+    if (!process.env.STAGNANT_EXIT_MINUTES) assert.strictEqual(P.STAG_MIN, STAGNANT_EXIT_MINUTES);
+    assert.strictEqual(P.STAG_PNL, STAGNANT_MIN_PNL_PCT);
+  });
+
+  for (const sc of Playbook.SCENARIOS) {
+    it(`scenario "${sc.name}" closes exactly as the live daemon's rules would`, () => {
+      const run = Playbook.simulate(sc);
+      if (!sc.side) {
+        assert.strictEqual(run.closed, null);
+        assert.ok(run.frames.every((f: any) => f.pnl === null));
+        return;
+      }
+      // Drive the SERVER's functions in the daemon's order: price exits → signal exit → time-stop.
+      let st = initExitState(sc.side, P.ENTRY, P.ATR);
+      let banked = 0, rem = 1, expected: any = null;
+      const lev = (px: number) => (sc.side === "LONG" ? px / P.ENTRY - 1 : 1 - px / P.ENTRY) * 100 * P.LEV;
+      for (let i = 1; i < sc.px.length && !expected; i++) {
+        const px = sc.px[i];
+        const r = evaluateExit(st, px);
+        st = r.state;
+        if (r.partialFrac > 0) { banked += lev(px) * r.partialFrac; rem -= r.partialFrac; }
+        const total = banked + rem * lev(px);
+        if (r.close) { expected = { i, total, kind: r.close === "Trailing Stop" ? "trail" : r.close === "Take Profit Cap" ? "tp" : "stop" }; break; }
+        const why = signalExitReason(sc.side, sc.sig[i], lev(px), P.BUFFER);
+        if (why) { expected = { i, total, kind: why }; break; }
+        if (!st.partialTaken && i * P.TICK_MIN >= STAGNANT_EXIT_MINUTES && lev(px) < STAGNANT_MIN_PNL_PCT) { expected = { i, total, kind: "time" }; break; }
+      }
+      assert.ok(expected, "server rules should close every trading scenario");
+      assert.ok(run.closed, "playbook should close the trade");
+      assert.strictEqual(run.closed.i, expected.i);
+      assert.strictEqual(run.closed.kind, expected.kind);
+      assert.ok(Math.abs(run.closed.total - expected.total) < 1e-9, `P&L ${run.closed.total} vs ${expected.total}`);
+    });
+  }
+
+  it("covers every exit type the daemon has", () => {
+    const kinds = new Set(Playbook.SCENARIOS.map((s: any) => Playbook.simulate(s).closed?.kind).filter(Boolean));
+    for (const k of ["trail", "stop", "thesis-lapse", "reversal", "time"]) assert.ok(kinds.has(k), `missing ${k}`);
   });
 });
 

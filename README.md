@@ -1,16 +1,17 @@
 # Cortex Alpha — Solana Trade Classifier
 
-A quantitative trading dashboard + autonomous trading daemon for **SOL / ETH / BTC perpetuals**.
-A composite technical bias (MACD + RSI + Supertrend) drives a **regime-switched** strategy —
-momentum when the market trends, mean-reversion range-fades when it chops — executed on
-**Jupiter Perps** via the `jup` CLI, with a fully **on-chain-verified trade journal**. Trade
-frequency comes from **breadth** (scanning three markets with the same validated 1h strategy),
-never from lower per-trade quality; the bot holds at most **one position at a time** across all
-markets.
+A quantitative trading dashboard + autonomous trading daemon for **SOL perpetuals** (Solana-only
+since 2026-08-16; ETH/BTC can be opted back in via `config.tokens`). A composite technical bias
+(MACD + RSI + Supertrend) drives a **momentum** strategy that trades only strong trends and stands
+aside in chop. It executes on **Jupiter Perps** via the `jup` CLI and keeps a fully
+**on-chain-verified trade journal**. The bot holds at most **one position at a time**.
+Mean-reversion range fades exist but are **opt-in** (`meanReversionEnabled`). In the Mar–Sep 2026
+replay they cut the overall profit factor from 1.38 to 1.12.
 
 - **Full strategy write-up:** [docs/STRATEGY.md](docs/STRATEGY.md)
 - **Backtest methodology & results:** [STRATEGY_RESULTS.md](STRATEGY_RESULTS.md)
 - **API reference:** [docs/API.md](docs/API.md) · **Testing:** [docs/TESTING.md](docs/TESTING.md)
+- **In the app:** the **Strategy** tab opens with an animated playbook of seven scenarios: scale-out and trail, thesis lapse, stop loss, time stop, reversal, adopted orphan, and stand aside. They are played by the live exit rules and parity-tested against `server.ts`.
 
 > ⚠️ Backtest numbers are in-sample and optimistic. The honest expectation is
 > break-even-to-slightly-positive pre-fees. Expect **~3–4 trades/week in trending markets and
@@ -24,14 +25,14 @@ Every **20 minutes** the daemon pulls fresh **1-hour candles** and asks four que
 1. **Is there a directional bias?** A weighted composite Σ of MACD, RSI and Supertrend must exceed
    ±0.25 conviction.
 2. **What kind of market is this?** ADX(14) routes the decision: strong trend (>25) → momentum
-   entry; ranging (≤15) → fade a rejection off the range edge; in between (15–25) → **stand aside**
-   (weak-trend entries lost to fees in every backtest variant). If the primary market has no
-   actionable signal, the daemon **scans the other configured markets (SOL → ETH → BTC)** with the
-   identical gates and lets the first qualifying candidate take the single position slot.
+   entry; anything weaker → **stand aside** (weak-trend entries lost to fees in every backtest
+   variant; the ranging-market fade is off by default).
 3. **Is the entry safe?** Trend-alignment, no-chasing, macro, cooldown and pyramiding gates all
    have to agree.
 4. **If a position is open — manage it.** An ATR-scaled ladder banks half at +1.5×ATR, moves the
    stop to breakeven, and trails the rest. Hard TP/SL live **on-chain** from the moment of entry.
+   Once a trade is +1.5% up, it is banked as soon as the signal stops supporting it. If the wallet
+   ever holds a position the daemon isn't tracking, the daemon adopts and manages it.
 
 ## Timeframes — what interval is used for what
 
@@ -46,9 +47,10 @@ Every **20 minutes** the daemon pulls fresh **1-hour candles** and asks four que
 | **200 × 1h bars (~8 days)** | 200-EMA primary-trend regime (long above / short below) | `useRegimeFilter` |
 | **5 days** | Macro regime: DXY / 10-Y yield / VIX trend → RISK-ON / OFF / NEUTRAL | `useMacroFilter` |
 | **30 min / 45 min / 6 h** | Entry cooldown / two-loss pause / circuit-breaker auto-reset | risk rails |
-| **360 min** | Stagnation time-stop: still under +0.5% and no scale-out → cut it (perps borrow fees bleed ~0.087%/h even when price goes nowhere) | `STAGNANT_EXIT_MINUTES` |
+| **600 min** | Stagnation time-stop: still under +0.5% and no scale-out → cut it (perps borrow fees accrue hourly even when price goes nowhere). Raised from 360 after the Sep 2026 replay | `STAGNANT_EXIT_MINUTES` |
+| **30 days** | Audit-log retention: every daemon decision, exportable as CSV (`/api/audit-log?format=csv`, or the audit panel's Export button) | `AUDIT_RETENTION_DAYS` |
 | **rolling 24 h** | Max 6 position opens across all markets | `MAX_OPENS_PER_24H` |
-| **per cycle** | Multi-market scan order when flat: primary token first, then the other configured markets | `tokens` (default SOL, ETH, BTC — Jupiter Perps' complete market universe) |
+| **per cycle** | Markets scanned when flat: primary token first, then any others in `tokens` | `tokens` (default SOL only) |
 
 **Why 1h and not 5m/15m?** Round-trip fees + hourly borrow cost ~0.35% per trade, while sub-hourly
 ATR targets are only ~0.5–0.9% — the Mar–Jul 2026 sweep found **every** sub-hourly entry variant
@@ -95,11 +97,11 @@ entry − 1.5×ATR ── INITIAL HARD STOP ── loss cap, live ON-CHAIN from 
 
 Two additional exits live outside the ladder:
 
-- **Stagnation time-stop** — no scale-out and still under +0.5% (leveraged) after **6 hours** →
+- **Stagnation time-stop** — no scale-out and still under +0.5% (leveraged) after **10 hours** →
   cut it before borrow fees eat it (a 19h "flat" short once realized −1.89% purely from fees).
-- **In-profit reversal** — the signal flips *and* the trade has cleared a ≥1.5% fee/noise buffer →
-  bank it and re-enter the opposite side. A flip while under water is ignored; the stop governs
-  the downside (prevents fee-eaten micro-loss churn).
+- **Signal exit** — once the trade has cleared a ≥1.5% fee/noise buffer, bank it when the signal
+  **flips** (reversal, may re-enter the other side) **or falls back to HOLD** (thesis lapse). A
+  signal change while under the buffer is ignored; the stop governs the downside.
 
 ## What if the market flips violently between checks?
 
